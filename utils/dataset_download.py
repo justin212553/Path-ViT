@@ -265,8 +265,8 @@ def _download_annotations(
 
 
 def _parse_args() -> argparse.Namespace:
-    # $DATA_ROOT 환경 변수 우선, 없으면 ../data
-    default_root = os.environ.get("DATA_ROOT", "../data")
+    # $DATA_ROOT 환경 변수 우선, 없으면 ./data
+    default_root = os.environ.get("DATA_ROOT", "./data")
 
     parser = argparse.ArgumentParser(
         description="CAMELYON17 WSI 다운로드 (클러스터 지원)",
