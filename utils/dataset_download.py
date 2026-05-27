@@ -34,17 +34,25 @@ BASE_URL   = (
     "https://s3.ap-northeast-1.wasabisys.com/gigadb-datasets/live/pub/"
     "10.5524/100001_101000/100439/CAMELYON17/training"
 )
+ANNO_URL   = (
+    "https://s3.ap-northeast-1.wasabisys.com/gigadb-datasets/live/pub/"
+    "10.5524/100001_101000/100439/CAMELYON17/training/lesion_annotations.zip"
+)
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
 # eval / train 환자 목록
+# annotation 있는 환자 전체 (43명, 50 slides)
+# 이미 보유 중인 004, 012, 021은 디렉토리 존재로 자동 건너뜀
 EVAL_PATIENTS = [
-     9, 10, 15, 16, 17,
-    20, 22, 24, 34, 36, 38, 39,
+     4,  9, 10, 12, 15, 16, 17,
+    20, 21, 22, 24, 34, 36, 38, 39,
     40, 41, 42, 44, 45, 46, 48, 51, 52,
     60, 61, 62, 64, 66, 67, 68, 72, 73, 75,
     80, 81, 86, 87, 88, 89, 92, 96, 99,
 ]
-TRAIN_PATIENTS = [6, 14, 26]
+# 기존 보유 7명 + 보충 3명(006, 014, 026) = 10명
+# 이미 보유 중인 000, 001, 005, 007, 008, 013, 019는 자동 건너뜀
+TRAIN_PATIENTS = [0, 1, 5, 6, 7, 8, 13, 14, 19, 26]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -197,6 +205,65 @@ def _run(
     return done, failed
 
 
+def _download_annotations(
+    data_root: Path,
+    logger: logging.Logger,
+    keep_zip: bool = False,
+    use_tqdm: bool = True,
+) -> bool:
+    """lesion_annotations.zip 다운로드 후 data/lesion_annotations/ 에 압축 해제."""
+    anno_dir = data_root / "lesion_annotations"
+    zip_path = data_root / "lesion_annotations.zip"
+
+    if anno_dir.exists() and any(anno_dir.glob("*.xml")):
+        logger.info(f"SKIP   lesion_annotations/ (이미 존재: {len(list(anno_dir.glob('*.xml')))}개 XML)")
+        return True
+
+    anno_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"START  lesion_annotations.zip")
+    try:
+        with requests.get(ANNO_URL, stream=True, timeout=60) as resp:
+            resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0))
+            with (
+                open(zip_path, "wb") as f,
+                tqdm(
+                    total=total or None,
+                    unit="B", unit_scale=True, unit_divisor=1024,
+                    desc="lesion_annotations", leave=True,
+                    disable=not use_tqdm,
+                ) as bar,
+            ):
+                for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
+                    f.write(chunk)
+                    bar.update(len(chunk))
+
+        logger.info(f"UNZIP  lesion_annotations.zip → {anno_dir}")
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            # zip 내부 구조에 관계없이 XML 파일만 anno_dir 바로 아래로 추출
+            for member in zf.namelist():
+                if member.endswith(".xml"):
+                    zf.extract(member, data_root)
+                    extracted = data_root / member
+                    target    = anno_dir / extracted.name
+                    if extracted != target:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        extracted.replace(target)
+
+        if not keep_zip:
+            zip_path.unlink()
+
+        xml_count = len(list(anno_dir.glob("*.xml")))
+        logger.info(f"DONE   lesion_annotations/ ({xml_count}개 XML)")
+        return True
+
+    except Exception as exc:
+        logger.error(f"FAIL   lesion_annotations.zip: {exc}")
+        zip_path.unlink(missing_ok=True)
+        return False
+
+
 def _parse_args() -> argparse.Namespace:
     # $DATA_ROOT 환경 변수 우선, 없으면 ../data
     default_root = os.environ.get("DATA_ROOT", "../data")
@@ -271,6 +338,9 @@ def main():
     logger.info(f"  keep_zip  : {args.keep_zip}")
     logger.info(f"  tqdm      : {use_tqdm}")
     logger.info("=" * 60)
+
+    # lesion_annotations 먼저 다운로드
+    _download_annotations(data_root, logger, keep_zip=args.keep_zip, use_tqdm=use_tqdm)
 
     done, failed = _run(
         tasks,
