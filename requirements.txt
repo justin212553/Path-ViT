@@ -6,6 +6,7 @@ pandas>=2.0.0
 scikit-learn>=1.3.0
 matplotlib>=3.7.0
 tqdm>=4.65.0
+requests
 
 # 전처리(data/preprocess.py) 실행 시에만 필요
 # openslide-python
