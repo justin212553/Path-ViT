@@ -3,6 +3,7 @@ data/wsi_eval
 data/patches
 data/lesion_annotations
 
+.venv
 .vscode
 .claude
 __pycache__
