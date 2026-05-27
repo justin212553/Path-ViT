@@ -1,0 +1,10 @@
+data/wsi_train
+data/wsi_eval
+data/patches
+data/lesion_annotations
+
+.vscode
+.claude
+__pycache__
+
+*.log

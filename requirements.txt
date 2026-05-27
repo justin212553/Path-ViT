@@ -1,0 +1,12 @@
+torch>=2.1.0
+torchvision>=0.16.0
+numpy>=1.24.0
+Pillow>=10.0.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+matplotlib>=3.7.0
+tqdm>=4.65.0
+
+# 전처리(data/preprocess.py) 실행 시에만 필요
+# openslide-python
+# h5py>=3.9.0  (더 이상 사용 안 함 — JPEG로 전환)
