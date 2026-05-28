@@ -1,17 +1,17 @@
 """
-사전 추출된 JPEG 패치를 로딩하는 Dataset.
+CAMELYON17 패치 데이터셋 (wsi_train 기반)
 
-data/preprocess.py 로 생성된 출력 디렉토리를 사용한다.
-OpenSlide 의존성 없음.
+stage_labels.csv 에서 환자 이름과 노드별 stage를 읽고,
+wsi_train/<patient_name>/ 하위 패치를 로딩한다.
 
 반환 형식:
-    patches:      (N, 3, H, W)  float32
-    coords:       (N, 2)        int64   [row, col]
-    patch_labels: (N,)          int64   (-1 = unknown)
-    label:        ()            int64
-    slide_id:     str
-    center_id:    int
+    patches:     (N, 3, H, W)  float32
+    coords:      (N, 2)        int64   [row, col]  (파일명 r####_c#### 파싱)
+    label:       ()            int64   (0 = pN0/pN0(i+), 1 = pN1mi/pN1/pN2)
+    patient_id:  str
+    node_stages: dict[int, str]   {node_idx: stage}
 """
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -20,64 +20,106 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from config import DataConfig
+
+STAGE_TO_LABEL = {
+    "pN0":     0,
+    "pN0(i+)": 0,
+    "pN1mi":   1,
+    "pN1":     1,
+    "pN2":     1,
+}
+
 PATCH_TRANSFORM = transforms.Compose([
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
 ])
+
+_COORD_RE = re.compile(r"r(\d+)_c(\d+)")
+
+
+def _parse_coord(name: str) -> tuple[int, int]:
+    m = _COORD_RE.search(name)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
 class CAMELYON17PatchDataset(Dataset):
     """
-    preprocess.py 로 생성된 JPEG 패치를 로딩한다.
-
     Args:
-        preprocessed_root: slide_index.csv / patch_index.csv 가 있는 디렉토리
-        split:             "train" | "val" | "test"
-        val_centers:       validation 으로 사용할 center ID 튜플
-        transform:         패치에 적용할 torchvision transform
+        cfg:       DataConfig (wsi_root, csv_path, val_centers 참조)
+        split:     "train" | "val" | "test"
+        transform: 패치에 적용할 transform
     """
 
     def __init__(
         self,
-        preprocessed_root: str,
+        cfg: DataConfig,
         split: str = "train",
-        val_centers: tuple = (1,),
         transform=None,
     ):
+        if split == "test":
+            # TODO: test split 구현
+            raise NotImplementedError("test split is not implemented yet")
+
         self.transform = transform or PATCH_TRANSFORM
-        root = Path(preprocessed_root)
+        self.wsi_root  = Path(cfg.wsi_root)
 
-        slide_index = pd.read_csv(root / "slide_index.csv")
-        if split == "train":
-            slide_index = slide_index[~slide_index["center_id"].isin(val_centers)]
-        elif split == "val":
-            slide_index = slide_index[slide_index["center_id"].isin(val_centers)]
+        df = pd.read_csv(cfg.csv_path)
 
-        self.slides = slide_index.reset_index(drop=True)
+        # patient-level rows: patient_NNN.zip
+        patient_df = df[df["patient"].str.endswith(".zip")].copy()
+        patient_df["patient_id"] = patient_df["patient"].str.replace(".zip", "", regex=False)
+        patient_df["center"] = (
+            patient_df["patient_id"]
+            .str.extract(r"patient_(\d+)")[0]
+            .astype(int) // 20
+        )
+        patient_df["label"] = patient_df["stage"].map(STAGE_TO_LABEL)
 
-        patch_index = pd.read_csv(root / "patch_index.csv")
-        self.patch_groups = {
-            sid: grp.reset_index(drop=True)
-            for sid, grp in patch_index.groupby("slide_id")
-        }
+        # node-level rows: patient_NNN_node_M.tif
+        node_df = df[df["patient"].str.endswith(".tif")].copy()
+        node_df["patient_id"] = node_df["patient"].str.extract(r"(patient_\d+)_node")[0]
+        node_df["node"]       = node_df["patient"].str.extract(r"node_(\d+)")[0].astype(int)
+
+        self._node_stages: dict[str, dict[int, str]] = {}
+        for pid, grp in node_df.groupby("patient_id"):
+            self._node_stages[pid] = dict(zip(grp["node"], grp["stage"]))
+
+        # train/val split by center
+        in_val = patient_df["center"].isin(cfg.val_centers)
+        rows   = patient_df[in_val if split == "val" else ~in_val]
+
+        # 실제 디렉토리가 존재하는 환자만 사용
+        self.patients = rows[
+            rows["patient_id"].apply(lambda p: (self.wsi_root / p).is_dir())
+        ].reset_index(drop=True)
 
     def __len__(self) -> int:
-        return len(self.slides)
+        return len(self.patients)
 
     def __getitem__(self, idx: int) -> dict:
-        slide = self.slides.iloc[idx]
-        grp   = self.patch_groups[slide["slide_id"]]
+        row        = self.patients.iloc[idx]
+        patient_id = row["patient_id"]
+        patch_dir  = self.wsi_root / patient_id
+
+        patch_paths = sorted(
+            list(patch_dir.rglob("*.png")) + list(patch_dir.rglob("*.jpg"))
+        )
 
         patches_t = torch.stack([
-            self.transform(Image.open(row["filename"]).convert("RGB"))
-            for _, row in grp.iterrows()
+            self.transform(Image.open(p).convert("RGB"))
+            for p in patch_paths
         ])
+        coords = torch.tensor(
+            [_parse_coord(p.name) for p in patch_paths],
+            dtype=torch.long,
+        )
 
         return {
-            "patches":      patches_t,
-            "coords":       torch.tensor(grp[["row", "col"]].values, dtype=torch.long),
-            "patch_labels": torch.tensor(grp["patch_label"].values,  dtype=torch.long),
-            "label":        torch.tensor(slide["label"],              dtype=torch.long),
-            "slide_id":     slide["slide_id"],
-            "center_id":    int(slide["center_id"]),
+            "patches":     patches_t,
+            "coords":      coords,
+            "label":       torch.tensor(row["label"], dtype=torch.long),
+            "patient_id":  patient_id,
+            "node_stages": self._node_stages.get(patient_id, {}),
         }

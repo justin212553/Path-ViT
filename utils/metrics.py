@@ -83,5 +83,5 @@ def compute_all_metrics(
 
     return {
         f"top_{k}_retrieval_rate": top_k,
-        **{f"sens@fpr{int(target_fpr*100)}_{k}": v for k, v in sens.items()},
+        **{f"sens@fpr{int(target_fpr*100)}_{name}": v for name, v in sens.items()},
     }

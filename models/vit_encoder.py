@@ -4,7 +4,6 @@ ViT Encoder with 2D Spatial Position Embedding
 - Transformer Encoder로 Global Spatial Context 연산
 - 출력: 정제된 이미지 토큰 H_img
 """
-import math
 import torch
 import torch.nn as nn
 
@@ -17,13 +16,8 @@ class SpatialPositionEmbedding(nn.Module):
 
     def __init__(self, max_grid_size: int = 64, embed_dim: int = 512):
         super().__init__()
-        # TODO: Sinusoidal embedding vs Learned embedding 비교 실험
-        # 현재: Learned 2D embedding (row + col 분리 후 합산)
         self.row_embed = nn.Embedding(max_grid_size, embed_dim // 2)
         self.col_embed = nn.Embedding(max_grid_size, embed_dim // 2)
-
-        # TODO: max_grid_size를 초과하는 슬라이드 처리 방법 결정
-        #       (e.g., interpolation, dynamic sizing)
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """
@@ -66,8 +60,6 @@ class ViTEncoder(nn.Module):
         # [CLS] 토큰: 슬라이드 전체를 대표하는 글로벌 표현
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-        # TODO: [CLS] 토큰 대신 GAP(Global Average Pooling) 방식과 성능 비교
 
     def forward(
         self, patch_tokens: torch.Tensor, coords: torch.Tensor

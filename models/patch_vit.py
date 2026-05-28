@@ -17,7 +17,7 @@ from config import ModelConfig
 class PatchViT(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.cnn = CNNEncoder(cfg.cnn_backbone, cfg.embed_dim)
+        self.cnn = CNNEncoder(cfg.embed_dim)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
                               cfg.max_grid_size)

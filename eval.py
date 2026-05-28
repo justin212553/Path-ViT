@@ -17,11 +17,7 @@ def evaluate(checkpoint: str, cfg: Config | None = None):
         cfg = Config()
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
-    dataset = CAMELYON17PatchDataset(
-        preprocessed_root=cfg.data.preprocessed_root,
-        split="val",
-        val_centers=cfg.data.val_centers,
-    )
+    dataset = CAMELYON17PatchDataset(cfg.data, split="val")
     loader = DataLoader(dataset, batch_size=1, shuffle=False)
 
     model = PatchViT(cfg.model).to(device)

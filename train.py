@@ -65,16 +65,8 @@ def main():
     set_seed(cfg.train.seed)
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
-    train_ds = CAMELYON17PatchDataset(
-        preprocessed_root=cfg.data.preprocessed_root,
-        split="train",
-        val_centers=cfg.data.val_centers,
-    )
-    val_ds = CAMELYON17PatchDataset(
-        preprocessed_root=cfg.data.preprocessed_root,
-        split="val",
-        val_centers=cfg.data.val_centers,
-    )
+    train_ds = CAMELYON17PatchDataset(cfg.data, split="train")
+    val_ds   = CAMELYON17PatchDataset(cfg.data, split="val")
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True,
                               num_workers=cfg.data.num_workers)
     val_loader   = DataLoader(val_ds,   batch_size=1, shuffle=False,

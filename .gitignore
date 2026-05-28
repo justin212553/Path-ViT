@@ -3,6 +3,8 @@ data/wsi_eval
 data/patches
 data/lesion_annotations
 
+utils/data
+
 .venv
 .vscode
 .claude
