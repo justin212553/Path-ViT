@@ -13,6 +13,7 @@ CAMELYON17 데이터 압축 해제 스크립트
     wsi_eval/
       patient_004/  ...
 """
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -44,7 +45,8 @@ def _extract_zip_flat(zip_path: Path, out_dir: Path) -> None:
                     target.mkdir(parents=True, exist_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(zf.read(info.filename))
+                    with zf.open(info.filename) as src, target.open("wb") as dst:
+                        shutil.copyfileobj(src, dst)
         else:
             out_dir.mkdir(parents=True, exist_ok=True)
             zf.extractall(out_dir)
