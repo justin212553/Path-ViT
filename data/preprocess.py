@@ -15,6 +15,7 @@ CAMELYON17 WSI → 패치 사전 추출 스크립트
 """
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import multiprocessing as mp
 
 import numpy as np
 import pandas as pd
@@ -29,6 +30,7 @@ TISSUE_THRESHOLD  = 0.5
 OVERLAP_THRESHOLD = 0.5
 MAX_PATCHES       = 2000
 SEED              = 42
+NUM_WORKERS       = 16
 # ─────────────────────────────────────────────────────────────────────────────
 
 _STAGE_TO_LABEL = {
@@ -150,57 +152,87 @@ def _build_slide_list(stage_map: dict) -> list:
     return slides
 
 
+def _process_slide(args):
+    """
+    단일 슬라이드를 처리하는 워커 함수.
+    Returns (slide_record | None, patch_records)
+    """
+    info, seed = args
+    slide_dir = OUT_DIR / info["slide_id"]
+
+    if slide_dir.exists():
+        patch_records = []
+        for jpg in sorted(slide_dir.glob("*.png")):
+            parts = jpg.stem.split("_")
+            row = int(parts[0][1:])
+            col = int(parts[1][1:])
+            patch_records.append({
+                "slide_id":    info["slide_id"],
+                "filename":    str(jpg),
+                "row":         row,
+                "col":         col,
+                "patch_label": -1,
+            })
+        slide_record = {
+            "slide_id":  info["slide_id"],
+            "label":     info["label"],
+            "center_id": info["center_id"],
+        }
+        return slide_record, patch_records, True  # skipped=True
+
+    try:
+        rng = np.random.default_rng(seed)
+        patches, coords, labels = _extract_slide(
+            info["slide_path"], info["xml_path"], rng
+        )
+        recs = _save_patches(slide_dir, patches, coords, labels)
+        for r in recs:
+            r["slide_id"] = info["slide_id"]
+        slide_record = {
+            "slide_id":  info["slide_id"],
+            "label":     info["label"],
+            "center_id": info["center_id"],
+        }
+        return slide_record, recs, False
+    except Exception as exc:
+        print(f"ERROR {info['slide_id']}: {exc}")
+        return None, [], False
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    rng       = np.random.default_rng(SEED)
     stage_map = _load_stage_map(ROOT)
     slides    = _build_slide_list(stage_map)
 
-    try:
-        from tqdm import tqdm
-        iterator = tqdm(slides, desc="Extracting patches", unit="slide")
-    except ImportError:
-        iterator = slides
+    # 슬라이드별로 독립된 시드 생성 (재현성 보장)
+    seed_seq = np.random.SeedSequence(SEED)
+    seeds = seed_seq.spawn(len(slides))
+    seeds = [int(s.generate_state(1)[0]) for s in seeds]
+
+    args = list(zip(slides, seeds))
 
     slide_records = []
     patch_records = []
 
-    for info in iterator:
-        slide_dir = OUT_DIR / info["slide_id"]
+    try:
+        from tqdm import tqdm
+        use_tqdm = True
+    except ImportError:
+        use_tqdm = False
 
-        if slide_dir.exists():
-            print(f"skip (exists): {info['slide_id']}")
-            # 기존 patch 레코드 복원
-            for jpg in sorted(slide_dir.glob("*.png")):
-                parts = jpg.stem.split("_")
-                row = int(parts[0][1:])
-                col = int(parts[1][1:])
-                patch_records.append({
-                    "slide_id":    info["slide_id"],
-                    "filename":    str(jpg),
-                    "row":         row,
-                    "col":         col,
-                    "patch_label": -1,  # skip 시 label 미복원
-                })
-        else:
-            try:
-                patches, coords, labels = _extract_slide(
-                    info["slide_path"], info["xml_path"], rng
-                )
-                recs = _save_patches(slide_dir, patches, coords, labels)
-                for r in recs:
-                    r["slide_id"] = info["slide_id"]
-                patch_records.extend(recs)
-            except Exception as exc:
-                print(f"ERROR {info['slide_id']}: {exc}")
+    with mp.Pool(processes=NUM_WORKERS) as pool:
+        results = pool.imap_unordered(_process_slide, args)
+        if use_tqdm:
+            results = tqdm(results, total=len(slides), desc="Extracting patches", unit="slide")
+
+        for slide_record, patch_recs, skipped in results:
+            if slide_record is None:
                 continue
-
-        slide_records.append({
-            "slide_id":  info["slide_id"],
-            "label":     info["label"],
-            "center_id": info["center_id"],
-        })
+            if skipped:
+                print(f"skip (exists): {slide_record['slide_id']}")
+            slide_records.append(slide_record)
+            patch_records.extend(patch_recs)
 
     pd.DataFrame(slide_records).to_csv(OUT_DIR / "slide_index.csv", index=False)
     pd.DataFrame(patch_records).to_csv(OUT_DIR / "patch_index.csv", index=False)
@@ -208,4 +240,5 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.freeze_support()  # Windows 멀티프로세싱 필수
     main()
