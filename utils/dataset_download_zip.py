@@ -185,7 +185,7 @@ def _download_annotations(
 def _run(
     tasks: list[tuple[int, Path]],
     logger: logging.Logger,
-    max_workers: int = 5,
+    max_workers: int = 3,
     retries: int = 3,
     use_tqdm: bool = True,
 ) -> tuple[list[int], list[int]]:
@@ -213,7 +213,7 @@ def _parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--data-root", default=default_root)
-    parser.add_argument("--workers",   type=int, default=5)
+    parser.add_argument("--workers",   type=int, default=3)
     parser.add_argument("--retries",   type=int, default=3)
     parser.add_argument("--eval-only",  action="store_true")
     parser.add_argument("--train-only", action="store_true")

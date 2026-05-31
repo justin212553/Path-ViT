@@ -2,8 +2,7 @@
 CAMELYON17 데이터 압축 해제 스크립트
 
 동작 순서:
-  1. data/data.zip → data/ 에 해제  (wsi_train/, wsi_eval/ 생성)
-  2. wsi_train/*.zip, wsi_eval/*.zip → patient_NNN/ 디렉토리로 해제
+  1. wsi_train/*.zip, wsi_eval/*.zip → patient_NNN/ 디렉토리로 해제
 
 결과 구조 (patch_dataset.py 기대 형식):
   data/
@@ -75,19 +74,8 @@ def main() -> None:
     if not DATA_ROOT.is_dir():
         raise FileNotFoundError(f"data 디렉토리를 찾을 수 없음: {DATA_ROOT}")
 
-    # ── 1단계: data.zip 해제 ──────────────────────────────────────────────────
-    data_zip = DATA_ROOT / "data.zip"
-    if data_zip.exists():
-        print(f"[1/2] data.zip 해제 → {DATA_ROOT}/")
-        with zipfile.ZipFile(data_zip) as zf:
-            zf.extractall(DATA_ROOT)
-        data_zip.unlink()
-        print(f"  [DEL]   data.zip")
-    else:
-        print(f"[1/2] data.zip 없음 — 건너뜀")
-
-    # ── 2단계: wsi_train / wsi_eval 안의 patient zip 해제 ────────────────────
-    print("[2/2] patient zip 해제")
+    # ── wsi_train / wsi_eval 안의 patient zip 해제 ───────────────────────────
+    print("[1/1] patient zip 해제")
     for subdir in ("wsi_train", "wsi_eval"):
         target = DATA_ROOT / subdir
         if not target.is_dir():
