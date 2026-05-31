@@ -23,7 +23,7 @@ import openslide
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 ROOT              = Path("./data/")
-OUT_DIR           = Path("./data/patches")
+OUT_DIR           = Path("./data/patches_train")
 PATCH_SIZE        = 256
 PATCH_LEVEL       = 0
 TISSUE_THRESHOLD  = 0.5
@@ -213,7 +213,6 @@ def main():
     args = list(zip(slides, seeds))
 
     slide_records = []
-    patch_records = []
 
     try:
         from tqdm import tqdm
@@ -232,11 +231,9 @@ def main():
             if skipped:
                 print(f"skip (exists): {slide_record['slide_id']}")
             slide_records.append(slide_record)
-            patch_records.extend(patch_recs)
 
     pd.DataFrame(slide_records).to_csv(OUT_DIR / "slide_index.csv", index=False)
-    pd.DataFrame(patch_records).to_csv(OUT_DIR / "patch_index.csv", index=False)
-    print(f"완료: {len(slide_records)}개 슬라이드, {len(patch_records)}개 패치 → {OUT_DIR}")
+    print(f"완료: {len(slide_records)}개 슬라이드 → {OUT_DIR}")
 
 
 if __name__ == "__main__":

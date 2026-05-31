@@ -85,3 +85,37 @@ def compute_all_metrics(
         f"top_{k}_retrieval_rate": top_k,
         **{f"sens@fpr{int(target_fpr*100)}_{name}": v for name, v in sens.items()},
     }
+
+
+def compute_patch_metrics(
+    patch_scores: np.ndarray,
+    patch_preds: np.ndarray,
+    patch_labels: np.ndarray,
+) -> dict:
+    """
+    패치 레벨 분류 성능 지표.
+
+    Args:
+        patch_scores: (N,) softmax 양성 확률 [0, 1]
+        patch_preds:  (N,) 이진 예측 (score >= 0.5 → 1)
+        patch_labels: (N,) GT 라벨 (0 또는 1)
+
+    Returns:
+        dict: accuracy, auc_roc, f1, precision, recall
+    """
+    from sklearn.metrics import (
+        accuracy_score, f1_score, precision_score, recall_score, roc_auc_score,
+    )
+
+    metrics = {
+        "accuracy":  float(accuracy_score(patch_labels, patch_preds)),
+        "f1":        float(f1_score(patch_labels, patch_preds, zero_division=0)),
+        "precision": float(precision_score(patch_labels, patch_preds, zero_division=0)),
+        "recall":    float(recall_score(patch_labels, patch_preds, zero_division=0)),
+    }
+    try:
+        metrics["auc_roc"] = float(roc_auc_score(patch_labels, patch_scores))
+    except ValueError:
+        metrics["auc_roc"] = float("nan")
+
+    return metrics

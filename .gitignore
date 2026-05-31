@@ -1,6 +1,7 @@
 data/wsi_train
 data/wsi_eval
-data/patches
+data/patches_train
+data/patches_eval
 data/lesion_annotations
 
 utils/data

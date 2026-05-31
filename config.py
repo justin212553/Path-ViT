@@ -13,7 +13,8 @@ class ModelConfig:
 
 @dataclass
 class DataConfig:
-    wsi_root:    str   = "data/wsi_train"       # wsi_train/ 디렉토리
+    wsi_root:    str   = "data/patches_train"   # preprocess 출력 디렉토리
+    test_root:   str   = "data/patches_eval"    # preprocess_eval 출력 디렉토리
     csv_path:    str   = "data/stage_labels.csv"
     val_centers: Tuple = (1,)
     num_workers: int   = 4

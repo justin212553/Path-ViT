@@ -47,7 +47,7 @@ def _parse_coord(name: str) -> tuple[int, int]:
 class CAMELYON17PatchDataset(Dataset):
     """
     Args:
-        cfg:       DataConfig (wsi_root, csv_path, val_centers 참조)
+        cfg:       DataConfig (wsi_root, test_root, csv_path, val_centers 참조)
         split:     "train" | "val" | "test"
         transform: 패치에 적용할 transform
     """
@@ -58,12 +58,7 @@ class CAMELYON17PatchDataset(Dataset):
         split: str = "train",
         transform=None,
     ):
-        if split == "test":
-            # TODO: test split 구현
-            raise NotImplementedError("test split is not implemented yet")
-
         self.transform = transform or PATCH_TRANSFORM
-        self.wsi_root  = Path(cfg.wsi_root)
 
         df = pd.read_csv(cfg.csv_path)
 
@@ -86,13 +81,19 @@ class CAMELYON17PatchDataset(Dataset):
         for pid, grp in node_df.groupby("patient_id"):
             self._node_stages[pid] = dict(zip(grp["node"], grp["stage"]))
 
-        # train/val split by center
-        in_val = patient_df["center"].isin(cfg.val_centers)
-        rows   = patient_df[in_val if split == "val" else ~in_val]
+        if split == "test":
+            self.wsi_root = Path(cfg.test_root)
+            rows = patient_df
+        else:
+            self.wsi_root = Path(cfg.wsi_root)
+            in_val = patient_df["center"].isin(cfg.val_centers)
+            rows   = patient_df[in_val if split == "val" else ~in_val]
 
-        # 실제 디렉토리가 존재하는 환자만 사용
+        # patches_train/ 과 patches_eval/ 모두 patient_XXX_node_Y/ flat 구조
         self.patients = rows[
-            rows["patient_id"].apply(lambda p: (self.wsi_root / p).is_dir())
+            rows["patient_id"].apply(
+                lambda p: any(self.wsi_root.glob(f"{p}_node_*"))
+            )
         ].reset_index(drop=True)
 
     def __len__(self) -> int:
@@ -101,10 +102,11 @@ class CAMELYON17PatchDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         row        = self.patients.iloc[idx]
         patient_id = row["patient_id"]
-        patch_dir  = self.wsi_root / patient_id
 
+        node_dirs   = sorted(self.wsi_root.glob(f"{patient_id}_node_*"))
         patch_paths = sorted(
-            list(patch_dir.rglob("*.png")) + list(patch_dir.rglob("*.jpg"))
+            p for nd in node_dirs
+            for p in list(nd.glob("*.png")) + list(nd.glob("*.jpg"))
         )
 
         patches_t = torch.stack([
@@ -122,4 +124,61 @@ class CAMELYON17PatchDataset(Dataset):
             "label":       torch.tensor(row["label"], dtype=torch.long),
             "patient_id":  patient_id,
             "node_stages": self._node_stages.get(patient_id, {}),
+        }
+
+
+class CAMELYON17NodeDataset(Dataset):
+    """
+    노드(WSI) 단위 데이터셋 — 히트맵 평가 전용.
+
+    patches_eval/patch_index.csv 에서 패치별 GT 라벨을 읽어
+    노드 하나를 하나의 아이템으로 반환한다.
+
+    반환 형식:
+        patches:      (N, 3, H, W)  float32
+        coords:       (N, 2)        int64   [row, col]
+        patch_labels: (N,)          int64   0=정상, 1=종양  (annotation 기반 GT)
+        slide_id:     str           e.g. "patient_000_node_0"
+    """
+
+    def __init__(self, cfg: DataConfig, transform=None):
+        self.transform = transform or PATCH_TRANSFORM
+        self.root      = Path(cfg.test_root)
+
+        index_df = pd.read_csv(self.root / "eval_patch_index.csv")
+
+        self.slides = []
+        for slide_id, grp in index_df.groupby("slide_id"):
+            if (self.root / slide_id).is_dir():
+                self.slides.append({
+                    "slide_id": slide_id,
+                    "df":       grp.reset_index(drop=True),
+                })
+
+    def __len__(self) -> int:
+        return len(self.slides)
+
+    def __getitem__(self, idx: int) -> dict:
+        item     = self.slides[idx]
+        slide_id = item["slide_id"]
+        df       = item["df"]
+
+        patches_t = torch.stack([
+            self.transform(Image.open(Path(f)).convert("RGB"))
+            for f in df["filename"]
+        ])
+        coords = torch.tensor(
+            df[["row", "col"]].values,
+            dtype=torch.long,
+        )
+        patch_labels = torch.tensor(
+            df["patch_label"].values,
+            dtype=torch.long,
+        )
+
+        return {
+            "patches":      patches_t,
+            "coords":       coords,
+            "patch_labels": patch_labels,
+            "slide_id":     slide_id,
         }
