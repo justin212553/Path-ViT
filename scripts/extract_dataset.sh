@@ -10,4 +10,5 @@
 
 cd /pub/wonseukl/Path-ViT/
 
+source .venv/bin/activate
 ./.venv/bin/python -u utils/extract_data.py
