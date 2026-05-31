@@ -12,4 +12,4 @@ cd /pub/wonseukl/Path-ViT/
 source .venv/bin/activate
 
 # 파이썬 실행
-python3 -u utils/preprocess.py
+./.venv/bin/python -u ./data/preprocess.py
