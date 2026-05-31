@@ -17,7 +17,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-DATA_ROOT = Path("../data")
+DATA_ROOT = Path("./data")
 
 
 def _extract_zip_flat(zip_path: Path, out_dir: Path) -> None:
