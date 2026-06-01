@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=path_vit_train
 #SBATCH --partition=gpu            
-#SBATCH --account=WONSEUKL
+#SBATCH --account=wonseukl
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --gpus=1                   # GPU 1대 독점 징집 (A30, V100 등 배정)
