@@ -158,8 +158,10 @@ def main():
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
     model     = PatchViT(cfg.model).to(device)
+    model.cnn.backbone.requires_grad_(False)  # CNN backbone freeze: activation 저장 불필요
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay
     )
     scheduler = _build_scheduler(optimizer, cfg)
 
