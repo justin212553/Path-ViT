@@ -11,6 +11,7 @@ wsi_train/<patient_name>/ 하위 패치를 로딩한다.
     patient_id:  str
     node_stages: dict[int, str]   {node_idx: stage}
 """
+import random
 import re
 from pathlib import Path
 
@@ -57,8 +58,10 @@ class CAMELYON17PatchDataset(Dataset):
         cfg: DataConfig,
         split: str = "train",
         transform=None,
+        max_patches: int = 500,
     ):
         self.transform = transform or PATCH_TRANSFORM
+        self.max_patches = max_patches
 
         df = pd.read_csv(cfg.csv_path)
 
@@ -108,6 +111,9 @@ class CAMELYON17PatchDataset(Dataset):
             p for nd in node_dirs
             for p in list(nd.glob("*.png")) + list(nd.glob("*.jpg"))
         )
+
+        if self.max_patches and len(patch_paths) > self.max_patches:
+            patch_paths = random.sample(patch_paths, self.max_patches)
 
         patches_t = torch.stack([
             self.transform(Image.open(p).convert("RGB"))
