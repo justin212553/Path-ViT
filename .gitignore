@@ -12,3 +12,4 @@ utils/data
 __pycache__
 
 *.logs
+*.zip

@@ -50,6 +50,14 @@ def compute_sensitivity_at_fpr(
     Returns:
         dict with keys: sensitivity, threshold, auc_roc
     """
+    if len(np.unique(slide_labels)) < 2:
+        return {
+            "sensitivity": float("nan"),
+            "fpr": float("nan"),
+            "threshold": float("nan"),
+            "auc_roc": float("nan"),
+        }
+
     fpr, tpr, thresholds = roc_curve(slide_labels, slide_scores)
     roc_auc = auc(fpr, tpr)
 
