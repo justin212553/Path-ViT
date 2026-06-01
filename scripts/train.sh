@@ -13,4 +13,4 @@ cd /pub/wonseukl/Path-ViT/
 
 source .venv/bin/activate
 
-python3 -u train.py
+./.venv/bin/python -u ./train.py
