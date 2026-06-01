@@ -11,4 +11,4 @@ utils/data
 .claude
 __pycache__
 
-*.log
+*.logs
