@@ -154,8 +154,10 @@ def main():
 
     train_ds     = CAMELYON17PatchDataset(cfg.data, split="train")
     val_ds       = CAMELYON17PatchDataset(cfg.data, split="val")
-    train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
-    val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
+
+    g = torch.Generator().manual_seed(cfg.train.seed)
+    train_loader = DataLoader(train_ds, shuffle=True,  generator=g, **dl_kwargs)
+    val_loader   = DataLoader(val_ds,   shuffle=False, generator=g, **dl_kwargs)
 
     model     = PatchViT(cfg.model).to(device)
     model.cnn.backbone.requires_grad_(False)  # CNN backbone freeze: activation 저장 불필요
@@ -186,6 +188,12 @@ def main():
         if auc > best_auc:
             best_auc = auc
             torch.save(model.state_dict(), "camelyon_best.pt")
+
+    print("\n=== Final Evaluation (best checkpoint) ===")
+    model.load_state_dict(torch.load("camelyon_best.pt", map_location=device))
+    final_metrics = evaluate(model, val_loader, cfg, device, amp_ctx)
+    for k, v in final_metrics.items():
+        print(f"  {k}: {v:.4f}")
 
 
 if __name__ == "__main__":
