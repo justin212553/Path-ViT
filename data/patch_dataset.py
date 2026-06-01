@@ -117,6 +117,8 @@ class CAMELYON17PatchDataset(Dataset):
             [_parse_coord(p.name) for p in patch_paths],
             dtype=torch.long,
         )
+        coords[:, 0] -= coords[:, 0].min()
+        coords[:, 1] -= coords[:, 1].min()
 
         return {
             "patches":     patches_t,

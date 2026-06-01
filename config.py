@@ -8,7 +8,7 @@ class ModelConfig:
     num_heads:              int   = 8
     num_transformer_layers: int   = 6
     dropout:                float = 0.1
-    max_grid_size:          int   = 128
+    max_grid_size:          int   = 1500
 
 
 @dataclass
