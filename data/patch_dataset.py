@@ -1,15 +1,15 @@
 """
-CAMELYON17 패치 데이터셋 (wsi_train 기반)
+CAMELYON17 패치 데이터셋 — 노드(슬라이드) 단위 MIL
 
-stage_labels.csv 에서 환자 이름과 노드별 stage를 읽고,
-wsi_train/<patient_name>/ 하위 패치를 로딩한다.
+각 아이템 = patient_NNN_node_M 슬라이드 하나의 패치 묶음 + 그 노드의 라벨.
+분할은 환자 단위로 수행해 같은 환자의 노드가 train/val에 섞이지 않도록 한다.
 
 반환 형식:
-    patches:     (N, 3, H, W)  float32
-    coords:      (N, 2)        int64   [row, col]  (파일명 r####_c#### 파싱)
-    label:       ()            int64   (0 = pN0/pN0(i+), 1 = pN1mi/pN1/pN2)
-    patient_id:  str
-    node_stages: dict[int, str]   {node_idx: stage}
+    patches:    (N, 3, H, W)  float32
+    coords:     (N, 2)        int64   [row, col]  (파일명 r####_c#### 파싱)
+    label:      ()            int64   (0=음성, 1=전이)
+    patient_id: str
+    node:       int
 """
 import random
 import re
@@ -25,11 +25,15 @@ from torchvision import transforms
 from config import DataConfig
 
 STAGE_TO_LABEL = {
-    "pN0":     0,
-    "pN0(i+)": 0,
-    "pN1mi":   1,
-    "pN1":     1,
-    "pN2":     1,
+    "pN0":      0,
+    "pN0(i+)":  0,
+    "negative": 0,
+    "itc":      0,
+    "pN1mi":    1,
+    "micro":    1,
+    "pN1":      1,
+    "macro":    1,
+    "pN2":      1,
 }
 
 PATCH_TRANSFORM = transforms.Compose([
@@ -49,7 +53,7 @@ def _parse_coord(name: str) -> tuple[int, int]:
 class CAMELYON17PatchDataset(Dataset):
     """
     Args:
-        cfg:       DataConfig (wsi_root, test_root, csv_path, val_centers 참조)
+        cfg:       DataConfig (wsi_root, test_root, csv_path, val_ratio 참조)
         split:     "train" | "val" | "test"
         transform: 패치에 적용할 transform
     """
@@ -59,67 +63,61 @@ class CAMELYON17PatchDataset(Dataset):
         cfg: DataConfig,
         split: str = "train",
         transform=None,
-        max_patches: int = 500,
+        max_patches: int = 2000,
     ):
-        self.transform = transform or PATCH_TRANSFORM
+        self.transform   = transform or PATCH_TRANSFORM
         self.max_patches = max_patches
 
         df = pd.read_csv(cfg.csv_path)
 
-        # patient-level rows: patient_NNN.zip
-        patient_df = df[df["patient"].str.endswith(".zip")].copy()
-        patient_df["patient_id"] = patient_df["patient"].str.replace(".zip", "", regex=False)
-        patient_df["center"] = (
-            patient_df["patient_id"]
-            .str.extract(r"patient_(\d+)")[0]
-            .astype(int) // 20
-        )
-        patient_df["label"] = patient_df["stage"].map(STAGE_TO_LABEL)
-
-        # node-level rows: patient_NNN_node_M.tif
+        # 노드 단위 rows: patient_NNN_node_M.tif
         node_df = df[df["patient"].str.endswith(".tif")].copy()
         node_df["patient_id"] = node_df["patient"].str.extract(r"(patient_\d+)_node")[0]
         node_df["node"]       = node_df["patient"].str.extract(r"node_(\d+)")[0].astype(int)
-
-        self._node_stages: dict[str, dict[int, str]] = {}
-        for pid, grp in node_df.groupby("patient_id"):
-            self._node_stages[pid] = dict(zip(grp["node"], grp["stage"]))
+        node_df["label"]      = node_df["stage"].map(STAGE_TO_LABEL)
+        node_df = node_df.dropna(subset=["label"])   # 매핑 안 된 stage 제거
+        node_df["label"] = node_df["label"].astype(int)
 
         if split == "test":
             self.wsi_root = Path(cfg.test_root)
-            rows = patient_df
+            items_df = node_df
         else:
             self.wsi_root = Path(cfg.wsi_root)
-            # stratified split: val에 양/음성 모두 포함되도록 레이블 기준으로 분할
-            # cfg.val_ratio 비율만큼 각 클래스에서 균등 샘플링
+
+            # 환자 단위 stratified split (data leakage 방지)
+            patient_df = df[df["patient"].str.endswith(".zip")].copy()
+            patient_df["patient_id"]    = patient_df["patient"].str.replace(".zip", "", regex=False)
+            patient_df["patient_label"] = patient_df["stage"].map(STAGE_TO_LABEL)
+            patient_df = patient_df.dropna(subset=["patient_label"])
+
             val_ratio = getattr(cfg, "val_ratio", 0.2)
             rng = np.random.default_rng(42)
-            val_idx = []
-            for lbl in patient_df["label"].unique():
-                grp = patient_df[patient_df["label"] == lbl].index.tolist()
+            val_pids: set[str] = set()
+            for lbl in patient_df["patient_label"].unique():
+                grp = patient_df[patient_df["patient_label"] == lbl]["patient_id"].tolist()
                 n_val = max(1, round(len(grp) * val_ratio))
-                val_idx.extend(rng.choice(grp, size=n_val, replace=False).tolist())
-            val_mask = patient_df.index.isin(val_idx)
-            rows = patient_df[val_mask if split == "val" else ~val_mask]
+                val_pids.update(rng.choice(grp, size=n_val, replace=False).tolist())
 
-        # patches_train/ 과 patches_eval/ 모두 patient_XXX_node_Y/ flat 구조
-        self.patients = rows[
-            rows["patient_id"].apply(
-                lambda p: any(self.wsi_root.glob(f"{p}_node_*"))
+            in_val   = node_df["patient_id"].isin(val_pids)
+            items_df = node_df[in_val if split == "val" else ~in_val]
+
+        # 실제로 디렉토리가 존재하는 노드만 유지
+        self.items = items_df[
+            items_df.apply(
+                lambda r: (self.wsi_root / f"{r['patient_id']}_node_{r['node']}").is_dir(),
+                axis=1,
             )
         ].reset_index(drop=True)
 
     def __len__(self) -> int:
-        return len(self.patients)
+        return len(self.items)
 
     def __getitem__(self, idx: int) -> dict:
-        row        = self.patients.iloc[idx]
-        patient_id = row["patient_id"]
+        row      = self.items.iloc[idx]
+        node_dir = self.wsi_root / f"{row['patient_id']}_node_{row['node']}"
 
-        node_dirs   = sorted(self.wsi_root.glob(f"{patient_id}_node_*"))
         patch_paths = sorted(
-            p for nd in node_dirs
-            for p in list(nd.glob("*.png")) + list(nd.glob("*.jpg"))
+            list(node_dir.glob("*.png")) + list(node_dir.glob("*.jpg"))
         )
 
         if self.max_patches and len(patch_paths) > self.max_patches:
@@ -137,11 +135,11 @@ class CAMELYON17PatchDataset(Dataset):
         coords[:, 1] -= coords[:, 1].min()
 
         return {
-            "patches":     patches_t,
-            "coords":      coords,
-            "label":       torch.tensor(row["label"], dtype=torch.long),
-            "patient_id":  patient_id,
-            "node_stages": self._node_stages.get(patient_id, {}),
+            "patches":    patches_t,
+            "coords":     coords,
+            "label":      torch.tensor(row["label"], dtype=torch.long),
+            "patient_id": row["patient_id"],
+            "node":       int(row["node"]),
         }
 
 
