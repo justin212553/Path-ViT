@@ -3,7 +3,6 @@
 #SBATCH --partition=free-gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH -p gpu
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=8          # num_workers=8 에 맞춤 (DataLoader worker + 예비)
 #SBATCH --mem=64G                  # 대형 WSI 로딩 버퍼 (패치 수천 장 × patient 단위)
