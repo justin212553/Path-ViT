@@ -189,6 +189,8 @@ def _process_slide(args):
             info["slide_path"], info["xml_path"], rng
         )
         recs = _save_patches(slide_dir, patches, coords, labels)
+        if not recs:
+            print(f"WARN no patches extracted: {info['slide_id']}")
         for r in recs:
             r["slide_id"] = info["slide_id"]
         slide_record = {
