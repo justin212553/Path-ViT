@@ -101,12 +101,13 @@ class CAMELYON17PatchDataset(Dataset):
             in_val   = node_df["patient_id"].isin(val_pids)
             items_df = node_df[in_val if split == "val" else ~in_val]
 
-        # 실제로 디렉토리가 존재하는 노드만 유지
+        # 패치 파일이 1개 이상 존재하는 노드만 유지
+        def _has_patches(r) -> bool:
+            d = self.wsi_root / f"{r['patient_id']}_node_{r['node']}"
+            return d.is_dir() and (next(d.glob("*.png"), None) or next(d.glob("*.jpg"), None)) is not None
+
         self.items = items_df[
-            items_df.apply(
-                lambda r: (self.wsi_root / f"{r['patient_id']}_node_{r['node']}").is_dir(),
-                axis=1,
-            )
+            items_df.apply(_has_patches, axis=1)
         ].reset_index(drop=True)
 
     def __len__(self) -> int:

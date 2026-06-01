@@ -117,6 +117,8 @@ def _extract_slide(slide_path: Path, xml_path, rng: np.random.Generator):
 
 def _save_patches(slide_dir: Path, patches, coords, labels):
     """패치를 PNG로 저장하고 patch_index 레코드 목록을 반환."""
+    if not patches:
+        return []
     slide_dir.mkdir(parents=True, exist_ok=True)
     records = []
     for patch, (row, col), label in zip(patches, coords, labels):
@@ -160,9 +162,10 @@ def _process_slide(args):
     info, seed = args
     slide_dir = OUT_DIR / info["slide_id"]
 
-    if slide_dir.exists():
+    existing = sorted(slide_dir.glob("*.png")) if slide_dir.exists() else []
+    if existing:
         patch_records = []
-        for jpg in sorted(slide_dir.glob("*.png")):
+        for jpg in existing:
             parts = jpg.stem.split("_")
             row = int(parts[0][1:])
             col = int(parts[1][1:])
