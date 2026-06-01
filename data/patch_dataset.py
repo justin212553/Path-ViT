@@ -15,6 +15,7 @@ import random
 import re
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -89,8 +90,17 @@ class CAMELYON17PatchDataset(Dataset):
             rows = patient_df
         else:
             self.wsi_root = Path(cfg.wsi_root)
-            in_val = patient_df["center"].isin(cfg.val_centers)
-            rows   = patient_df[in_val if split == "val" else ~in_val]
+            # stratified split: val에 양/음성 모두 포함되도록 레이블 기준으로 분할
+            # cfg.val_ratio 비율만큼 각 클래스에서 균등 샘플링
+            val_ratio = getattr(cfg, "val_ratio", 0.2)
+            rng = np.random.default_rng(42)
+            val_idx = []
+            for lbl in patient_df["label"].unique():
+                grp = patient_df[patient_df["label"] == lbl].index.tolist()
+                n_val = max(1, round(len(grp) * val_ratio))
+                val_idx.extend(rng.choice(grp, size=n_val, replace=False).tolist())
+            val_mask = patient_df.index.isin(val_idx)
+            rows = patient_df[val_mask if split == "val" else ~val_mask]
 
         # patches_train/ 과 patches_eval/ 모두 patient_XXX_node_Y/ flat 구조
         self.patients = rows[

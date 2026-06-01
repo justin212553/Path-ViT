@@ -16,7 +16,7 @@ class DataConfig:
     wsi_root:    str   = "data/patches_train"
     test_root:   str   = "data/patches_eval"
     csv_path:    str   = "data/stage_labels.csv"
-    val_centers: Tuple = (1,)
+    val_ratio:   float = 0.2   # 각 클래스에서 validation으로 쓸 비율 (stratified)
     num_workers: int   = 8  # SBATCH --cpus-per-task=8 에 맞춤
 
 
