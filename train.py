@@ -6,6 +6,7 @@ CAMELYON17 학습 스크립트 (순수 MIL)
 import math
 import random
 import contextlib
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -175,6 +176,10 @@ def main():
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
 
+    ckpt_dir = Path("models/checkpoint")
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_path = ckpt_dir / "camelyon_best.pt"
+
     best_auc = 0.0
     for epoch in range(cfg.train.epochs):
         lr_now  = optimizer.param_groups[0]["lr"]
@@ -187,10 +192,10 @@ def main():
 
         if auc > best_auc:
             best_auc = auc
-            torch.save(model.state_dict(), "camelyon_best.pt")
+            torch.save(model.state_dict(), ckpt_path)
 
     print("\n=== Final Evaluation (best checkpoint) ===")
-    model.load_state_dict(torch.load("camelyon_best.pt", map_location=device))
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
     final_metrics = evaluate(model, val_loader, cfg, device, amp_ctx)
     for k, v in final_metrics.items():
         print(f"  {k}: {v:.4f}")
