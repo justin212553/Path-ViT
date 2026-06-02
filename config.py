@@ -19,7 +19,7 @@ class DataConfig:
     val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
     eval_ratio:  float = 0.1   # stratified eval(held-out) 비율
     num_workers: int   = 4
-    max_patches: int   = None  # WSI당 최대 패치 수 (None=무제한)
+    max_patches: int   = 4000  # WSI당 최대 패치 수 (None=무제한)
 
 
 @dataclass
@@ -32,12 +32,12 @@ class TrainConfig:
     # --- GPU 최적화 파라미터 ---
     # gradient accumulation: effective batch = accum_steps WSIs
     # (MIL은 DataLoader batch_size=1 고정이므로 accumulation으로 보완)
-    accumulate_grad_steps: int   = 8
+    accumulate_grad_steps: int   = 4
     warmup_epochs:         int   = 3       # linear LR warmup → cosine decay
     # AMP dtype: "auto" → A30은 bfloat16, V100은 float16 자동 선택 / "none" 비활성화
     amp_dtype:             str   = "auto"
     # 대형 WSI(수천 패치)에서 CNN OOM 방지용 서브배치
-    cnn_chunk_size:        int   = 128
+    cnn_chunk_size:        int   = 64
 
 
 @dataclass

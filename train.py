@@ -67,11 +67,11 @@ def _build_scheduler(optimizer, cfg):
 
 
 def _encode_patches_chunked(
-    cnn: nn.Module, patches: torch.Tensor, chunk_size: int
+    cnn: nn.Module, patches: torch.Tensor, chunk_size: int, device: torch.device
 ) -> torch.Tensor:
-    """CNN을 chunk_size 단위 서브배치로 나눠 실행 (대형 WSI OOM 방지)."""
+    """CNN을 chunk_size 단위로 CPU→GPU 이동하며 실행 (대형 WSI OOM 방지)."""
     return torch.cat([
-        cnn(patches[i : i + chunk_size])
+        cnn(patches[i : i + chunk_size].to(device, non_blocking=True))
         for i in range(0, patches.shape[0], chunk_size)
     ])
 
@@ -102,7 +102,7 @@ def train_one_epoch(
     pending = 0
 
     for step, batch in enumerate(loader):
-        patches      = batch["patches"].squeeze(0).to(device, non_blocking=True)       # (N, 3, H, W)
+        patches      = batch["patches"].squeeze(0)                                     # (N, 3, H, W) — CPU 유지
         coords       = batch["coords"].squeeze(0).to(device, non_blocking=True)        # (N, 2)
         patch_labels = batch["patch_labels"].squeeze(0).to(device, non_blocking=True)  # (N,)
 
@@ -111,7 +111,7 @@ def train_one_epoch(
         coords[:, 1] -= coords[:, 1].min()
 
         with amp_ctx:
-            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size)  # (N, D)
+            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
             _, all_tokens = model.vit(patch_tokens, coords)                           # (N+1, D)
             patch_logits  = model.classifier(all_tokens[1:])                         # (N, 2)  CLS 토큰 제외
             loss = criterion(patch_logits, patch_labels) / accum_n
@@ -139,7 +139,7 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
     chunk_size = cfg.train.cnn_chunk_size
 
     for batch in loader:
-        patches      = batch["patches"].squeeze(0).to(device, non_blocking=True)
+        patches      = batch["patches"].squeeze(0)                               # (N, 3, H, W) — CPU 유지
         coords       = batch["coords"].squeeze(0).to(device, non_blocking=True)
         patch_labels = batch["patch_labels"].squeeze(0).numpy()
 
@@ -147,7 +147,7 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
         coords[:, 1] -= coords[:, 1].min()
 
         with amp_ctx:
-            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size)
+            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
             _, all_tokens = model.vit(patch_tokens, coords)
             patch_logits  = model.classifier(all_tokens[1:])
 
