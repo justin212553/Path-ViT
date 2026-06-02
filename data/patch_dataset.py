@@ -15,7 +15,6 @@ import random
 import re
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -78,36 +77,33 @@ class CAMELYON17PatchDataset(Dataset):
         node_df = node_df.dropna(subset=["label"])   # 매핑 안 된 stage 제거
         node_df["label"] = node_df["label"].astype(int)
 
+        def _has_patches(r, root: Path) -> bool:
+            d = root / f"{r['patient_id']}_node_{r['node']}"
+            return d.is_dir() and (next(d.glob("*.png"), None) or next(d.glob("*.jpg"), None)) is not None
+
         if split == "test":
             self.wsi_root = Path(cfg.test_root)
             items_df = node_df
-        else:
+
+        elif split == "val":
+            # wsi_eval(patches_eval)에서 positive 1개, negative 1개 랜덤 선택
+            self.wsi_root = Path(cfg.test_root)
+            eval_root = self.wsi_root
+            has_eval = node_df.apply(lambda r: _has_patches(r, eval_root), axis=1)
+            eval_df  = node_df[has_eval].reset_index(drop=True)
+
+            pos_sample = eval_df[eval_df["label"] == 1].sample(5, random_state=42)
+            neg_sample = eval_df[eval_df["label"] == 0].sample(5, random_state=42)
+            items_df = pd.concat([pos_sample, neg_sample]).reset_index(drop=True)
+
+        else:  # train: wsi_train(patches_train) 전체 사용
             self.wsi_root = Path(cfg.wsi_root)
-
-            # 환자 단위 stratified split (data leakage 방지)
-            patient_df = df[df["patient"].str.endswith(".zip")].copy()
-            patient_df["patient_id"]    = patient_df["patient"].str.replace(".zip", "", regex=False)
-            patient_df["patient_label"] = patient_df["stage"].map(STAGE_TO_LABEL)
-            patient_df = patient_df.dropna(subset=["patient_label"])
-
-            val_ratio = getattr(cfg, "val_ratio", 0.2)
-            rng = np.random.default_rng(42)
-            val_pids: set[str] = set()
-            for lbl in patient_df["patient_label"].unique():
-                grp = patient_df[patient_df["patient_label"] == lbl]["patient_id"].tolist()
-                n_val = max(1, round(len(grp) * val_ratio))
-                val_pids.update(rng.choice(grp, size=n_val, replace=False).tolist())
-
-            in_val   = node_df["patient_id"].isin(val_pids)
-            items_df = node_df[in_val if split == "val" else ~in_val]
+            items_df = node_df
 
         # 패치 파일이 1개 이상 존재하는 노드만 유지
-        def _has_patches(r) -> bool:
-            d = self.wsi_root / f"{r['patient_id']}_node_{r['node']}"
-            return d.is_dir() and (next(d.glob("*.png"), None) or next(d.glob("*.jpg"), None)) is not None
-
+        train_root = self.wsi_root
         self.items = items_df[
-            items_df.apply(_has_patches, axis=1)
+            items_df.apply(lambda r: _has_patches(r, train_root), axis=1)
         ].reset_index(drop=True)
 
     def __len__(self) -> int:

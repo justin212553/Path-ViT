@@ -22,7 +22,7 @@ class DataConfig:
 
 @dataclass
 class TrainConfig:
-    epochs:                int   = 50
+    epochs:                int   = 15
     lr:                    float = 1e-4
     weight_decay:          float = 1e-4
     device:                str   = "cuda"
