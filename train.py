@@ -145,7 +145,7 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
             _, all_tokens = model.vit(patch_tokens, coords)
             patch_logits  = model.classifier(all_tokens[1:])
 
-        scores = torch.softmax(patch_logits, dim=-1)[:, 1].cpu().numpy()
+        scores = torch.softmax(patch_logits, dim=-1)[:, 1].float().cpu().numpy()
         preds  = (scores >= 0.5).astype(np.int64)
 
         all_scores.append(scores)
