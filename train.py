@@ -14,6 +14,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
 from config import Config
 from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
@@ -170,6 +176,29 @@ def main():
     amp_ctx   = _make_amp_ctx(amp_dtype)
     scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
+    if WANDB_AVAILABLE:
+        wandb.init(
+            project="Path-ViT",
+            config={
+                "epochs":                cfg.train.epochs,
+                "lr":                    cfg.train.lr,
+                "weight_decay":          cfg.train.weight_decay,
+                "seed":                  cfg.train.seed,
+                "accumulate_grad_steps": cfg.train.accumulate_grad_steps,
+                "warmup_epochs":         cfg.train.warmup_epochs,
+                "amp_dtype":             cfg.train.amp_dtype,
+                "cnn_chunk_size":        cfg.train.cnn_chunk_size,
+                "embed_dim":             cfg.model.embed_dim,
+                "num_heads":             cfg.model.num_heads,
+                "num_transformer_layers":cfg.model.num_transformer_layers,
+                "dropout":               cfg.model.dropout,
+                "max_grid_size":         cfg.model.max_grid_size,
+                "val_ratio":             cfg.data.val_ratio,
+                "eval_ratio":            cfg.data.eval_ratio,
+                "max_patches":           cfg.data.max_patches,
+            },
+        )
+
     split_kwargs = dict(
         val_ratio=cfg.data.val_ratio, eval_ratio=cfg.data.eval_ratio, seed=cfg.train.seed
     )
@@ -228,10 +257,24 @@ def main():
             f"f1={metrics['f1']:.4f}  prec={metrics['precision']:.4f}  rec={metrics['recall']:.4f}"
         )
 
+        if WANDB_AVAILABLE:
+            wandb.log({
+                "train/loss":      loss,
+                "train/lr":        lr_now,
+                "val/accuracy":    metrics["accuracy"],
+                "val/auc_roc":     metrics["auc_roc"],
+                "val/f1":          metrics["f1"],
+                "val/precision":   metrics["precision"],
+                "val/recall":      metrics["recall"],
+            }, step=epoch + 1)
+
         if score > best_score:
             best_score = score
             torch.save(model.state_dict(), ckpt_path)
             print(f"  → checkpoint saved (auc={best_score:.4f})")
+            if WANDB_AVAILABLE:
+                wandb.run.summary["best_val_auc"] = best_score
+                wandb.run.summary["best_epoch"]   = epoch + 1
 
     print("\n=== Final Evaluation on held-out eval set (best checkpoint) ===")
     if ckpt_path.exists():
@@ -241,6 +284,10 @@ def main():
     final_metrics = evaluate(model, eval_loader, cfg, device, amp_ctx)
     for k, v in final_metrics.items():
         print(f"  {k}: {v:.4f}")
+
+    if WANDB_AVAILABLE:
+        wandb.log({f"eval/{k}": v for k, v in final_metrics.items()})
+        wandb.finish()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,6 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-source .venv/bin/activate
+conda activate Path-ViT
 
-./.venv/bin/python -u ./train.py
+python -u ./train.py
