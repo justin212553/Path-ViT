@@ -176,7 +176,7 @@ def main():
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
 
-    ckpt_dir = Path("models/checkpoint")
+    ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / "camelyon_best.pt"
 
