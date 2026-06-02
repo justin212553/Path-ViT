@@ -48,6 +48,7 @@ def evaluate(checkpoint: str, cfg: Config | None = None):
 def evaluate_patch_level(
     checkpoint: str,
     cfg: Config | None = None,
+    split: str = "eval",
     save_vis: bool = False,
     vis_dir: str = "heatmaps",
 ):
@@ -55,13 +56,17 @@ def evaluate_patch_level(
     패치 레벨 평가: 각 패치를 독립적으로 추론 후 GT 패치 라벨과 비교.
 
     score >= 0.5 → pred=1(종양), 아니면 pred=0(정상)
-    CAMELYON17NodeDataset의 patch_index.csv에서 GT 패치 라벨을 읽음.
+    CAMELYON17NodeDataset의 eval_patch_index.csv에서 GT 패치 라벨을 읽음.
+    split: "eval"(기본, held-out) | "val" | "all"
     """
     if cfg is None:
         cfg = Config()
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
-    dataset = CAMELYON17NodeDataset(cfg.data)
+    dataset = CAMELYON17NodeDataset(
+        cfg.data, split=split,
+        val_ratio=cfg.data.val_ratio, eval_ratio=cfg.data.eval_ratio,
+    )
     loader  = DataLoader(dataset, batch_size=1, shuffle=False)
 
     model = PatchViT(cfg.model).to(device)
@@ -118,6 +123,9 @@ if __name__ == "__main__":
     parser.add_argument("checkpoint", type=str)
     parser.add_argument("--patch-level", action="store_true",
                         help="패치 단위 평가 (CAMELYON17NodeDataset 사용)")
+    parser.add_argument("--split", type=str, default="eval",
+                        choices=["eval", "val", "all"],
+                        help="평가에 사용할 split (기본: eval — held-out 셋)")
     parser.add_argument("--vis", action="store_true",
                         help="패치 레벨 평가 시 듀얼 오버레이 시각화 저장")
     parser.add_argument("--vis-dir", type=str, default="heatmaps",
@@ -125,6 +133,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.patch_level:
-        evaluate_patch_level(args.checkpoint, save_vis=args.vis, vis_dir=args.vis_dir)
+        evaluate_patch_level(args.checkpoint, split=args.split, save_vis=args.vis, vis_dir=args.vis_dir)
     else:
         evaluate(args.checkpoint)

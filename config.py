@@ -16,13 +16,14 @@ class DataConfig:
     wsi_root:    str   = "data/patches_train"
     test_root:   str   = "data/patches_eval"
     csv_path:    str   = "data/stage_labels.csv"
-    val_ratio:   float = 0.2   # 각 클래스에서 validation으로 쓸 비율 (stratified)
+    val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
+    eval_ratio:  float = 0.1   # stratified eval(held-out) 비율
     num_workers: int   = 8  # SBATCH --cpus-per-task=8 에 맞춤
 
 
 @dataclass
 class TrainConfig:
-    epochs:                int   = 15
+    epochs:                int   = 17
     lr:                    float = 1e-4
     weight_decay:          float = 1e-4
     device:                str   = "cuda"
