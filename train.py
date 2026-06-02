@@ -188,14 +188,19 @@ def main():
         scheduler.step()
 
         auc = metrics.get("sens@fpr10_auc_roc", 0.0)
+        # val set이 단일 클래스일 때 auc=nan → top_k로 fallback
+        score = auc if not math.isnan(auc) else metrics.get("top_20_retrieval_rate", 0.0)
         print(f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | {metrics}")
 
-        if auc > best_auc:
-            best_auc = auc
+        if score > best_auc:
+            best_auc = score
             torch.save(model.state_dict(), ckpt_path)
 
     print("\n=== Final Evaluation (best checkpoint) ===")
-    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    if ckpt_path.exists():
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    else:
+        print("WARNING: no checkpoint saved, using final model weights")
     final_metrics = evaluate(model, val_loader, cfg, device, amp_ctx)
     for k, v in final_metrics.items():
         print(f"  {k}: {v:.4f}")
