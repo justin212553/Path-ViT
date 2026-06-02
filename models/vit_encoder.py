@@ -6,6 +6,7 @@ ViT Encoder with 2D Spatial Position Embedding
 """
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint_sequential
 
 
 class SpatialPositionEmbedding(nn.Module):
@@ -43,9 +44,11 @@ class ViTEncoder(nn.Module):
         num_layers: int = 6,
         dropout: float = 0.1,
         max_grid_size: int = 64,
+        use_grad_checkpoint: bool = True,
     ):
         super().__init__()
         self.pos_embedding = SpatialPositionEmbedding(max_grid_size, embed_dim)
+        self.use_grad_checkpoint = use_grad_checkpoint
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embed_dim,
@@ -80,8 +83,13 @@ class ViTEncoder(nn.Module):
         cls = self.cls_token.expand(1, -1, -1)
         x = torch.cat([cls, x.unsqueeze(0)], dim=1)  # (1, N+1, D)
 
-        # Transformer 연산
-        out = self.transformer(x)                  # (1, N+1, D)
+        # Transformer 연산 (학습 시 gradient checkpointing으로 활성화 메모리 절감)
+        if self.use_grad_checkpoint and self.training:
+            out = checkpoint_sequential(self.transformer.layers, len(self.transformer.layers), x, use_reentrant=False)
+            if self.transformer.norm is not None:
+                out = self.transformer.norm(out)
+        else:
+            out = self.transformer(x)              # (1, N+1, D)
 
         h_img = out[:, 0, :]                       # (1, D) - CLS 토큰
         all_tokens = out[0]                        # (N+1, D)

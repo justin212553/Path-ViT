@@ -4,7 +4,7 @@ from typing import Tuple
 
 @dataclass
 class ModelConfig:
-    embed_dim:              int   = 512
+    embed_dim:              int   = 256
     num_heads:              int   = 8
     num_transformer_layers: int   = 6
     dropout:                float = 0.1
@@ -19,6 +19,7 @@ class DataConfig:
     val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
     eval_ratio:  float = 0.1   # stratified eval(held-out) 비율
     num_workers: int   = 4
+    max_patches: int   = None  # WSI당 최대 패치 수 (None=무제한)
 
 
 @dataclass
@@ -36,7 +37,7 @@ class TrainConfig:
     # AMP dtype: "auto" → A30은 bfloat16, V100은 float16 자동 선택 / "none" 비활성화
     amp_dtype:             str   = "auto"
     # 대형 WSI(수천 패치)에서 CNN OOM 방지용 서브배치
-    cnn_chunk_size:        int   = 256
+    cnn_chunk_size:        int   = 128
 
 
 @dataclass

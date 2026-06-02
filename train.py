@@ -173,9 +173,9 @@ def main():
     split_kwargs = dict(
         val_ratio=cfg.data.val_ratio, eval_ratio=cfg.data.eval_ratio, seed=cfg.train.seed
     )
-    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", **split_kwargs)
-    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   **split_kwargs)
-    eval_ds  = CAMELYON17NodeDataset(cfg.data, split="eval",  **split_kwargs)
+    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches, **split_kwargs)
+    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches, **split_kwargs)
+    eval_ds  = CAMELYON17NodeDataset(cfg.data, split="eval",  max_patches=cfg.data.max_patches, **split_kwargs)
 
     dl_kwargs = dict(
         batch_size=1,
