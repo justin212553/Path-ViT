@@ -18,7 +18,7 @@ class DataConfig:
     csv_path:    str   = "data/stage_labels.csv"
     val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
     eval_ratio:  float = 0.1   # stratified eval(held-out) 비율
-    num_workers: int   = 8  # SBATCH --cpus-per-task=8 에 맞춤
+    num_workers: int   = 4
 
 
 @dataclass
