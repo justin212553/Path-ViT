@@ -181,7 +181,7 @@ class CAMELYON17NodeDataset(Dataset):
     """
     노드(WSI) 단위 데이터셋 — 패치 레벨 GT 라벨 포함.
 
-    patches_eval/eval_patch_index.csv 에서 패치별 GT 라벨을 읽어
+    patches/patch_index.csv 에서 패치별 GT 라벨을 읽어
     노드 하나를 하나의 아이템으로 반환한다.
 
     Args:
@@ -210,9 +210,9 @@ class CAMELYON17NodeDataset(Dataset):
     ):
         self.transform   = transform or PATCH_TRANSFORM
         self.max_patches = max_patches
-        self.root        = Path(cfg.test_root)
+        self.root        = Path(cfg.patches_root)
 
-        index_df = pd.read_csv(self.root / "eval_patch_index.csv")
+        index_df = pd.read_csv(self.root / "patch_index.csv")
 
         all_slides = []
         for slide_id, grp in index_df.groupby("slide_id"):

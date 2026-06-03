@@ -7,6 +7,7 @@ CAMELYON17 패치 레벨 학습 스크립트
 import math
 import random
 import contextlib
+from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
@@ -111,9 +112,9 @@ def train_one_epoch(
         coords[:, 1] -= coords[:, 1].min()
 
         with amp_ctx:
-            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
-            _, all_tokens = model.vit(patch_tokens, coords)                           # (N+1, D)
-            patch_logits  = model.classifier(all_tokens[1:])                         # (N, 2)  CLS 토큰 제외
+            patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
+            ctx_tokens   = model.vit(patch_tokens, coords)                                  # (N, D)
+            patch_logits = model.classifier(ctx_tokens)                                     # (N, 2)
             loss = criterion(patch_logits, patch_labels) / accum_n
 
         scaler.scale(loss).backward()
@@ -135,7 +136,7 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
     model.eval()
-    all_scores, all_preds, all_labels = [], [], []
+    all_scores, all_labels = [], []
     chunk_size = cfg.train.cnn_chunk_size
 
     for batch in loader:
@@ -147,20 +148,17 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
         coords[:, 1] -= coords[:, 1].min()
 
         with amp_ctx:
-            patch_tokens  = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
-            _, all_tokens = model.vit(patch_tokens, coords)
-            patch_logits  = model.classifier(all_tokens[1:])
+            patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
+            ctx_tokens   = model.vit(patch_tokens, coords)
+            patch_logits = model.classifier(ctx_tokens)
 
         scores = torch.softmax(patch_logits, dim=-1)[:, 1].float().cpu().numpy()
-        preds  = (scores >= 0.5).astype(np.int64)
 
         all_scores.append(scores)
-        all_preds.append(preds)
         all_labels.append(patch_labels)
 
     return compute_patch_metrics(
         np.concatenate(all_scores),
-        np.concatenate(all_preds),
         np.concatenate(all_labels),
     )
 
@@ -177,8 +175,10 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
     if WANDB_AVAILABLE:
+        run_name = datetime.now().strftime("%m%d::%H%M")
         wandb.init(
             project="Path-ViT",
+            name=run_name,
             config={
                 "epochs":                cfg.train.epochs,
                 "lr":                    cfg.train.lr,
@@ -270,15 +270,26 @@ def main():
 
         if score > best_score:
             best_score = score
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"  → checkpoint saved (auc={best_score:.4f})")
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "threshold":        metrics["threshold"],
+                    "epoch":            epoch + 1,
+                    "val_auc":          best_score,
+                },
+                ckpt_path,
+            )
+            print(f"  → checkpoint saved (auc={best_score:.4f}, threshold={metrics['threshold']:.4f})")
             if WANDB_AVAILABLE:
-                wandb.run.summary["best_val_auc"] = best_score
-                wandb.run.summary["best_epoch"]   = epoch + 1
+                wandb.run.summary["best_val_auc"]   = best_score
+                wandb.run.summary["best_epoch"]      = epoch + 1
+                wandb.run.summary["best_threshold"]  = metrics["threshold"]
 
     print("\n=== Final Evaluation on held-out eval set (best checkpoint) ===")
     if ckpt_path.exists():
-        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"  (threshold from best checkpoint: {ckpt['threshold']:.4f})")
     else:
         print("WARNING: no checkpoint saved, using final model weights")
     final_metrics = evaluate(model, eval_loader, cfg, device, amp_ctx)

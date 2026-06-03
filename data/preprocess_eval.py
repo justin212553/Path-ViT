@@ -9,7 +9,7 @@ CAMELYON17 eval WSI → 패치 사전 추출 스크립트 (lesion annotation 있
     data/lesion_annotations/patient_XXX_node_Y.xml  ← 이 파일이 있는 노드만 처리
 
 출력:
-    data/patches_eval/
+    data/patches/
         patient_XXX_node_Y/
             r0000_c0045.png
             ...
@@ -26,7 +26,7 @@ import openslide
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 EVAL_DIR         = Path("./data/wsi_eval")
 ANNO_DIR         = Path("./data/lesion_annotations")
-OUT_DIR          = Path("./data/patches_eval")
+OUT_DIR          = Path("./data/patches")
 PATCH_SIZE        = 256
 PATCH_LEVEL       = 0
 TISSUE_THRESHOLD  = 0.5
@@ -183,7 +183,7 @@ def main():
                 print(f"reuse patches, recompute labels: {slide_id}")
             patch_records.extend(patch_recs)
 
-    pd.DataFrame(patch_records).to_csv(OUT_DIR / "eval_patch_index.csv", index=False)
+    pd.DataFrame(patch_records).to_csv(OUT_DIR / "patch_index.csv", index=False)
     print(f"완료: {len(patch_records)}개 패치 → {OUT_DIR}")
 
 
