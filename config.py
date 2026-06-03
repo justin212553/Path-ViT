@@ -13,8 +13,9 @@ class ModelConfig:
 
 @dataclass
 class DataConfig:
-    patches_root: str   = "data/patches"
-    csv_path:     str   = "data/stage_labels.csv"
+    patches_root:  str   = "data/patches"
+    csv_path:      str   = "data/stage_labels.csv"
+    wsi_eval_dir:  str   = "data/wsi_eval"
     val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
     eval_ratio:  float = 0.1   # stratified eval(held-out) 비율
     num_workers: int   = 4
