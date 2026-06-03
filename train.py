@@ -4,9 +4,12 @@ CAMELYON17 패치 레벨 학습 스크립트
 손실:   CrossEntropyLoss (class-weighted, 클래스 불균형 보정)
 데이터: CAMELYON17NodeDataset (eval_patch_index.csv, GT 패치 라벨 포함)
 """
+import json
 import math
+import os
 import random
 import contextlib
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -25,6 +28,27 @@ from config import Config
 from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from utils.metrics import compute_patch_metrics
+
+
+def _load_env():
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def send_slack(message: str):
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        data = json.dumps({"text": message}).encode()
+        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def set_seed(seed: int):
@@ -164,8 +188,10 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
 
 
 def main():
+    _load_env()
     cfg    = Config()
     set_seed(cfg.train.seed)
+    start_time = datetime.now()
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
     torch.backends.cudnn.benchmark = True
@@ -300,6 +326,23 @@ def main():
         wandb.log({f"eval/{k}": v for k, v in final_metrics.items()})
         wandb.finish()
 
+    elapsed = datetime.now() - start_time
+    h, rem  = divmod(int(elapsed.total_seconds()), 3600)
+    m, s    = divmod(rem, 60)
+    send_slack(
+        f":white_check_mark: *Path-ViT 학습 완료*\n"
+        f"> Epochs: {cfg.train.epochs} | Best val AUC: *{best_score:.4f}*\n"
+        f"> Eval AUC: *{final_metrics.get('auc_roc', 0):.4f}*  "
+        f"F1: {final_metrics.get('f1', 0):.4f}  "
+        f"Acc: {final_metrics.get('accuracy', 0):.4f}\n"
+        f"> 소요 시간: {h}h {m}m {s}s"
+    )
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _load_env()
+        send_slack(f":x: *Path-ViT 학습 에러*\n```{type(e).__name__}: {e}```")
+        raise
