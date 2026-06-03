@@ -213,9 +213,10 @@ class CAMELYON17NodeDataset(Dataset):
         self.root        = Path(cfg.patches_root)
 
         index_df = pd.read_csv(self.root / "patch_index.csv")
-        # Resolve relative paths to absolute before DataLoader forks workers
+        # Rebuild paths from current root (CSV may contain stale directory names)
+        # and resolve to absolute before DataLoader forks workers
         index_df["filename"] = index_df["filename"].apply(
-            lambda f: str(Path(f).resolve())
+            lambda f: str((self.root / Path(f).parts[-2] / Path(f).parts[-1]).resolve())
         )
 
         all_slides = []
