@@ -95,11 +95,7 @@ def evaluate_patch_level(
 
 if __name__ == "__main__":
     from pathlib import Path
-    ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
-    checkpoints = sorted(ckpt_dir.glob("*.pth"))
-    if not checkpoints:
-        raise FileNotFoundError(f"체크포인트 없음: {ckpt_dir}")
-    checkpoint = str(checkpoints[-1])
+    checkpoint = str(Path(__file__).parent / "models" / "checkpoint" / "camelyon_best.pt")
     print(f"checkpoint: {checkpoint}")
 
     evaluate_patch_level(checkpoint, split="eval", save_vis=True, vis_dir="heatmap")
