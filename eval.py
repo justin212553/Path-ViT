@@ -3,7 +3,6 @@ CAMELYON17 패치 레벨 평가 스크립트
 - WSI 1장의 모든 패치를 transformer에 한 번에 넣어 per-patch 분류
 - 체크포인트에 저장된 Youden's J threshold 사용
 """
-import argparse
 import numpy as np
 import torch
 import torch.nn as nn
@@ -95,15 +94,12 @@ def evaluate_patch_level(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("checkpoint", type=str)
-    parser.add_argument("--split", type=str, default="eval",
-                        choices=["eval", "val", "all"],
-                        help="평가에 사용할 split (기본: eval — held-out 셋)")
-    parser.add_argument("--vis", action="store_true",
-                        help="듀얼 오버레이 시각화 저장")
-    parser.add_argument("--vis-dir", type=str, default="heatmaps",
-                        help="시각화 저장 디렉토리")
-    args = parser.parse_args()
+    from pathlib import Path
+    ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
+    checkpoints = sorted(ckpt_dir.glob("*.pth"))
+    if not checkpoints:
+        raise FileNotFoundError(f"체크포인트 없음: {ckpt_dir}")
+    checkpoint = str(checkpoints[-1])
+    print(f"checkpoint: {checkpoint}")
 
-    evaluate_patch_level(args.checkpoint, split=args.split, save_vis=args.vis, vis_dir=args.vis_dir)
+    evaluate_patch_level(checkpoint, split="eval", save_vis=True, vis_dir="heatmap")

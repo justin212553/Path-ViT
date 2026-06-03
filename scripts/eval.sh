@@ -7,6 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G                  
 #SBATCH --time=18:00:00            
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/eval.log
 
 cd /pub/wonseukl/Path-ViT/
 
