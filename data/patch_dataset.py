@@ -213,6 +213,11 @@ class CAMELYON17NodeDataset(Dataset):
         self.root        = Path(cfg.patches_root)
 
         index_df = pd.read_csv(self.root / "patch_index.csv")
+        # Rebuild paths from current root (CSV may contain stale directory names)
+        # and resolve to absolute before DataLoader forks workers
+        index_df["filename"] = index_df["filename"].apply(
+            lambda f: str((self.root / Path(f).parts[-2] / Path(f).parts[-1]).resolve())
+        )
 
         all_slides = []
         for slide_id, grp in index_df.groupby("slide_id"):
