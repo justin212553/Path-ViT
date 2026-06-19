@@ -14,6 +14,8 @@ class ModelConfig:
 @dataclass
 class DataConfig:
     patches_root: str   = "data/patches"
+    wsi_root:    str   = "data/patches_train"  # WSI 단위 MIL 학습용 (전체 train 노드)
+    test_root:   str   = "data/patches"        # WSI 단위 MIL val/test용 (held-out 노드)
     csv_path:     str   = "data/stage_labels.csv"
     val_ratio:   float = 0.1   # stratified val 비율 (pos/neg 각각 적용)
     eval_ratio:  float = 0.1   # stratified eval(held-out) 비율

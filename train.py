@@ -1,8 +1,8 @@
 """
-CAMELYON17 패치 레벨 학습 스크립트
-태스크: annotation 기반 패치 이진 분류 (종양 / 정상)
+CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트
+태스크: stage_labels.csv 기반 WSI 단위 이진 분류 (정상 / 전이)
 손실:   CrossEntropyLoss (class-weighted, 클래스 불균형 보정)
-데이터: CAMELYON17NodeDataset (eval_patch_index.csv, GT 패치 라벨 포함)
+데이터: CAMELYON17PatchDataset (patches_train 노드 폴더 + stage_labels.csv 라벨)
 """
 import json
 import math
@@ -25,7 +25,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.patch_dataset import CAMELYON17NodeDataset
+from data.patch_dataset import CAMELYON17PatchDataset
 from models import PatchViT
 from utils.metrics import compute_patch_metrics
 
@@ -101,13 +101,13 @@ def _encode_patches_chunked(
     ])
 
 
-def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tensor:
-    """훈련 셋 패치 라벨 분포로 class weight 계산."""
-    all_labels = np.concatenate([item["df"]["patch_label"].values for item in dataset.slides])
-    n_neg = int((all_labels == 0).sum())
-    n_pos = int((all_labels == 1).sum())
+def _compute_class_weights(dataset: CAMELYON17PatchDataset, device) -> torch.Tensor:
+    """훈련 셋 WSI 라벨 분포로 class weight 계산."""
+    labels = dataset.items["label"].values
+    n_neg = int((labels == 0).sum())
+    n_pos = int((labels == 1).sum())
     total = n_neg + n_pos
-    print(f"  Train patches: {n_neg} neg / {n_pos} pos  (pos ratio={n_pos/total:.3f})")
+    print(f"  Train slides: {n_neg} neg / {n_pos} pos  (pos ratio={n_pos/total:.3f})")
     return torch.tensor(
         [total / (2.0 * n_neg), total / (2.0 * n_pos)],
         dtype=torch.float32,
@@ -127,19 +127,20 @@ def train_one_epoch(
     pending = 0
 
     for step, batch in enumerate(loader):
-        patches      = batch["patches"].squeeze(0)                                     # (N, 3, H, W) — CPU 유지
-        coords       = batch["coords"].squeeze(0).to(device, non_blocking=True)        # (N, 2)
-        patch_labels = batch["patch_labels"].squeeze(0).to(device, non_blocking=True)  # (N,)
+        patches = batch["patches"].squeeze(0)                              # (N, 3, H, W) — CPU 유지
+        coords  = batch["coords"].squeeze(0).to(device, non_blocking=True) # (N, 2)
+        label   = batch["label"].to(device, non_blocking=True)             # (1,)
 
         # 좌표를 0-기반으로 정규화
         coords[:, 0] -= coords[:, 0].min()
         coords[:, 1] -= coords[:, 1].min()
 
         with amp_ctx:
-            patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
-            ctx_tokens   = model.vit(patch_tokens, coords)                                  # (N, D)
-            patch_logits = model.classifier(ctx_tokens)                                     # (N, 2)
-            loss = criterion(patch_logits, patch_labels) / accum_n
+            patch_tokens          = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
+            ctx_tokens            = model.vit(patch_tokens, coords)                                  # (N, D)
+            wsi_embed, _          = model.attn_pool(ctx_tokens)                                      # (D,)
+            wsi_logits            = model.classifier(wsi_embed.unsqueeze(0))                         # (1, 2)
+            loss = criterion(wsi_logits, label) / accum_n
 
         scaler.scale(loss).backward()
         total_loss += loss.item() * accum_n
@@ -164,9 +165,9 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
     chunk_size = cfg.train.cnn_chunk_size
 
     for batch in loader:
-        patches      = batch["patches"].squeeze(0)                               # (N, 3, H, W) — CPU 유지
-        coords       = batch["coords"].squeeze(0).to(device, non_blocking=True)
-        patch_labels = batch["patch_labels"].squeeze(0).numpy()
+        patches = batch["patches"].squeeze(0)                              # (N, 3, H, W) — CPU 유지
+        coords  = batch["coords"].squeeze(0).to(device, non_blocking=True)
+        label   = int(batch["label"].item())
 
         coords[:, 0] -= coords[:, 0].min()
         coords[:, 1] -= coords[:, 1].min()
@@ -174,16 +175,17 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
         with amp_ctx:
             patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
             ctx_tokens   = model.vit(patch_tokens, coords)
-            patch_logits = model.classifier(ctx_tokens)
+            wsi_embed, _ = model.attn_pool(ctx_tokens)
+            wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))
 
-        scores = torch.softmax(patch_logits, dim=-1)[:, 1].float().cpu().numpy()
+        score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
 
-        all_scores.append(scores)
-        all_labels.append(patch_labels)
+        all_scores.append(score)
+        all_labels.append(label)
 
     return compute_patch_metrics(
-        np.concatenate(all_scores),
-        np.concatenate(all_labels),
+        np.array(all_scores),
+        np.array(all_labels),
     )
 
 
@@ -225,12 +227,9 @@ def main():
             },
         )
 
-    split_kwargs = dict(
-        val_ratio=cfg.data.val_ratio, eval_ratio=cfg.data.eval_ratio, seed=cfg.train.seed
-    )
-    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches, **split_kwargs)
-    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches, **split_kwargs)
-    eval_ds  = CAMELYON17NodeDataset(cfg.data, split="eval",  max_patches=cfg.data.max_patches, **split_kwargs)
+    train_ds = CAMELYON17PatchDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
+    val_ds   = CAMELYON17PatchDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
+    eval_ds  = CAMELYON17PatchDataset(cfg.data, split="test",  max_patches=cfg.data.max_patches)
 
     dl_kwargs = dict(
         batch_size=1,
