@@ -2,7 +2,7 @@
 CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트
 태스크: stage_labels.csv 기반 WSI 단위 이진 분류 (정상 / 전이)
 손실:   CrossEntropyLoss (class-weighted, 클래스 불균형 보정)
-데이터: CAMELYON17PatchDataset (patches_train 노드 폴더 + stage_labels.csv 라벨)
+데이터: CAMELYON17NodeDataset (patches_train 노드 폴더 + stage_labels.csv 라벨)
 """
 import json
 import math
@@ -25,7 +25,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.patch_dataset import CAMELYON17PatchDataset
+from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from utils.metrics import compute_patch_metrics
 
@@ -101,7 +101,7 @@ def _encode_patches_chunked(
     ])
 
 
-def _compute_class_weights(dataset: CAMELYON17PatchDataset, device) -> torch.Tensor:
+def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tensor:
     """훈련 셋 WSI 라벨 분포로 class weight 계산."""
     labels = dataset.items["label"].values
     n_neg = int((labels == 0).sum())
@@ -227,9 +227,9 @@ def main():
             },
         )
 
-    train_ds = CAMELYON17PatchDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
-    val_ds   = CAMELYON17PatchDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
-    eval_ds  = CAMELYON17PatchDataset(cfg.data, split="test",  max_patches=cfg.data.max_patches)
+    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
+    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
+    eval_ds  = CAMELYON17NodeDataset(cfg.data, split="test",  max_patches=cfg.data.max_patches)
 
     dl_kwargs = dict(
         batch_size=1,

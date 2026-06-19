@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from config import Config
-from data.patch_dataset import CAMELYON17PatchDataset
+from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from utils.metrics import compute_patch_metrics
 
@@ -82,7 +82,7 @@ def evaluate_wsi_level(
         cfg = Config()
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
-    dataset = CAMELYON17PatchDataset(cfg.data, split=split, max_patches=cfg.data.max_patches)
+    dataset = CAMELYON17NodeDataset(cfg.data, split=split, max_patches=cfg.data.max_patches)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False)
 
     model = PatchViT(cfg.model).to(device)
