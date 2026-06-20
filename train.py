@@ -291,17 +291,15 @@ def main():
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
-                    "threshold":        metrics["threshold"],
                     "epoch":            epoch + 1,
                     "val_auc":          best_score,
                 },
                 ckpt_path,
             )
-            print(f"  → checkpoint saved (auc={best_score:.4f}, threshold={metrics['threshold']:.4f})")
+            print(f"  → checkpoint saved (auc={best_score:.4f})")
             if WANDB_AVAILABLE:
-                wandb.run.summary["best_val_auc"]   = best_score
-                wandb.run.summary["best_epoch"]      = epoch + 1
-                wandb.run.summary["best_threshold"]  = metrics["threshold"]
+                wandb.run.summary["best_val_auc"] = best_score
+                wandb.run.summary["best_epoch"]   = epoch + 1
 
     if WANDB_AVAILABLE:
         wandb.finish()

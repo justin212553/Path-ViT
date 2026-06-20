@@ -36,16 +36,8 @@ ANNO_URL   = (
 )
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-# annotation 있는 환자 전체 (43명, 50 slides)
-EVAL_PATIENTS = [
-     4,  9, 10, 12, 15, 16, 17,
-    20, 21, 22, 24, 34, 36, 38, 39,
-    40, 41, 42, 44, 45, 46, 48, 51, 52,
-    60, 61, 62, 64, 66, 67, 68, 72, 73, 75,
-    80, 81, 86, 87, 88, 89, 92, 96, 99,
-]
-# 기존 보유 7명 + 보충 3명(006, 014, 026) = 10명
-TRAIN_PATIENTS = [0, 1, 5, 6, 7, 8, 13, 14, 19, 26]
+# CAMELYON17 train 전체 환자 (patient_000 ~ patient_099), eval/train 구분 없이 전부 다운로드
+ALL_PATIENTS = list(range(100))
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -215,8 +207,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", default=default_root)
     parser.add_argument("--workers",   type=int, default=3)
     parser.add_argument("--retries",   type=int, default=3)
-    parser.add_argument("--eval-only",  action="store_true")
-    parser.add_argument("--train-only", action="store_true")
     parser.add_argument("--log-file",  default=None)
     parser.add_argument("--no-progress", action="store_true")
     return parser.parse_args()
@@ -231,23 +221,16 @@ def main():
 
     use_tqdm = not args.no_progress and sys.stdout.isatty()
 
-    eval_dir  = data_root / "wsi_eval"
-    train_dir = data_root / "wsi_train"
-    eval_dir.mkdir(parents=True, exist_ok=True)
-    train_dir.mkdir(parents=True, exist_ok=True)
+    wsi_dir = data_root / "wsi_train"
+    wsi_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks = []
-    if not args.train_only:
-        tasks += [(pid, eval_dir)  for pid in EVAL_PATIENTS]
-    if not args.eval_only:
-        tasks += [(pid, train_dir) for pid in TRAIN_PATIENTS]
+    tasks = [(pid, wsi_dir) for pid in ALL_PATIENTS]
 
     logger.info("=" * 60)
     logger.info(f"CAMELYON17 다운로드 시작 (zip 보존)")
     logger.info(f"  data_root : {data_root.resolve()}")
     logger.info(f"  총 파일   : {len(tasks)}개  (동시 {args.workers}개)")
-    logger.info(f"  eval      → {eval_dir}  ({len(EVAL_PATIENTS)}명)")
-    logger.info(f"  train     → {train_dir} ({len(TRAIN_PATIENTS)}명)")
+    logger.info(f"  wsi       → {wsi_dir}  ({len(ALL_PATIENTS)}명, eval/train 구분 없음)")
     logger.info("=" * 60)
 
     _download_annotations(data_root, logger, use_tqdm=use_tqdm)

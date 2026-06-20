@@ -1,7 +1,7 @@
 """
 CAMELYON17 WSI(노드) 단위 MIL 평가 스크립트
 - WSI 1장의 모든 패치를 한 번에 넣어 attention pooling 후 WSI 단위 분류
-- 체크포인트에 저장된 Youden's J threshold 사용
+- threshold는 eval 데이터 자체에서 Youden's J로 매번 새로 계산 (utils/metrics.py)
 """
 import argparse
 from pathlib import Path
@@ -94,8 +94,6 @@ def evaluate_wsi_level(
     model = PatchViT(cfg.model).to(device)
     ckpt  = torch.load(checkpoint, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
-    threshold = ckpt.get("threshold", 0.5)
-    print(f"  (checkpoint threshold: {threshold:.4f})")
     model.eval()
 
     chunk_size = cfg.train.cnn_chunk_size
@@ -115,8 +113,7 @@ def evaluate_wsi_level(
                 wsi_logits               = model.classifier(wsi_embed.unsqueeze(0))
 
                 score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
-                pred  = int(score >= threshold)
-                print(f"  {slide_id}: GT={'N1+' if label else 'N0'}  score={score:.3f}  pred={'N1+' if pred else 'N0'}")
+                print(f"  {slide_id}: GT={'N1+' if label else 'N0'}  score={score:.3f}")
 
                 all_scores.append(score)
                 all_labels.append(label)
