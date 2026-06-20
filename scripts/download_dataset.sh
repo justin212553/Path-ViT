@@ -10,4 +10,4 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-./.venv/bin/python -u utils/dataset_download.py
+./.venv/bin/python -u utils/dataset_download_zip.py
