@@ -2,7 +2,8 @@
 CAMELYON17 패치 데이터셋 — 노드(슬라이드) 단위 MIL
 
 각 아이템 = patient_NNN_node_M 슬라이드 하나의 패치 묶음 + 그 노드의 라벨.
-분할은 환자 단위로 수행해 같은 환자의 노드가 train/val에 섞이지 않도록 한다.
+patches_root 하나에서 val(positive 5 / negative 5 랜덤)을 먼저 떼어내고
+나머지 전부를 train으로 사용한다 (모델 파이프라인 점검용 — eval split 없음).
 
 반환 형식:
     patches:    (N, 3, H, W)  float32
@@ -52,8 +53,8 @@ def _parse_coord(name: str) -> tuple[int, int]:
 class CAMELYON17NodeDataset(Dataset):
     """
     Args:
-        cfg:       DataConfig (wsi_root, test_root, csv_path, val_ratio 참조)
-        split:     "train" | "val" | "test"
+        cfg:       DataConfig (patches_root, csv_path 참조)
+        split:     "train" | "val" — patches_root 하나를 두 split으로 분할
         transform: 패치에 적용할 transform
     """
 
@@ -66,6 +67,7 @@ class CAMELYON17NodeDataset(Dataset):
     ):
         self.transform   = transform or PATCH_TRANSFORM
         self.max_patches = max_patches
+        self.root        = Path(cfg.patches_root)
 
         df = pd.read_csv(cfg.csv_path)
 
@@ -77,41 +79,30 @@ class CAMELYON17NodeDataset(Dataset):
         node_df = node_df.dropna(subset=["label"])   # 매핑 안 된 stage 제거
         node_df["label"] = node_df["label"].astype(int)
 
-        def _has_patches(r, root: Path) -> bool:
-            d = root / f"{r['patient_id']}_node_{r['node']}"
+        def _has_patches(r) -> bool:
+            d = self.root / f"{r['patient_id']}_node_{r['node']}"
             return d.is_dir() and (next(d.glob("*.png"), None) or next(d.glob("*.jpg"), None)) is not None
 
-        if split == "test":
-            self.wsi_root = Path(cfg.test_root)
-            items_df = node_df
-
-        elif split == "val":
-            # wsi_eval(patches_eval)에서 positive 1개, negative 1개 랜덤 선택
-            self.wsi_root = Path(cfg.test_root)
-            eval_root = self.wsi_root
-            has_eval = node_df.apply(lambda r: _has_patches(r, eval_root), axis=1)
-            eval_df  = node_df[has_eval].reset_index(drop=True)
-
-            pos_sample = eval_df[eval_df["label"] == 1].sample(5, random_state=42)
-            neg_sample = eval_df[eval_df["label"] == 0].sample(5, random_state=42)
-            items_df = pd.concat([pos_sample, neg_sample]).reset_index(drop=True)
-
-        else:  # train: wsi_train(patches_train) 전체 사용
-            self.wsi_root = Path(cfg.wsi_root)
-            items_df = node_df
-
         # 패치 파일이 1개 이상 존재하는 노드만 유지
-        train_root = self.wsi_root
-        self.items = items_df[
-            items_df.apply(lambda r: _has_patches(r, train_root), axis=1)
-        ].reset_index(drop=True)
+        has_patches = node_df.apply(_has_patches, axis=1)
+        avail_df    = node_df[has_patches].reset_index(drop=True)
+
+        # val: positive 5개, negative 5개 랜덤 선택 / train: 나머지 전체
+        pos_sample = avail_df[avail_df["label"] == 1].sample(5, random_state=42)
+        neg_sample = avail_df[avail_df["label"] == 0].sample(5, random_state=42)
+        val_idx    = pos_sample.index.union(neg_sample.index)
+
+        if split == "val":
+            self.items = pd.concat([pos_sample, neg_sample]).reset_index(drop=True)
+        else:  # train
+            self.items = avail_df.drop(val_idx).reset_index(drop=True)
 
     def __len__(self) -> int:
         return len(self.items)
 
     def __getitem__(self, idx: int) -> dict:
         row      = self.items.iloc[idx]
-        node_dir = self.wsi_root / f"{row['patient_id']}_node_{row['node']}"
+        node_dir = self.root / f"{row['patient_id']}_node_{row['node']}"
 
         patch_paths = sorted(
             list(node_dir.glob("*.png")) + list(node_dir.glob("*.jpg"))

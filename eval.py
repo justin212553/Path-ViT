@@ -3,6 +3,7 @@ CAMELYON17 WSI(노드) 단위 MIL 평가 스크립트
 - WSI 1장의 모든 패치를 한 번에 넣어 attention pooling 후 WSI 단위 분류
 - 체크포인트에 저장된 Youden's J threshold 사용
 """
+import argparse
 from pathlib import Path
 from typing import Optional
 
@@ -74,7 +75,7 @@ def _encode_patches_chunked(
 def evaluate_wsi_level(
     checkpoint: str,
     cfg: Config | None = None,
-    split: str = "test",
+    split: str = "val",
     save_vis: bool = False,
     vis_dir: str = "heatmaps",
 ):
@@ -143,9 +144,9 @@ def evaluate_wsi_level(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint", type=str)
-    parser.add_argument("--split", type=str, default="test",
-                        choices=["test", "val"],
-                        help="평가에 사용할 split (기본: test — held-out 전체 셋)")
+    parser.add_argument("--split", type=str, default="val",
+                        choices=["train", "val"],
+                        help="평가에 사용할 split (기본: val)")
     parser.add_argument("--vis", action="store_true",
                         help="attention 히트맵 시각화 저장")
     parser.add_argument("--vis-dir", type=str, default="heatmaps",

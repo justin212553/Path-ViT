@@ -1,8 +1,8 @@
 """
-CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트
+CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트 (모델 파이프라인 점검용)
 태스크: stage_labels.csv 기반 WSI 단위 이진 분류 (정상 / 전이)
 손실:   CrossEntropyLoss (class-weighted, 클래스 불균형 보정)
-데이터: CAMELYON17NodeDataset (patches_train 노드 폴더 + stage_labels.csv 라벨)
+데이터: CAMELYON17NodeDataset (patches_root 노드 폴더 + stage_labels.csv 라벨, train/val만 사용)
 """
 import json
 import math
@@ -221,15 +221,12 @@ def main():
                 "num_transformer_layers":cfg.model.num_transformer_layers,
                 "dropout":               cfg.model.dropout,
                 "max_grid_size":         cfg.model.max_grid_size,
-                "val_ratio":             cfg.data.val_ratio,
-                "eval_ratio":            cfg.data.eval_ratio,
                 "max_patches":           cfg.data.max_patches,
             },
         )
 
     train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
     val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
-    eval_ds  = CAMELYON17NodeDataset(cfg.data, split="test",  max_patches=cfg.data.max_patches)
 
     dl_kwargs = dict(
         batch_size=1,
@@ -240,7 +237,6 @@ def main():
     )
     train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
-    eval_loader  = DataLoader(eval_ds,  shuffle=False, **dl_kwargs)
 
     model = PatchViT(cfg.model).to(device)
     model.cnn.backbone.requires_grad_(False)
@@ -255,7 +251,7 @@ def main():
     scheduler = _build_scheduler(optimizer, cfg)
 
     dtype_name = str(amp_dtype).split(".")[-1] if amp_dtype else "fp32"
-    print(f"Train: {len(train_ds)} slides  Val: {len(val_ds)} slides  Eval: {len(eval_ds)} slides")
+    print(f"Train: {len(train_ds)} slides  Val: {len(val_ds)} slides")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
         f"AMP={dtype_name} | accum={cfg.train.accumulate_grad_steps} slides "
@@ -310,19 +306,7 @@ def main():
                 wandb.run.summary["best_epoch"]      = epoch + 1
                 wandb.run.summary["best_threshold"]  = metrics["threshold"]
 
-    print("\n=== Final Evaluation on held-out eval set (best checkpoint) ===")
-    if ckpt_path.exists():
-        ckpt = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        print(f"  (threshold from best checkpoint: {ckpt['threshold']:.4f})")
-    else:
-        print("WARNING: no checkpoint saved, using final model weights")
-    final_metrics = evaluate(model, eval_loader, cfg, device, amp_ctx)
-    for k, v in final_metrics.items():
-        print(f"  {k}: {v:.4f}")
-
     if WANDB_AVAILABLE:
-        wandb.log({f"eval/{k}": v for k, v in final_metrics.items()})
         wandb.finish()
 
     elapsed = datetime.now() - start_time
@@ -331,9 +315,6 @@ def main():
     send_slack(
         f":white_check_mark: *Path-ViT 학습 완료*\n"
         f"> Epochs: {cfg.train.epochs} | Best val AUC: *{best_score:.4f}*\n"
-        f"> Eval AUC: *{final_metrics.get('auc_roc', 0):.4f}*  "
-        f"F1: {final_metrics.get('f1', 0):.4f}  "
-        f"Acc: {final_metrics.get('accuracy', 0):.4f}\n"
         f"> 소요 시간: {h}h {m}m {s}s"
     )
 
