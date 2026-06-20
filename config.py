@@ -27,9 +27,7 @@ class TrainConfig:
     device:                str   = "cuda"
     seed:                  int   = 42
     # --- GPU 최적화 파라미터 ---
-    # gradient accumulation: effective batch = accum_steps WSIs
-    # (MIL은 DataLoader batch_size=1 고정이므로 accumulation으로 보완)
-    accumulate_grad_steps: int   = 4
+    # gradient accumulation 단위 = 환자 1명(보유한 모든 노드 누적 후 1 step, train.py 참조)
     warmup_epochs:         int   = 3       # linear LR warmup → cosine decay
     # AMP dtype: "auto" → A30은 bfloat16, V100은 float16 자동 선택 / "none" 비활성화
     amp_dtype:             str   = "auto"

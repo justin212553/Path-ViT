@@ -1,14 +1,18 @@
 """
 CAMELYON17 패치 데이터셋 — 노드(슬라이드) 단위 MIL
 
-각 아이템 = patient_NNN_node_M 슬라이드 하나의 패치 묶음 + 그 노드의 라벨.
-patches_root 하나에서 val(positive 5 / negative 5 랜덤)을 먼저 떼어내고
-나머지 전부를 train으로 사용한다 (모델 파이프라인 점검용 — eval split 없음).
+각 아이템 = 환자 1명의 모든 노드(슬라이드) 리스트. 노드별 라벨/예측 단위는 그대로 유지하되,
+DataLoader가 한 번에 꺼내는 단위(배치/gradient accumulation 단위)를 환자로 묶기 위함이다.
+patches_root 하나에서 환자 단위로 val(양성 환자 5 / 음성 환자 5 랜덤)을 먼저 떼어내고
+나머지 환자의 노드 전부를 train으로 사용한다 (같은 환자가 train/val에 동시에 들어가는
+leakage 방지, 모델 파이프라인 점검용 — eval split 없음).
 
-반환 형식:
+DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 한다.
+
+반환 형식 (환자 1명의 노드 수만큼의 리스트, 각 원소는 dict):
     patches:    (N, 3, H, W)  float32
     coords:     (N, 2)        int64   [row, col]  (파일명 r####_c#### 파싱)
-    label:      ()            int64   (0=음성, 1=전이)
+    label:      (1,)          int64   (0=음성, 1=전이)
     patient_id: str
     node:       int
 """
@@ -54,8 +58,11 @@ class CAMELYON17NodeDataset(Dataset):
     """
     Args:
         cfg:       DataConfig (patches_root, csv_path 참조)
-        split:     "train" | "val" — patches_root 하나를 두 split으로 분할
+        split:     "train" | "val" — patches_root 하나를 환자 단위로 두 split으로 분할
         transform: 패치에 적용할 transform
+
+    아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 노드의
+    (patches, coords, label, ...) dict를 리스트로 반환한다.
     """
 
     def __init__(
@@ -87,21 +94,24 @@ class CAMELYON17NodeDataset(Dataset):
         has_patches = node_df.apply(_has_patches, axis=1)
         avail_df    = node_df[has_patches].reset_index(drop=True)
 
-        # val: positive 5개, negative 5개 랜덤 선택 / train: 나머지 전체
-        pos_sample = avail_df[avail_df["label"] == 1].sample(5, random_state=42)
-        neg_sample = avail_df[avail_df["label"] == 0].sample(5, random_state=42)
-        val_idx    = pos_sample.index.union(neg_sample.index)
+        # 환자 단위로 양성(노드 중 1개라도 전이) / 음성(전부 정상) 분류 후 val 환자 샘플링
+        patient_label = avail_df.groupby("patient_id")["label"].max()
+        pos_patients  = patient_label[patient_label == 1].sample(5, random_state=42).index
+        neg_patients  = patient_label[patient_label == 0].sample(5, random_state=42).index
+        val_patients  = set(pos_patients) | set(neg_patients)
 
+        is_val = avail_df["patient_id"].isin(val_patients)
         if split == "val":
-            self.items = pd.concat([pos_sample, neg_sample]).reset_index(drop=True)
-        else:  # train
-            self.items = avail_df.drop(val_idx).reset_index(drop=True)
+            self.items = avail_df[is_val].reset_index(drop=True)
+        else:  # train: val에 포함되지 않은 환자의 노드 전체
+            self.items = avail_df[~is_val].reset_index(drop=True)
+
+        self.patients = sorted(self.items["patient_id"].unique())
 
     def __len__(self) -> int:
-        return len(self.items)
+        return len(self.patients)
 
-    def __getitem__(self, idx: int) -> dict:
-        row      = self.items.iloc[idx]
+    def _load_node(self, row) -> dict:
         node_dir = self.root / f"{row['patient_id']}_node_{row['node']}"
 
         patch_paths = sorted(
@@ -125,7 +135,12 @@ class CAMELYON17NodeDataset(Dataset):
         return {
             "patches":    patches_t,
             "coords":     coords,
-            "label":      torch.tensor(row["label"], dtype=torch.long),
+            "label":      torch.tensor([row["label"]], dtype=torch.long),
             "patient_id": row["patient_id"],
             "node":       int(row["node"]),
         }
+
+    def __getitem__(self, idx: int) -> list:
+        patient_id   = self.patients[idx]
+        patient_rows = self.items[self.items["patient_id"] == patient_id]
+        return [self._load_node(row) for _, row in patient_rows.iterrows()]

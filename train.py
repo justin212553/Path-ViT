@@ -1,6 +1,7 @@
 """
 CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트 (모델 파이프라인 점검용)
-태스크: stage_labels.csv 기반 WSI 단위 이진 분류 (정상 / 전이)
+태스크: stage_labels.csv 기반 WSI 단위 이진 분류 (정상 / 전이) — 노드별 라벨/예측 유지
+배치:   환자 1명 = 1 스텝. 그 환자가 가진 모든 노드를 누적(backward)한 뒤 한 번 optimizer.step()
 손실:   CrossEntropyLoss (class-weighted, 클래스 불균형 보정)
 데이터: CAMELYON17NodeDataset (patches_root 노드 폴더 + stage_labels.csv 라벨, train/val만 사용)
 """
@@ -115,47 +116,45 @@ def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tens
     )
 
 
+def _identity_collate(batch: list) -> list:
+    """batch_size=1 전제 — DataLoader가 환자 1명의 노드 리스트를 그대로 통과시키도록 함."""
+    return batch[0]
+
+
 def train_one_epoch(
     model, loader, optimizer, scaler, cfg, device, amp_ctx, criterion
 ) -> float:
     model.train()
-    total_loss = 0.0
-    chunk_size = cfg.train.cnn_chunk_size
-    accum_n    = cfg.train.accumulate_grad_steps
+    total_loss  = 0.0
+    total_nodes = 0
+    chunk_size  = cfg.train.cnn_chunk_size
 
-    optimizer.zero_grad()
-    pending = 0
+    for patient_nodes in loader:                # 환자 1명 = 1 스텝
+        n_nodes = len(patient_nodes)
+        optimizer.zero_grad()
 
-    for step, batch in enumerate(loader):
-        patches = batch["patches"].squeeze(0)                              # (N, 3, H, W) — CPU 유지
-        coords  = batch["coords"].squeeze(0).to(device, non_blocking=True) # (N, 2)
-        label   = batch["label"].to(device, non_blocking=True)             # (1,)
+        for node in patient_nodes:
+            patches = node["patches"]                              # (N, 3, H, W) — CPU 유지
+            coords  = node["coords"].to(device, non_blocking=True) # (N, 2)
+            label   = node["label"].to(device, non_blocking=True)  # (1,)
 
-        # 좌표를 0-기반으로 정규화
-        coords[:, 0] -= coords[:, 0].min()
-        coords[:, 1] -= coords[:, 1].min()
+            with amp_ctx:
+                patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
+                ctx_tokens   = model.vit(patch_tokens, coords)                                  # (N, D)
+                wsi_embed, _ = model.attn_pool(ctx_tokens)                                      # (D,)
+                wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))                         # (1, 2)
+                loss = criterion(wsi_logits, label) / n_nodes
 
-        with amp_ctx:
-            patch_tokens          = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
-            ctx_tokens            = model.vit(patch_tokens, coords)                                  # (N, D)
-            wsi_embed, _          = model.attn_pool(ctx_tokens)                                      # (D,)
-            wsi_logits            = model.classifier(wsi_embed.unsqueeze(0))                         # (1, 2)
-            loss = criterion(wsi_logits, label) / accum_n
+            scaler.scale(loss).backward()
+            total_loss  += loss.item() * n_nodes
+            total_nodes += 1
 
-        scaler.scale(loss).backward()
-        total_loss += loss.item() * accum_n
-        pending += 1
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
 
-        last_step = (step == len(loader) - 1)
-        if pending == accum_n or last_step:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
-            pending = 0
-
-    return total_loss / len(loader)
+    return total_loss / total_nodes
 
 
 @torch.no_grad()
@@ -164,24 +163,22 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
     all_scores, all_labels = [], []
     chunk_size = cfg.train.cnn_chunk_size
 
-    for batch in loader:
-        patches = batch["patches"].squeeze(0)                              # (N, 3, H, W) — CPU 유지
-        coords  = batch["coords"].squeeze(0).to(device, non_blocking=True)
-        label   = int(batch["label"].item())
+    for patient_nodes in loader:
+        for node in patient_nodes:
+            patches = node["patches"]                              # (N, 3, H, W) — CPU 유지
+            coords  = node["coords"].to(device, non_blocking=True)
+            label   = int(node["label"].item())
 
-        coords[:, 0] -= coords[:, 0].min()
-        coords[:, 1] -= coords[:, 1].min()
+            with amp_ctx:
+                patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
+                ctx_tokens   = model.vit(patch_tokens, coords)
+                wsi_embed, _ = model.attn_pool(ctx_tokens)
+                wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))
 
-        with amp_ctx:
-            patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
-            ctx_tokens   = model.vit(patch_tokens, coords)
-            wsi_embed, _ = model.attn_pool(ctx_tokens)
-            wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))
+            score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
 
-        score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
-
-        all_scores.append(score)
-        all_labels.append(label)
+            all_scores.append(score)
+            all_labels.append(label)
 
     return compute_patch_metrics(
         np.array(all_scores),
@@ -212,7 +209,6 @@ def main():
                 "lr":                    cfg.train.lr,
                 "weight_decay":          cfg.train.weight_decay,
                 "seed":                  cfg.train.seed,
-                "accumulate_grad_steps": cfg.train.accumulate_grad_steps,
                 "warmup_epochs":         cfg.train.warmup_epochs,
                 "amp_dtype":             cfg.train.amp_dtype,
                 "cnn_chunk_size":        cfg.train.cnn_chunk_size,
@@ -230,6 +226,7 @@ def main():
 
     dl_kwargs = dict(
         batch_size=1,
+        collate_fn=_identity_collate,
         num_workers=cfg.data.num_workers,
         pin_memory=(device.type == "cuda"),
         persistent_workers=(cfg.data.num_workers > 0),
@@ -251,10 +248,10 @@ def main():
     scheduler = _build_scheduler(optimizer, cfg)
 
     dtype_name = str(amp_dtype).split(".")[-1] if amp_dtype else "fp32"
-    print(f"Train: {len(train_ds)} slides  Val: {len(val_ds)} slides")
+    print(f"Train: {len(train_ds)} patients  Val: {len(val_ds)} patients")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
-        f"AMP={dtype_name} | accum={cfg.train.accumulate_grad_steps} slides "
+        f"AMP={dtype_name} | batch=1 patient (모든 노드 누적 후 1 step) "
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
     print(f"Class weights: neg={class_weights[0]:.3f}  pos={class_weights[1]:.3f}")

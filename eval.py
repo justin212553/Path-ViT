@@ -72,6 +72,11 @@ def _encode_patches_chunked(
     ])
 
 
+def _identity_collate(batch: list) -> list:
+    """batch_size=1 전제 — DataLoader가 환자 1명의 노드 리스트를 그대로 통과시키도록 함."""
+    return batch[0]
+
+
 def evaluate_wsi_level(
     checkpoint: str,
     cfg: Config | None = None,
@@ -84,7 +89,7 @@ def evaluate_wsi_level(
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
     dataset = CAMELYON17NodeDataset(cfg.data, split=split, max_patches=cfg.data.max_patches)
-    loader  = DataLoader(dataset, batch_size=1, shuffle=False)
+    loader  = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_identity_collate)
 
     model = PatchViT(cfg.model).to(device)
     ckpt  = torch.load(checkpoint, map_location=device)
@@ -97,39 +102,35 @@ def evaluate_wsi_level(
     all_scores, all_labels = [], []
 
     with torch.no_grad():
-        for batch in loader:
-            patches  = batch["patches"].squeeze(0)                              # (N, 3, H, W) — CPU 유지
-            coords   = batch["coords"].squeeze(0).to(device, non_blocking=True) # (N, 2)
-            label    = int(batch["label"].item())
-            slide_id = f"{batch['patient_id'][0]}_node_{int(batch['node'].item())}"
+        for patient_nodes in loader:
+            for node in patient_nodes:
+                patches  = node["patches"]                              # (N, 3, H, W) — CPU 유지
+                coords   = node["coords"].to(device, non_blocking=True) # (N, 2) — 이미 0-기반 정규화됨
+                label    = int(node["label"].item())
+                slide_id = f"{node['patient_id']}_node_{node['node']}"
 
-            orig_coords_np = batch["coords"].squeeze(0).numpy().copy()  # 원본 좌표 (thumbnail 크롭용)
-            coords[:, 0] -= coords[:, 0].min()
-            coords[:, 1] -= coords[:, 1].min()
-            norm_coords_np = coords.cpu().numpy()
+                patch_tokens             = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
+                ctx_tokens               = model.vit(patch_tokens, coords)
+                wsi_embed, attn_weights  = model.attn_pool(ctx_tokens)
+                wsi_logits               = model.classifier(wsi_embed.unsqueeze(0))
 
-            patch_tokens          = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
-            ctx_tokens            = model.vit(patch_tokens, coords)
-            wsi_embed, attn_weights = model.attn_pool(ctx_tokens)
-            wsi_logits            = model.classifier(wsi_embed.unsqueeze(0))
+                score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
+                pred  = int(score >= threshold)
+                print(f"  {slide_id}: GT={'N1+' if label else 'N0'}  score={score:.3f}  pred={'N1+' if pred else 'N0'}")
 
-            score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
-            pred  = int(score >= threshold)
-            print(f"  {slide_id}: GT={'N1+' if label else 'N0'}  score={score:.3f}  pred={'N1+' if pred else 'N0'}")
+                all_scores.append(score)
+                all_labels.append(label)
 
-            all_scores.append(score)
-            all_labels.append(label)
-
-            if save_vis:
-                from utils.visualize import save_heatmap
-                save_heatmap(
-                    heatmap=attn_weights.float().cpu().numpy(),
-                    coords=batch["coords"].squeeze(0).numpy(),
-                    slide_id=slide_id,
-                    label=label,
-                    score=score,
-                    out_dir=vis_dir,
-                )
+                if save_vis:
+                    from utils.visualize import save_heatmap
+                    save_heatmap(
+                        heatmap=attn_weights.float().cpu().numpy(),
+                        coords=node["coords"].numpy(),
+                        slide_id=slide_id,
+                        label=label,
+                        score=score,
+                        out_dir=vis_dir,
+                    )
 
     metrics = compute_patch_metrics(
         np.array(all_scores),
