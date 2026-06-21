@@ -119,7 +119,11 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
 
 NUM_SAMPLES    = 20   # 탐색할 trial(하이퍼파라미터 조합) 수
 TUNE_EPOCHS    = 8    # trial당 학습 epoch 수 (본 학습보다 짧게)
-GPUS_PER_TRIAL = 1.0 if torch.cuda.is_available() else 0.0
+# 주의: 드라이버 프로세스에서 torch.cuda.is_available() 등 CUDA 관련 호출을 하면
+# 드라이버에 CUDA 컨텍스트가 생성되어, 이후 Ray가 trial 함수를 pickle할 때
+# torch.backends.cudnn의 non-picklable 네이티브 핸들까지 직렬화하려다 실패한다.
+# (TypeError: cannot pickle 'CudnnModule' object) — CUDA 초기화는 각 trial 워커 안(train_fn)에서만 일어나야 함.
+GPUS_PER_TRIAL = 1.0
 CPUS_PER_TRIAL = 4.0
 
 
