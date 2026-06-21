@@ -36,8 +36,15 @@ ANNO_URL   = (
 )
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-# CAMELYON17 train 전체 환자 (patient_000 ~ patient_099), eval/train 구분 없이 전부 다운로드
-ALL_PATIENTS = list(range(100))
+# wsi_train/wsi_eval 어디에도 아직 없는 환자만 (기존 53명은 이미 받아둔 상태라 재다운로드 제외)
+MISSING_PATIENTS = [
+    2, 3, 11, 18, 23, 25, 27, 28, 29,
+    30, 31, 32, 33, 35, 37, 43, 47, 49,
+    50, 53, 54, 55, 56, 57, 58, 59, 63,
+    65, 69, 70, 71, 74, 76, 77, 78, 79,
+    82, 83, 84, 85, 90, 91, 93, 94, 95,
+    97, 98,
+]
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -224,13 +231,13 @@ def main():
     wsi_dir = data_root / "wsi_train"
     wsi_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks = [(pid, wsi_dir) for pid in ALL_PATIENTS]
+    tasks = [(pid, wsi_dir) for pid in MISSING_PATIENTS]
 
     logger.info("=" * 60)
     logger.info(f"CAMELYON17 다운로드 시작 (zip 보존)")
     logger.info(f"  data_root : {data_root.resolve()}")
     logger.info(f"  총 파일   : {len(tasks)}개  (동시 {args.workers}개)")
-    logger.info(f"  wsi       → {wsi_dir}  ({len(ALL_PATIENTS)}명, eval/train 구분 없음)")
+    logger.info(f"  wsi       → {wsi_dir}  (미보유 {len(MISSING_PATIENTS)}명만, eval/train 구분 없음)")
     logger.info("=" * 60)
 
     _download_annotations(data_root, logger, use_tqdm=use_tqdm)
