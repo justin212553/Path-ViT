@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=path_vit_eval
+#SBATCH --job-name=eval
 #SBATCH --partition=free-gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

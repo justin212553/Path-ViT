@@ -10,3 +10,4 @@ openslide-python
 openslide-bin
 requests
 wandb
+ray[tune]>=2.9.0

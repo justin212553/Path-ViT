@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=camelyon_download
+#SBATCH --job-name=download
 #SBATCH --partition=standard
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

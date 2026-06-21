@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=camelyon_preprocess
+#SBATCH --job-name=preprocess_eval
 #SBATCH --partition=standard       # GPU 파티션 말고 일반 고성능 연산 파티션 선택
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
