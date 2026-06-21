@@ -13,11 +13,36 @@ CAMELYON17 데이터 압축 해제 스크립트
     wsi_eval/
       patient_004/  ...
 """
+import json
+import os
 import shutil
+import urllib.request
 import zipfile
+from datetime import datetime
 from pathlib import Path
 
 DATA_ROOT = Path("./data")
+
+
+def _load_env():
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def send_slack(message: str):
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        data = json.dumps({"text": message}).encode()
+        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def _extract_zip_flat(zip_path: Path, out_dir: Path) -> None:
@@ -73,6 +98,9 @@ def extract_patient_zips(wsi_dir: Path) -> None:
 
 
 def main() -> None:
+    _load_env()
+    start_time = datetime.now()
+
     if not DATA_ROOT.is_dir():
         raise FileNotFoundError(f"data 디렉토리를 찾을 수 없음: {DATA_ROOT}")
 
@@ -88,6 +116,19 @@ def main() -> None:
 
     print("완료.")
 
+    elapsed = datetime.now() - start_time
+    h, rem  = divmod(int(elapsed.total_seconds()), 3600)
+    m, s    = divmod(rem, 60)
+    send_slack(
+        f":white_check_mark: *CAMELYON17 압축 해제 완료*\n"
+        f"> 소요 시간: {h}h {m}m {s}s"
+    )
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        _load_env()
+        send_slack(f":x: *CAMELYON17 압축 해제 에러*\n```{type(e).__name__}: {e}```")
+        raise

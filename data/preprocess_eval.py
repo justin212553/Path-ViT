@@ -15,7 +15,11 @@ CAMELYON17 eval WSI → 패치 사전 추출 스크립트 (lesion annotation 있
             ...
         patch_index.csv    # slide_id, filename, row, col, patch_label (0/1)
 """
+import json
+import os
+import urllib.request
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from pathlib import Path
 import multiprocessing as mp
 
@@ -32,6 +36,27 @@ PATCH_LEVEL       = 0
 TISSUE_THRESHOLD  = 0.5
 NUM_WORKERS       = 16
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _load_env():
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def send_slack(message: str):
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        data = json.dumps({"text": message}).encode()
+        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def _load_annotations(xml_path: Path) -> list:
@@ -154,11 +179,14 @@ def _process_slide(info):
 
 
 def main():
+    _load_env()
+    start_time = datetime.now()
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     slides = _build_slide_list()
     if not slides:
         print(f"처리할 슬라이드 없음 — {EVAL_DIR} 와 {ANNO_DIR} 경로를 확인하세요.")
+        send_slack(":warning: *CAMELYON17 eval 전처리* — 처리할 슬라이드 없음")
         return
 
     print(f"처리 대상: {len(slides)}개 슬라이드 (annotation 있는 노드만)")
@@ -186,7 +214,21 @@ def main():
     pd.DataFrame(patch_records).to_csv(OUT_DIR / "patch_index.csv", index=False)
     print(f"완료: {len(patch_records)}개 패치 → {OUT_DIR}")
 
+    elapsed = datetime.now() - start_time
+    h, rem  = divmod(int(elapsed.total_seconds()), 3600)
+    m, s    = divmod(rem, 60)
+    send_slack(
+        f":white_check_mark: *CAMELYON17 eval 전처리 완료*\n"
+        f"> 슬라이드: {len(slides)}개 | 패치: {len(patch_records)}개\n"
+        f"> 소요 시간: {h}h {m}m {s}s"
+    )
+
 
 if __name__ == "__main__":
     mp.freeze_support()
-    main()
+    try:
+        main()
+    except Exception as e:
+        _load_env()
+        send_slack(f":x: *CAMELYON17 eval 전처리 에러*\n```{type(e).__name__}: {e}```")
+        raise
