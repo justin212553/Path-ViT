@@ -23,4 +23,4 @@ echo "  job id: $JOB_EVAL"
 
 echo
 echo "제출 완료: download=$JOB_DOWNLOAD → extract=$JOB_EXTRACT → eval=$JOB_EVAL"
-echo "상태 확인: squeue -u \$USER"
+echo "상태 확인: squeue -u wonseukl"
