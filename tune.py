@@ -67,9 +67,16 @@ def main():
     results = tuner.fit()
 
     best = results.get_best_result(metric="val_auc_roc", mode="max")
+    embed_dim, num_heads = best.config["embed_head"]
     print("\n=== Best trial ===")
-    print("Config:", best.config)
-    print(f"val_auc_roc: {best.metrics['val_auc_roc']:.4f}")
+    print(f"  val_auc_roc             : {best.metrics['val_auc_roc']:.4f}")
+    print(f"  lr                      : {best.config['lr']:.3e}")
+    print(f"  weight_decay            : {best.config['weight_decay']:.3e}")
+    print(f"  warmup_epochs           : {best.config['warmup_epochs']}")
+    print(f"  dropout                 : {best.config['dropout']:.3f}")
+    print(f"  embed_dim               : {embed_dim}")
+    print(f"  num_heads               : {num_heads}")
+    print(f"  num_transformer_layers  : {best.config['num_transformer_layers']}")
 
 
 if __name__ == "__main__":

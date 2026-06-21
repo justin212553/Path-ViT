@@ -10,6 +10,7 @@ trainable을 별도의 importable 모듈로 분리하면 cloudpickle이 "by refe
 """
 import copy
 import math
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -39,6 +40,11 @@ EMBED_HEAD_CHOICES = [
     (384, 8), (384, 12),
 ]
 
+# Ray Tune은 trial마다 작업 디렉터리를 trial별 결과 폴더로 바꾸므로,
+# config.py의 patches_root/csv_path 같은 상대 경로는 그대로 두면 깨진다.
+# 이 모듈(tune_trainable.py)이 위치한 프로젝트 루트를 기준으로 절대 경로화한다.
+PROJECT_ROOT = Path(__file__).resolve().parent
+
 
 def _build_cfg(base_cfg: Config, search_cfg: dict, tune_epochs: int) -> Config:
     cfg = copy.deepcopy(base_cfg)
@@ -51,6 +57,8 @@ def _build_cfg(base_cfg: Config, search_cfg: dict, tune_epochs: int) -> Config:
     cfg.train.weight_decay           = search_cfg["weight_decay"]
     cfg.train.warmup_epochs          = search_cfg["warmup_epochs"]
     cfg.train.epochs                 = tune_epochs
+    cfg.data.patches_root            = str(PROJECT_ROOT / cfg.data.patches_root)
+    cfg.data.csv_path                = str(PROJECT_ROOT / cfg.data.csv_path)
     return cfg
 
 
