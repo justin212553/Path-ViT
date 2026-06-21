@@ -125,14 +125,20 @@ def train_one_epoch(
     model, loader, optimizer, scaler, cfg, device, amp_ctx, criterion
 ) -> float:
     model.train()
+    model.cnn.backbone.eval()  # frozen backbone의 BN을 population stats(eval)로 고정 — train/eval 분포 불일치 방지
     total_loss  = 0.0
     total_nodes = 0
     chunk_size  = cfg.train.cnn_chunk_size
 
-    for patient_nodes in loader:                # 환자 1명 = 1 스텝
+    for patient_nodes in loader:                # 환자 1명 분량의 WSI 리스트
         n_nodes = len(patient_nodes)
+        if n_nodes == 0:                        # 배경 필터링 등으로 패치가 없는 예외 처리 가드
+            continue
+            
         optimizer.zero_grad()
+        patient_accumulated_loss = 0.0
 
+        # 1. 한 환자의 모든 WSI(노드)를 순회하며 Gradient 누적
         for node in patient_nodes:
             patches = node["patches"]                              # (N, 3, H, W) — CPU 유지
             coords  = node["coords"].to(device, non_blocking=True) # (N, 2)
@@ -143,19 +149,28 @@ def train_one_epoch(
                 ctx_tokens   = model.vit(patch_tokens, coords)                                  # (N, D)
                 wsi_embed, _ = model.attn_pool(ctx_tokens)                                      # (D,)
                 wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))                         # (1, 2)
+                
+                # 정석: 개별 WSI 로스를 구한 뒤, 환자가 가진 WSI 총 개수로 균등하게 나누어 줍니다.
                 loss = criterion(wsi_logits, label) / n_nodes
 
+            # AMP 환경 하에서 스케일링된 그레디언트 누적
             scaler.scale(loss).backward()
-            total_loss  += loss.item() * n_nodes
+            
+            # 로깅용 값 누적 (정규화 전 본래의 Loss 값 복원 기록)
+            patient_accumulated_loss += loss.item() * n_nodes
             total_nodes += 1
 
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        scaler.step(optimizer)
-        scaler.update()
+        # 2. 환자 한 명의 모든 슬라이드 연산이 '완전히 끝난 후' 가중치 업데이트 실행
+        with amp_ctx: # AMP 컨텍스트 내부 혹은 안정적인 상태에서 역산 가중치 핸들링
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
 
-    return total_loss / total_nodes
+        total_loss += patient_accumulated_loss
 
+    # 에포크 전체 평균 Loss 반환 (WSI 개수 기준 평균)
+    return total_loss / max(total_nodes, 1)
 
 @torch.no_grad()
 def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
