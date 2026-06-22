@@ -136,6 +136,8 @@ def _save_patches(slide_dir: Path, patches, coords, labels):
 def _build_slide_list(stage_map: dict) -> list:
     slides = []
     for patient_dir in sorted((ROOT / "wsi_train").glob("patient_*")):
+        if not patient_dir.is_dir():
+            continue
         patient_num = int(patient_dir.name.split("_")[1])
         center_id = patient_num // 20
         for tif in sorted(patient_dir.glob("patient_*_node_*.tif")):
