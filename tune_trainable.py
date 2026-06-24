@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ray import train as ray_train
+from ray import tune
 
 from config import Config
 from data.patch_dataset import CAMELYON17NodeDataset
@@ -107,7 +107,7 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
         if math.isnan(auc):
             auc = 0.0
 
-        ray_train.report({
+        tune.report({
             "val_auc_roc": auc,
             "val_f1":      metrics["f1"],
             "train_loss":  loss,
