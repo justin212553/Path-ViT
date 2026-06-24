@@ -93,6 +93,26 @@ def _setup_logging(log_file: Path) -> logging.Logger:
     return logger
 
 
+def _parse_patient_spec(spec: str) -> list[int]:
+    """
+    "1-50" 또는 "0,51-99" 같은 문자열을 patient ID 리스트로 변환.
+    예) "1-50"        -> [1, 2, ..., 50]
+        "0,51-99"     -> [0, 51, 52, ..., 99]
+    """
+    ids: list[int] = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            ids.extend(range(start, end + 1))
+        else:
+            ids.append(int(part))
+    return sorted(set(ids))
+
+
 def _url(patient_id: int) -> str:
     center = patient_id // 20
     return f"{BASE_URL}/center_{center}/patient_{patient_id:03d}.zip"
@@ -161,50 +181,6 @@ def _download_one(
     return patient_id, False
 
 
-def _download_annotations(
-    data_root: Path,
-    logger: logging.Logger,
-    use_tqdm: bool = True,
-) -> bool:
-    """lesion_annotations.zip 다운로드 (압축 해제 없음)."""
-    zip_path = data_root / "lesion_annotations.zip"
-    anno_dir = data_root / "lesion_annotations"
-    anno_dir.mkdir(parents=True, exist_ok=True)
-
-    head     = requests.head(ANNO_URL, timeout=30, allow_redirects=True)
-    expected = int(head.headers.get("content-length", 0))
-
-    if _is_complete(zip_path, expected):
-        logger.info(f"SKIP   lesion_annotations.zip (이미 완료)")
-        return True
-
-    logger.info(f"START  lesion_annotations.zip")
-    try:
-        with requests.get(ANNO_URL, stream=True, timeout=60) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("content-length", 0))
-            with (
-                open(zip_path, "wb") as f,
-                tqdm(
-                    total=total or None,
-                    unit="B", unit_scale=True, unit_divisor=1024,
-                    desc="lesion_annotations", leave=True,
-                    disable=not use_tqdm,
-                ) as bar,
-            ):
-                for chunk in resp.iter_content(chunk_size=CHUNK_SIZE):
-                    f.write(chunk)
-                    bar.update(len(chunk))
-
-        logger.info(f"DONE   lesion_annotations.zip → {zip_path}")
-        return True
-
-    except Exception as exc:
-        logger.error(f"FAIL   lesion_annotations.zip: {exc}")
-        zip_path.unlink(missing_ok=True)
-        return False
-
-
 def _run(
     tasks: list[tuple[int, Path]],
     logger: logging.Logger,
@@ -240,6 +216,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--retries",   type=int, default=3)
     parser.add_argument("--log-file",  default=None)
     parser.add_argument("--no-progress", action="store_true")
+    parser.add_argument(
+        "--patients", default=None,
+        help='다운로드할 patient ID 범위. 예: "1-50" 또는 "0,51-99". '
+             "생략 시 MISSING_PATIENTS 기본 목록을 사용.",
+    )
     return parser.parse_args()
 
 
@@ -257,16 +238,16 @@ def main():
     wsi_dir = data_root / "wsi_train"
     wsi_dir.mkdir(parents=True, exist_ok=True)
 
-    tasks = [(pid, wsi_dir) for pid in MISSING_PATIENTS]
+    patient_ids = _parse_patient_spec(args.patients) if args.patients else MISSING_PATIENTS
+    tasks = [(pid, wsi_dir) for pid in patient_ids]
 
     logger.info("=" * 60)
     logger.info(f"CAMELYON17 다운로드 시작 (zip 보존)")
     logger.info(f"  data_root : {data_root.resolve()}")
     logger.info(f"  총 파일   : {len(tasks)}개  (동시 {args.workers}개)")
-    logger.info(f"  wsi       → {wsi_dir}  (미보유 {len(MISSING_PATIENTS)}명만, eval/train 구분 없음)")
+    logger.info(f"  patients  : {args.patients if args.patients else 'MISSING_PATIENTS 기본 목록'}")
+    logger.info(f"  wsi       → {wsi_dir}  (eval/train 구분 없음)")
     logger.info("=" * 60)
-
-    _download_annotations(data_root, logger, use_tqdm=use_tqdm)
 
     done, failed = _run(tasks, logger=logger,
                         max_workers=args.workers, retries=args.retries,

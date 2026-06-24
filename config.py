@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Tuple
 
 
 @dataclass
@@ -9,6 +8,7 @@ class ModelConfig:
     num_transformer_layers: int   = 6
     dropout:                float = 0.1
     max_grid_size:          int   = 1500
+    num_landmarks:          int   = 128   # Nystrom attention landmark 수 (근사 정밀도/속도 트레이드오프)
 
 
 @dataclass
@@ -16,7 +16,6 @@ class DataConfig:
     patches_root: str   = "data/patches"  # WSI 단위 MIL train/val 공용 노드 루트
     csv_path:     str   = "data/stage_labels.csv"
     num_workers: int   = 4
-    max_patches: int   = 4000  # WSI당 최대 패치 수 (None=무제한)
 
 
 @dataclass

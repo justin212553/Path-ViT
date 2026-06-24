@@ -9,5 +9,6 @@ tqdm>=4.65.0
 openslide-python
 openslide-bin
 requests
+nystrom-attention
 wandb
 ray[tune]>=2.9.0

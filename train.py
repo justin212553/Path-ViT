@@ -92,16 +92,6 @@ def _build_scheduler(optimizer, cfg):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _encode_patches_chunked(
-    cnn: nn.Module, patches: torch.Tensor, chunk_size: int, device: torch.device
-) -> torch.Tensor:
-    """CNN을 chunk_size 단위로 CPU→GPU 이동하며 실행 (대형 WSI OOM 방지)."""
-    return torch.cat([
-        cnn(patches[i : i + chunk_size].to(device, non_blocking=True))
-        for i in range(0, patches.shape[0], chunk_size)
-    ])
-
-
 def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tensor:
     """훈련 셋 WSI 라벨 분포로 class weight 계산."""
     labels = dataset.items["label"].values
@@ -145,13 +135,10 @@ def train_one_epoch(
             label   = node["label"].to(device, non_blocking=True)  # (1,)
 
             with amp_ctx:
-                patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)  # (N, D)
-                ctx_tokens   = model.vit(patch_tokens, coords)                                  # (N, D)
-                wsi_embed, _ = model.attn_pool(ctx_tokens)                                      # (D,)
-                wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))                         # (1, 2)
-                
+                out = model(patches, coords, chunk_size=chunk_size)
+
                 # 정석: 개별 WSI 로스를 구한 뒤, 환자가 가진 WSI 총 개수로 균등하게 나누어 줍니다.
-                loss = criterion(wsi_logits, label) / n_nodes
+                loss = criterion(out["wsi_logits"], label) / n_nodes
 
             # AMP 환경 하에서 스케일링된 그레디언트 누적
             scaler.scale(loss).backward()
@@ -185,12 +172,9 @@ def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
             label   = int(node["label"].item())
 
             with amp_ctx:
-                patch_tokens = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
-                ctx_tokens   = model.vit(patch_tokens, coords)
-                wsi_embed, _ = model.attn_pool(ctx_tokens)
-                wsi_logits   = model.classifier(wsi_embed.unsqueeze(0))
+                out = model(patches, coords, chunk_size=chunk_size)
 
-            score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
+            score = torch.softmax(out["wsi_logits"], dim=-1)[0, 1].float().item()
 
             all_scores.append(score)
             all_labels.append(label)
@@ -232,12 +216,12 @@ def main():
                 "num_transformer_layers":cfg.model.num_transformer_layers,
                 "dropout":               cfg.model.dropout,
                 "max_grid_size":         cfg.model.max_grid_size,
-                "max_patches":           cfg.data.max_patches,
+                "num_landmarks":         cfg.model.num_landmarks,
             },
         )
 
-    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
-    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
+    train_ds = CAMELYON17NodeDataset(cfg.data, split="train")
+    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val")
 
     dl_kwargs = dict(
         batch_size=1,

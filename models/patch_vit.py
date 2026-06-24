@@ -48,7 +48,7 @@ class PatchViT(nn.Module):
         self.cnn = CNNEncoder(cfg.embed_dim)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
-                              cfg.max_grid_size)
+                              cfg.max_grid_size, num_landmarks=cfg.num_landmarks)
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         self.classifier = nn.Sequential(
@@ -56,16 +56,26 @@ class PatchViT(nn.Module):
             nn.Linear(cfg.embed_dim, 2),
         )
 
-    def forward(self, patches: torch.Tensor, coords: torch.Tensor) -> dict:
+    def forward(
+        self, patches: torch.Tensor, coords: torch.Tensor, chunk_size: int | None = None
+    ) -> dict:
         """
         Args:
-            patches: (N_patches, 3, H, W)
-            coords:  (N_patches, 2)
+            patches:    (N_patches, 3, H, W) — coords.device로 이동되지 않은 상태(CPU)도 허용
+            coords:     (N_patches, 2)
+            chunk_size: CNN을 이 크기 단위로 나눠 실행 (대형 WSI OOM 방지). None이면 한 번에 실행
         Returns:
             wsi_logits:   (1, 2)
             attn_weights: (N_patches,)
         """
-        patch_tokens = self.cnn(patches)                      # (N, D)
+        device = coords.device
+        if chunk_size is None:
+            patch_tokens = self.cnn(patches.to(device, non_blocking=True))            # (N, D)
+        else:
+            patch_tokens = torch.cat([
+                self.cnn(patches[i : i + chunk_size].to(device, non_blocking=True))
+                for i in range(0, patches.shape[0], chunk_size)
+            ])
         ctx_tokens   = self.vit(patch_tokens, coords)          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens)   # (D,), (N,)
         wsi_logits = self.classifier(wsi_embed.unsqueeze(0))   # (1, 2)

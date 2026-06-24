@@ -72,8 +72,8 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     amp_ctx   = _make_amp_ctx(amp_dtype)
     scaler    = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
 
-    train_ds = CAMELYON17NodeDataset(cfg.data, split="train", max_patches=cfg.data.max_patches)
-    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val",   max_patches=cfg.data.max_patches)
+    train_ds = CAMELYON17NodeDataset(cfg.data, split="train")
+    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val")
 
     dl_kwargs = dict(
         batch_size=1,

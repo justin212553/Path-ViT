@@ -16,7 +16,6 @@ DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 
     patient_id: str
     node:       int
 """
-import random
 import re
 from pathlib import Path
 
@@ -27,6 +26,8 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 from config import DataConfig
+
+SEED = 42  # train/val 환자 split 재현성
 
 STAGE_TO_LABEL = {
     "pN0":      0,
@@ -70,10 +71,8 @@ class CAMELYON17NodeDataset(Dataset):
         cfg: DataConfig,
         split: str = "train",
         transform=None,
-        max_patches: int = 2000,
     ):
         self.transform   = transform or PATCH_TRANSFORM
-        self.max_patches = max_patches
         self.root        = Path(cfg.patches_root)
 
         df = pd.read_csv(cfg.csv_path)
@@ -96,8 +95,8 @@ class CAMELYON17NodeDataset(Dataset):
 
         # 환자 단위로 양성(노드 중 1개라도 전이) / 음성(전부 정상) 분류 후 val 환자 샘플링
         patient_label = avail_df.groupby("patient_id")["label"].max()
-        pos_patients  = patient_label[patient_label == 1].sample(10, random_state=42).index
-        neg_patients  = patient_label[patient_label == 0].sample(10, random_state=42).index
+        pos_patients  = patient_label[patient_label == 1].sample(10, random_state=SEED).index
+        neg_patients  = patient_label[patient_label == 0].sample(10, random_state=SEED).index
         val_patients  = set(pos_patients) | set(neg_patients)
 
         is_val = avail_df["patient_id"].isin(val_patients)
@@ -117,9 +116,6 @@ class CAMELYON17NodeDataset(Dataset):
         patch_paths = sorted(
             list(node_dir.glob("*.png")) + list(node_dir.glob("*.jpg"))
         )
-
-        if self.max_patches and len(patch_paths) > self.max_patches:
-            patch_paths = random.sample(patch_paths, self.max_patches)
 
         patches_t = torch.stack([
             self.transform(Image.open(p).convert("RGB"))

@@ -18,10 +18,12 @@ import os
 import shutil
 import urllib.request
 import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
-DATA_ROOT = Path("./data")
+DATA_ROOT   = Path("./data")
+NUM_WORKERS = 4  # extract_dataset.sh의 --cpus-per-task와 동일하게 맞출 것
 
 
 def _load_env():
@@ -77,24 +79,32 @@ def _extract_zip_flat(zip_path: Path, out_dir: Path) -> None:
             zf.extractall(out_dir)
 
 
+def _extract_one(zip_path: Path) -> tuple[str, bool]:
+    """단일 zip 압축 해제 워커 함수. Returns (zip 파일명, skipped)."""
+    out_dir = zip_path.parent / zip_path.stem
+    if out_dir.is_dir() and any(out_dir.iterdir()):
+        print(f"  [SKIP] {zip_path.name} — 이미 해제됨")
+        return zip_path.name, True
+
+    print(f"  [UNZIP] {zip_path.name} → {out_dir.name}/")
+    out_dir.mkdir(exist_ok=True)
+    _extract_zip_flat(zip_path, out_dir)
+
+    zip_path.unlink()
+    print(f"  [DEL]   {zip_path.name}")
+    return zip_path.name, False
+
+
 def extract_patient_zips(wsi_dir: Path) -> None:
     zips = sorted(wsi_dir.glob("patient_*.zip"))
     if not zips:
         print(f"  [SKIP] {wsi_dir.name}/ — patient zip 없음")
         return
 
-    for zip_path in zips:
-        out_dir = wsi_dir / zip_path.stem
-        if out_dir.is_dir() and any(out_dir.iterdir()):
-            print(f"  [SKIP] {zip_path.name} — 이미 해제됨")
-            continue
-
-        print(f"  [UNZIP] {zip_path.name} → {out_dir.name}/")
-        out_dir.mkdir(exist_ok=True)
-        _extract_zip_flat(zip_path, out_dir)
-
-        zip_path.unlink()
-        print(f"  [DEL]   {zip_path.name}")
+    with ProcessPoolExecutor(max_workers=NUM_WORKERS) as pool:
+        futures = [pool.submit(_extract_one, z) for z in zips]
+        for future in as_completed(futures):
+            future.result()  # 워커에서 발생한 예외를 메인 프로세스로 전파
 
 
 def main() -> None:

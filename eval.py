@@ -4,72 +4,15 @@ CAMELYON17 WSI(노드) 단위 MIL 평가 스크립트
 - threshold는 eval 데이터 자체에서 Youden's J로 매번 새로 계산 (utils/metrics.py)
 """
 import argparse
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from config import Config
 from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from utils.metrics import compute_patch_metrics
-
-
-def _find_wsi_path(slide_id: str, wsi_eval_dir: str = "data/wsi_eval") -> Optional[Path]:
-    """slide_id로부터 WSI .tif 경로 탐색 (patient_XXX_node_Y → wsi_eval/patient_XXX/)."""
-    parts = slide_id.split("_node_")
-    if len(parts) != 2:
-        return None
-    candidate = Path(wsi_eval_dir) / parts[0] / f"{slide_id}.tif"
-    return candidate if candidate.exists() else None
-
-
-def _load_wsi_thumbnail_crop(
-    wsi_path: Path,
-    orig_coords: np.ndarray,
-    patch_size: int = 256,
-    max_thumb: int = 2048,
-) -> Optional[np.ndarray]:
-    """WSI 썸네일에서 패치 영역(bounding box)만 잘라 반환."""
-    try:
-        import openslide
-        slide = openslide.OpenSlide(str(wsi_path))
-        wsi_w, wsi_h = slide.level_dimensions[0]
-
-        scale = min(max_thumb / wsi_w, max_thumb / wsi_h, 1.0)
-        thumb_w = max(1, int(wsi_w * scale))
-        thumb_h = max(1, int(wsi_h * scale))
-        thumbnail = np.array(slide.get_thumbnail((thumb_w, thumb_h)).convert("RGB"))
-        slide.close()
-
-        r_min = int(orig_coords[:, 0].min())
-        r_max = int(orig_coords[:, 0].max()) + 1
-        c_min = int(orig_coords[:, 1].min())
-        c_max = int(orig_coords[:, 1].max()) + 1
-
-        py0 = max(0, int(r_min * patch_size * scale))
-        py1 = min(thumb_h, int(r_max * patch_size * scale))
-        px0 = max(0, int(c_min * patch_size * scale))
-        px1 = min(thumb_w, int(c_max * patch_size * scale))
-
-        crop = thumbnail[py0:py1, px0:px1]
-        return crop if crop.size > 0 else None
-    except Exception as e:
-        print(f"  WSI 썸네일 로드 실패 ({wsi_path.name}): {e}")
-        return None
-
-
-def _encode_patches_chunked(
-    cnn: nn.Module, patches: torch.Tensor, chunk_size: int, device: torch.device
-) -> torch.Tensor:
-    """CNN을 chunk_size 단위로 CPU→GPU 이동하며 실행 (대형 WSI OOM 방지)."""
-    return torch.cat([
-        cnn(patches[i : i + chunk_size].to(device, non_blocking=True))
-        for i in range(0, patches.shape[0], chunk_size)
-    ])
 
 
 def _identity_collate(batch: list) -> list:
@@ -88,7 +31,7 @@ def evaluate_wsi_level(
         cfg = Config()
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
-    dataset = CAMELYON17NodeDataset(cfg.data, split=split, max_patches=cfg.data.max_patches)
+    dataset = CAMELYON17NodeDataset(cfg.data, split=split)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_identity_collate)
 
     model = PatchViT(cfg.model).to(device)
@@ -107,12 +50,10 @@ def evaluate_wsi_level(
                 label    = int(node["label"].item())
                 slide_id = f"{node['patient_id']}_node_{node['node']}"
 
-                patch_tokens             = _encode_patches_chunked(model.cnn, patches, chunk_size, device)
-                ctx_tokens               = model.vit(patch_tokens, coords)
-                wsi_embed, attn_weights  = model.attn_pool(ctx_tokens)
-                wsi_logits               = model.classifier(wsi_embed.unsqueeze(0))
+                out          = model(patches, coords, chunk_size=chunk_size)
+                attn_weights = out["attn_weights"]
 
-                score = torch.softmax(wsi_logits, dim=-1)[0, 1].float().item()
+                score = torch.softmax(out["wsi_logits"], dim=-1)[0, 1].float().item()
                 print(f"  {slide_id}: GT={'N1+' if label else 'N0'}  score={score:.3f}")
 
                 all_scores.append(score)
