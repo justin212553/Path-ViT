@@ -94,9 +94,12 @@ class CAMELYON17NodeDataset(Dataset):
         avail_df    = node_df[has_patches].reset_index(drop=True)
 
         # 환자 단위로 양성(노드 중 1개라도 전이) / 음성(전부 정상) 분류 후 val 환자 샘플링
-        patient_label = avail_df.groupby("patient_id")["label"].max()
-        pos_patients  = patient_label[patient_label == 1].sample(10, random_state=SEED).index
-        neg_patients  = patient_label[patient_label == 0].sample(10, random_state=SEED).index
+        # (가용 환자가 10명보다 적을 수 있으므로 — 예: 패치 재추출 중간 — 실제 보유 수로 clamp)
+        patient_label  = avail_df.groupby("patient_id")["label"].max()
+        pos_group      = patient_label[patient_label == 1]
+        neg_group      = patient_label[patient_label == 0]
+        pos_patients   = pos_group.sample(min(10, len(pos_group)), random_state=SEED).index
+        neg_patients   = neg_group.sample(min(10, len(neg_group)), random_state=SEED).index
         val_patients  = set(pos_patients) | set(neg_patients)
 
         is_val = avail_df["patient_id"].isin(val_patients)
