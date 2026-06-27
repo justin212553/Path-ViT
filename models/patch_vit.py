@@ -7,8 +7,11 @@ Forward 출력:
     wsi_logits   : (1, 2)        — WSI(노드) 단위 전이 여부 logit (정상 / 전이)
     attn_weights : (N_patches,)  — 패치별 attention 가중치 (시각화용)
 """
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+from PIL import Image
 
 from .cnn_encoder import CNNEncoder
 from .vit_encoder import ViTEncoder
@@ -57,25 +60,36 @@ class PatchViT(nn.Module):
         )
 
     def forward(
-        self, patches: torch.Tensor, coords: torch.Tensor, chunk_size: int | None = None
+        self,
+        patch_paths: list[Path],
+        coords: torch.Tensor,
+        transform,
+        chunk_size: int | None = None,
     ) -> dict:
         """
         Args:
-            patches:    (N_patches, 3, H, W) — coords.device로 이동되지 않은 상태(CPU)도 허용
-            coords:     (N_patches, 2)
-            chunk_size: CNN을 이 크기 단위로 나눠 실행 (대형 WSI OOM 방지). None이면 한 번에 실행
+            patch_paths: N개 패치 이미지 파일 경로 — 이미지 디코딩을 chunk_size 단위로
+                         지연 로딩해 한 번에 메모리에 올리는 패치 수를 제한한다
+                         (패치 수에 cap이 없는 대형 WSI에서 host RAM OOM 방지)
+            coords:      (N_patches, 2)
+            transform:   패치 이미지 → 텐서 변환 (CAMELYON17NodeDataset.transform)
+            chunk_size:  CNN을 이 크기 단위로 나눠 실행. None이면 한 번에 실행
         Returns:
             wsi_logits:   (1, 2)
             attn_weights: (N_patches,)
         """
         device = coords.device
-        if chunk_size is None:
-            patch_tokens = self.cnn(patches.to(device, non_blocking=True))            # (N, D)
-        else:
-            patch_tokens = torch.cat([
-                self.cnn(patches[i : i + chunk_size].to(device, non_blocking=True))
-                for i in range(0, patches.shape[0], chunk_size)
-            ])
+        chunk_size = chunk_size or len(patch_paths)
+
+        patch_tokens = torch.cat([
+            self.cnn(
+                torch.stack([
+                    transform(Image.open(p).convert("RGB"))
+                    for p in patch_paths[i : i + chunk_size]
+                ]).to(device, non_blocking=True)
+            )
+            for i in range(0, len(patch_paths), chunk_size)
+        ])
         ctx_tokens   = self.vit(patch_tokens, coords)          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens)   # (D,), (N,)
         wsi_logits = self.classifier(wsi_embed.unsqueeze(0))   # (1, 2)

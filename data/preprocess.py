@@ -24,7 +24,7 @@ from PIL import Image
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 ROOT              = Path("./data/")
-OUT_DIR           = Path("./data/patches_train")
+OUT_DIR           = Path("./data/patches")
 PATCH_SIZE        = 256
 PATCH_LEVEL       = 0
 TISSUE_THRESHOLD  = 0.5

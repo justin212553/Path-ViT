@@ -10,18 +10,19 @@ leakage 방지, 모델 파이프라인 점검용 — eval split 없음).
 DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 한다.
 
 반환 형식 (환자 1명의 노드 수만큼의 리스트, 각 원소는 dict):
-    patches:    (N, 3, H, W)  float32
-    coords:     (N, 2)        int64   [row, col]  (파일명 r####_c#### 파싱)
-    label:      (1,)          int64   (0=음성, 1=전이)
-    patient_id: str
-    node:       int
+    patch_paths: List[Path]  N개   패치 이미지 파일 경로 (이미지 디코딩은 모델 forward에서
+                                   chunk_size 단위로 지연 로딩 — 패치 수가 매우 큰 WSI에서
+                                   전체를 한 번에 메모리에 올려 OOM 나는 것을 방지)
+    coords:      (N, 2)       int64   [row, col]  (파일명 r####_c#### 파싱)
+    label:       (1,)         int64   (0=음성, 1=전이)
+    patient_id:  str
+    node:        int
 """
 import re
 from pathlib import Path
 
 import pandas as pd
 import torch
-from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -63,7 +64,7 @@ class CAMELYON17NodeDataset(Dataset):
         transform: 패치에 적용할 transform
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 노드의
-    (patches, coords, label, ...) dict를 리스트로 반환한다.
+    (patch_paths, coords, label, ...) dict를 리스트로 반환한다.
     """
 
     def __init__(
@@ -120,10 +121,6 @@ class CAMELYON17NodeDataset(Dataset):
             list(node_dir.glob("*.png")) + list(node_dir.glob("*.jpg"))
         )
 
-        patches_t = torch.stack([
-            self.transform(Image.open(p).convert("RGB"))
-            for p in patch_paths
-        ])
         coords = torch.tensor(
             [_parse_coord(p.name) for p in patch_paths],
             dtype=torch.long,
@@ -132,11 +129,11 @@ class CAMELYON17NodeDataset(Dataset):
         coords[:, 1] -= coords[:, 1].min()
 
         return {
-            "patches":    patches_t,
-            "coords":     coords,
-            "label":      torch.tensor([row["label"]], dtype=torch.long),
-            "patient_id": row["patient_id"],
-            "node":       int(row["node"]),
+            "patch_paths": patch_paths,
+            "coords":      coords,
+            "label":       torch.tensor([row["label"]], dtype=torch.long),
+            "patient_id":  row["patient_id"],
+            "node":        int(row["node"]),
         }
 
     def __getitem__(self, idx: int) -> list:

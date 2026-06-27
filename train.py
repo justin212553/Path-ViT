@@ -112,7 +112,7 @@ def _identity_collate(batch: list) -> list:
 
 
 def train_one_epoch(
-    model, loader, optimizer, scaler, cfg, device, amp_ctx, criterion
+    model, loader, optimizer, scaler, cfg, device, amp_ctx, criterion, transform
 ) -> float:
     model.train()
     model.cnn.backbone.eval()  # frozen backbone의 BN을 population stats(eval)로 고정 — train/eval 분포 불일치 방지
@@ -130,12 +130,12 @@ def train_one_epoch(
 
         # 1. 한 환자의 모든 WSI(노드)를 순회하며 Gradient 누적
         for node in patient_nodes:
-            patches = node["patches"]                              # (N, 3, H, W) — CPU 유지
-            coords  = node["coords"].to(device, non_blocking=True) # (N, 2)
-            label   = node["label"].to(device, non_blocking=True)  # (1,)
+            patch_paths = node["patch_paths"]                       # N개 경로 — 이미지는 model 내부에서 지연 로딩
+            coords      = node["coords"].to(device, non_blocking=True) # (N, 2)
+            label       = node["label"].to(device, non_blocking=True)  # (1,)
 
             with amp_ctx:
-                out = model(patches, coords, chunk_size=chunk_size)
+                out = model(patch_paths, coords, transform, chunk_size=chunk_size)
 
                 # 정석: 개별 WSI 로스를 구한 뒤, 환자가 가진 WSI 총 개수로 균등하게 나누어 줍니다.
                 loss = criterion(out["wsi_logits"], label) / n_nodes
@@ -160,19 +160,19 @@ def train_one_epoch(
     return total_loss / max(total_nodes, 1)
 
 @torch.no_grad()
-def evaluate(model, loader, cfg, device, amp_ctx) -> dict:
+def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
     model.eval()
     all_scores, all_labels = [], []
     chunk_size = cfg.train.cnn_chunk_size
 
     for patient_nodes in loader:
         for node in patient_nodes:
-            patches = node["patches"]                              # (N, 3, H, W) — CPU 유지
-            coords  = node["coords"].to(device, non_blocking=True)
-            label   = int(node["label"].item())
+            patch_paths = node["patch_paths"]                      # N개 경로 — 이미지는 model 내부에서 지연 로딩
+            coords      = node["coords"].to(device, non_blocking=True)
+            label       = int(node["label"].item())
 
             with amp_ctx:
-                out = model(patches, coords, chunk_size=chunk_size)
+                out = model(patch_paths, coords, transform, chunk_size=chunk_size)
 
             score = torch.softmax(out["wsi_logits"], dim=-1)[0, 1].float().item()
 
@@ -262,8 +262,8 @@ def main():
     best_score = 0.0
     for epoch in range(cfg.train.epochs):
         lr_now  = optimizer.param_groups[0]["lr"]
-        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion)
-        metrics = evaluate(model, val_loader, cfg, device, amp_ctx)
+        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion, train_ds.transform)
+        metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 
         auc   = metrics.get("auc_roc", 0.0)

@@ -45,12 +45,12 @@ def evaluate_wsi_level(
     with torch.no_grad():
         for patient_nodes in loader:
             for node in patient_nodes:
-                patches  = node["patches"]                              # (N, 3, H, W) — CPU 유지
-                coords   = node["coords"].to(device, non_blocking=True) # (N, 2) — 이미 0-기반 정규화됨
-                label    = int(node["label"].item())
-                slide_id = f"{node['patient_id']}_node_{node['node']}"
+                patch_paths = node["patch_paths"]                       # N개 경로 — 이미지는 model 내부에서 지연 로딩
+                coords      = node["coords"].to(device, non_blocking=True) # (N, 2) — 이미 0-기반 정규화됨
+                label       = int(node["label"].item())
+                slide_id    = f"{node['patient_id']}_node_{node['node']}"
 
-                out          = model(patches, coords, chunk_size=chunk_size)
+                out          = model(patch_paths, coords, dataset.transform, chunk_size=chunk_size)
                 attn_weights = out["attn_weights"]
 
                 score = torch.softmax(out["wsi_logits"], dim=-1)[0, 1].float().item()

@@ -99,8 +99,8 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     scheduler = _build_scheduler(optimizer, cfg)
 
     for epoch in range(cfg.train.epochs):
-        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion)
-        metrics = evaluate(model, val_loader, cfg, device, amp_ctx)
+        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion, train_ds.transform)
+        metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 
         auc = metrics.get("auc_roc", 0.0)
