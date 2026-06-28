@@ -53,13 +53,13 @@ def main(cfg):
     
     #---->Instantiate Trainer
     trainer = Trainer(
-        num_sanity_val_steps=0, 
+        num_sanity_val_steps=0,
         logger=cfg.load_loggers,
         callbacks=cfg.callbacks,
         max_epochs= cfg.General.epochs,
-        gpus=cfg.General.gpus,
-        amp_level=cfg.General.amp_level,  
-        precision=cfg.General.precision,  
+        accelerator="gpu" if cfg.General.gpus else "cpu",
+        devices=cfg.General.gpus if cfg.General.gpus else 1,
+        precision=cfg.General.precision,
         accumulate_grad_batches=cfg.General.grad_acc,
         deterministic=True,
         check_val_every_n_epoch=1,

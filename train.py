@@ -92,18 +92,13 @@ def _build_scheduler(optimizer, cfg):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tensor:
-    """훈련 셋 WSI 라벨 분포로 class weight 계산."""
+def _log_class_distribution(dataset: CAMELYON17NodeDataset) -> None:
+    """훈련 셋 WSI 라벨 분포 로깅 (참고용, loss weighting에는 사용하지 않음)."""
     labels = dataset.items["label"].values
     n_neg = int((labels == 0).sum())
     n_pos = int((labels == 1).sum())
     total = n_neg + n_pos
     print(f"  Train slides: {n_neg} neg / {n_pos} pos  (pos ratio={n_pos/total:.3f})")
-    return torch.tensor(
-        [total / (2.0 * n_neg), total / (2.0 * n_pos)],
-        dtype=torch.float32,
-        device=device,
-    )
 
 
 def _identity_collate(batch: list) -> list:
@@ -179,10 +174,13 @@ def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
             all_scores.append(score)
             all_labels.append(label)
 
-    return compute_patch_metrics(
-        np.array(all_scores),
-        np.array(all_labels),
-    )
+    scores = np.array(all_scores)
+    labels = np.array(all_labels)
+    return {
+        **compute_patch_metrics(scores, labels),
+        "scores": scores,
+        "labels": labels,
+    }
 
 
 def main():
@@ -237,8 +235,8 @@ def main():
     model = PatchViT(cfg.model).to(device)
     model.cnn.backbone.requires_grad_(False)
 
-    class_weights = _compute_class_weights(train_ds, device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    _log_class_distribution(train_ds)
+    criterion = nn.CrossEntropyLoss()
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -253,8 +251,6 @@ def main():
         f"AMP={dtype_name} | batch=1 patient (모든 노드 누적 후 1 step) "
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
-    print(f"Class weights: neg={class_weights[0]:.3f}  pos={class_weights[1]:.3f}")
-
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / "camelyon_best.pt"
@@ -275,7 +271,8 @@ def main():
         )
 
         if WANDB_AVAILABLE:
-            wandb.log({
+            scores, labels = metrics["scores"], metrics["labels"]
+            log_dict = {
                 "train/loss":      loss,
                 "train/lr":        lr_now,
                 "val/accuracy":    metrics["accuracy"],
@@ -283,7 +280,12 @@ def main():
                 "val/f1":          metrics["f1"],
                 "val/precision":   metrics["precision"],
                 "val/recall":      metrics["recall"],
-            }, step=epoch + 1)
+            }
+            if (labels == 0).any():
+                log_dict["val/score_hist_neg"] = wandb.Histogram(scores[labels == 0])
+            if (labels == 1).any():
+                log_dict["val/score_hist_pos"] = wandb.Histogram(scores[labels == 1])
+            wandb.log(log_dict, step=epoch + 1)
 
         if score > best_score:
             best_score = score
