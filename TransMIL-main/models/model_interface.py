@@ -63,6 +63,10 @@ class  ModelInterface(pl.LightningModule):
         self.shuffle = kargs['data'].data_shuffle
         self.count = 0
 
+        #---->epoch-end용 step output 누적 버퍼 (PL 2.0에서 *_epoch_end(outputs) 인자가 제거됨)
+        self.validation_step_outputs = []
+        self.test_step_outputs = []
+
 
     #---->remove v_num
     def get_progress_bar_dict(self):
@@ -88,9 +92,9 @@ class  ModelInterface(pl.LightningModule):
         self.data[Y]["count"] += 1
         self.data[Y]["correct"] += (Y_hat == Y)
 
-        return {'loss': loss} 
+        return {'loss': loss}
 
-    def training_epoch_end(self, training_step_outputs):
+    def on_train_epoch_end(self):
         for c in range(self.n_classes):
             count = self.data[c]["count"]
             correct = self.data[c]["correct"]
@@ -114,15 +118,18 @@ class  ModelInterface(pl.LightningModule):
         self.data[Y]["count"] += 1
         self.data[Y]["correct"] += (Y_hat.item() == Y)
 
-        return {'logits' : logits, 'Y_prob' : Y_prob, 'Y_hat' : Y_hat, 'label' : label}
+        output = {'logits' : logits, 'Y_prob' : Y_prob, 'Y_hat' : Y_hat, 'label' : label}
+        self.validation_step_outputs.append(output)
+        return output
 
 
-    def validation_epoch_end(self, val_step_outputs):
+    def on_validation_epoch_end(self):
+        val_step_outputs = self.validation_step_outputs
         logits = torch.cat([x['logits'] for x in val_step_outputs], dim = 0)
         probs = torch.cat([x['Y_prob'] for x in val_step_outputs], dim = 0)
         max_probs = torch.stack([x['Y_hat'] for x in val_step_outputs])
         target = torch.stack([x['label'] for x in val_step_outputs], dim = 0)
-        
+
         #---->
         auc_input = probs[:, 1] if self.n_classes == 2 else probs
         self.log('val_loss', cross_entropy_torch(logits, target), prog_bar=True, on_epoch=True, logger=True)
@@ -145,7 +152,8 @@ class  ModelInterface(pl.LightningModule):
         if self.shuffle == True:
             self.count = self.count+1
             random.seed(self.count*50)
-    
+
+        self.validation_step_outputs.clear()  # free memory
 
 
     def configure_optimizers(self):
@@ -164,13 +172,16 @@ class  ModelInterface(pl.LightningModule):
         self.data[Y]["count"] += 1
         self.data[Y]["correct"] += (Y_hat.item() == Y)
 
-        return {'logits' : logits, 'Y_prob' : Y_prob, 'Y_hat' : Y_hat, 'label' : label}
+        output = {'logits' : logits, 'Y_prob' : Y_prob, 'Y_hat' : Y_hat, 'label' : label}
+        self.test_step_outputs.append(output)
+        return output
 
-    def test_epoch_end(self, output_results):
+    def on_test_epoch_end(self):
+        output_results = self.test_step_outputs
         probs = torch.cat([x['Y_prob'] for x in output_results], dim = 0)
         max_probs = torch.stack([x['Y_hat'] for x in output_results])
         target = torch.stack([x['label'] for x in output_results], dim = 0)
-        
+
         #---->
         auc_input = probs[:, 1] if self.n_classes == 2 else probs
         auc = self.AUROC(auc_input, target.squeeze())
@@ -193,6 +204,8 @@ class  ModelInterface(pl.LightningModule):
         #---->
         result = pd.DataFrame([metrics])
         result.to_csv(self.log_path / 'result.csv')
+
+        self.test_step_outputs.clear()  # free memory
 
 
     def load_model(self):
