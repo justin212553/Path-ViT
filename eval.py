@@ -1,7 +1,7 @@
 """
 CAMELYON17 WSI(노드) 단위 MIL 평가 스크립트
 - WSI 1장의 모든 패치를 한 번에 넣어 attention pooling 후 WSI 단위 분류
-- threshold는 eval 데이터 자체에서 Youden's J로 매번 새로 계산 (utils/metrics.py)
+- threshold는 0.5로 고정 (utils/metrics.py)
 """
 import argparse
 

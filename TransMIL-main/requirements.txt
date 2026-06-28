@@ -1,5 +1,4 @@
 addict==2.2.1
-numpy==1.20.3
 nystrom-attention==0.0.9
 opencv-python==4.2.0.34
 opencv-python-headless==4.2.0.34
