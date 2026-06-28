@@ -16,7 +16,7 @@ def make_parse():
     parser = argparse.ArgumentParser()
     parser.add_argument('--stage', default='train', type=str)
     parser.add_argument('--config', default='Camelyon/TransMIL.yaml',type=str)
-    parser.add_argument('--gpus', default = [2])
+    parser.add_argument('--gpus', default = None)
     parser.add_argument('--fold', default = 0)
     args = parser.parse_args()
     return args
@@ -83,7 +83,8 @@ if __name__ == '__main__':
 
     #---->update
     cfg.config = args.config
-    cfg.General.gpus = args.gpus
+    if args.gpus is not None:
+        cfg.General.gpus = args.gpus
     cfg.General.server = args.stage
     cfg.Data.fold = args.fold
 
