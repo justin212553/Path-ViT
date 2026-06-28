@@ -11,7 +11,6 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-conda init
 conda activate Path-ViT
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

@@ -14,6 +14,3 @@ __pycache__
 *.logs
 *.zip
 .env
-
-*-master
-*-main
