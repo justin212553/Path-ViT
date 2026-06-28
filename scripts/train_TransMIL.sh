@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH --job-name=train
+#SBATCH --partition=free-gpu
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:A30:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=128G                  
+#SBATCH --time=24:00:00            
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/train_TransMIL.log
+
+cd /pub/wonseukl/Path-ViT/TransMIL-main
+
+conda activate Path-ViT
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+python -u train.py --config ./Camelyon/TransMIL_pathvit.yaml
