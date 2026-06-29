@@ -10,5 +10,5 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-source .venv/bin/activate
+conda activate Path-ViT
 ./.venv/bin/python -u data/extract_features.py
