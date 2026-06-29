@@ -9,7 +9,8 @@
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_progress.log
 
 cd /pub/wonseukl/Path-ViT/
-source .venv/bin/activate
 
-# 파이썬 실행
-./.venv/bin/python -u ./data/preprocess.py
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate Path-ViT
+
+python -u ./data/preprocess.py

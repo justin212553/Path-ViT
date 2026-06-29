@@ -11,8 +11,7 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-conda init
-
+source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True

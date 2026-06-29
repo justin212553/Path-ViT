@@ -10,5 +10,7 @@
 
 cd /pub/wonseukl/Path-ViT/
 
-source .venv/bin/activate
-./.venv/bin/python -u utils/extract_data.py
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate Path-ViT
+
+python -u utils/extract_data.py

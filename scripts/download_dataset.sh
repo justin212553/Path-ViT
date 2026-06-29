@@ -12,4 +12,7 @@ cd /pub/wonseukl/Path-ViT/
 
 PATIENTS="${1:?patient 범위를 인자로 지정하세요. 예: sbatch download_dataset.sh 0-49}"
 
-./.venv/bin/python -u utils/dataset_download_zip.py --patients "$PATIENTS"
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate Path-ViT
+
+python -u utils/dataset_download_zip.py --patients "$PATIENTS"
