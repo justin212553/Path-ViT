@@ -6,7 +6,7 @@ Hacked together by / Copyright 2020 Ross Wightman
 """
 import torch
 from torch.optim.optimizer import Optimizer
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 
 
 class Lookahead(Optimizer):
@@ -21,6 +21,15 @@ class Lookahead(Optimizer):
         self.defaults = base_optimizer.defaults
         self.defaults.update(defaults)
         self.state = defaultdict(dict)
+        # torch>=2.0의 Optimizer.step wrapper가 요구하는 내부 hook dict들.
+        # super().__init__()을 부르면 add_param_group이 각 group을 복사해서
+        # base_optimizer.param_groups와의 참조 공유가 끊어지므로, 필요한 속성만 직접 초기화한다.
+        self._optimizer_step_pre_hooks = OrderedDict()
+        self._optimizer_step_post_hooks = OrderedDict()
+        self._optimizer_state_dict_pre_hooks = OrderedDict()
+        self._optimizer_state_dict_post_hooks = OrderedDict()
+        self._optimizer_load_state_dict_pre_hooks = OrderedDict()
+        self._optimizer_load_state_dict_post_hooks = OrderedDict()
         # manually add our defaults to the param groups
         for name, default in defaults.items():
             for group in self.param_groups:
