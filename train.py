@@ -306,8 +306,10 @@ def main():
             }
             if (labels == 0).any():
                 log_dict["val/score_hist_neg"] = wandb.Histogram(scores[labels == 0])
+                log_dict["val/score_mean_neg"] = float(scores[labels == 0].mean())
             if (labels == 1).any():
                 log_dict["val/score_hist_pos"] = wandb.Histogram(scores[labels == 1])
+                log_dict["val/score_mean_pos"] = float(scores[labels == 1].mean())
             wandb.log(log_dict, step=epoch + 1)
 
         if score > best_score:
