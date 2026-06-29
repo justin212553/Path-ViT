@@ -11,12 +11,17 @@ train.py는 model.cnn.backbone.requires_grad_(False)로 ResNet50 backbone을 항
     행 순서 = data.patch_dataset.list_patch_paths()와 동일한 정렬 순서
 
 사용법:
-    python -m data.extract_features
+    python -m data.extract_features   (또는 python data/extract_features.py 직접 실행도 가능)
 """
+import sys
 from pathlib import Path
 
 import torch
 from PIL import Image
+
+_ROOT = Path(__file__).resolve().parent.parent  # Path-ViT 프로젝트 루트
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from config import DataConfig
 from data.patch_dataset import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths
