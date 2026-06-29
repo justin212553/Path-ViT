@@ -105,6 +105,7 @@ class ViTEncoder(nn.Module):
             )
             for _ in range(num_layers)
         ])
+        self.norm = nn.LayerNorm(embed_dim)
 
     def forward(
         self, patch_tokens: torch.Tensor, coords: torch.Tensor
@@ -126,4 +127,4 @@ class ViTEncoder(nn.Module):
                 x = layer(x)
             out = x                            # (1, N, D)
 
-        return out[0]                          # (N, D)
+        return self.norm(out[0])               # (N, D)

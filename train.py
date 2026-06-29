@@ -10,7 +10,6 @@ import json
 import math
 import os
 import random
-import contextlib
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -60,23 +59,9 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
-def _get_amp_dtype(cfg_dtype: str) -> torch.dtype | None:
-    """A30 → bfloat16, V100 → float16, "none" → AMP 비활성화."""
-    if cfg_dtype == "none":
-        return None
-    if cfg_dtype == "bfloat16" or (
-        cfg_dtype == "auto"
-        and torch.cuda.is_available()
-        and torch.cuda.is_bf16_supported()
-    ):
-        return torch.bfloat16
-    return torch.float16
-
-
-def _make_amp_ctx(amp_dtype: torch.dtype | None):
-    if amp_dtype is None:
-        return contextlib.nullcontext()
-    return torch.autocast(device_type="cuda", dtype=amp_dtype)
+def _make_amp_ctx() -> torch.autocast:
+    """A30 전용 bfloat16 autocast — bf16은 fp32와 지수 범위가 같아 loss scaling이 불필요하다."""
+    return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
 
 
 def _build_scheduler(optimizer, cfg):
@@ -108,7 +93,7 @@ def _identity_collate(batch: list) -> list:
 
 
 def train_one_epoch(
-    model, loader, optimizer, scaler, cfg, device, amp_ctx, criterion, transform
+    model, loader, optimizer, cfg, device, amp_ctx, criterion, transform
 ) -> float:
     model.train()
     if model.cnn.backbone is not None:
@@ -140,19 +125,15 @@ def train_one_epoch(
                 # 정석: 개별 WSI 로스를 구한 뒤, 환자가 가진 WSI 총 개수로 균등하게 나누어 줍니다.
                 loss = criterion(out["wsi_logits"], label) / n_nodes
 
-            # AMP 환경 하에서 스케일링된 그레디언트 누적
-            scaler.scale(loss).backward()
-            
+            loss.backward()
+
             # 로깅용 값 누적 (정규화 전 본래의 Loss 값 복원 기록)
             patient_accumulated_loss += loss.item() * n_nodes
             total_nodes += 1
 
         # 2. 환자 한 명의 모든 슬라이드 연산이 '완전히 끝난 후' 가중치 업데이트 실행
-        with amp_ctx: # AMP 컨텍스트 내부 혹은 안정적인 상태에서 역산 가중치 핸들링
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            scaler.step(optimizer)
-            scaler.update()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
 
         total_loss += patient_accumulated_loss
 
@@ -208,13 +189,11 @@ def main():
     cfg.data.precomputed = not args.image
     set_seed(cfg.train.seed)
     start_time = datetime.now()
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg.train.device)
 
     torch.backends.cudnn.benchmark = True
 
-    amp_dtype = _get_amp_dtype(cfg.train.amp_dtype)
-    amp_ctx   = _make_amp_ctx(amp_dtype)
-    scaler = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
+    amp_ctx = _make_amp_ctx()
 
     if WANDB_AVAILABLE:
         run_name = datetime.now().strftime("%m%d::%H%M")
@@ -227,7 +206,6 @@ def main():
                 "weight_decay":          cfg.train.weight_decay,
                 "seed":                  cfg.train.seed,
                 "warmup_epochs":         cfg.train.warmup_epochs,
-                "amp_dtype":             cfg.train.amp_dtype,
                 "cnn_chunk_size":        cfg.train.cnn_chunk_size,
                 "embed_dim":             cfg.model.embed_dim,
                 "num_heads":             cfg.model.num_heads,
@@ -245,7 +223,7 @@ def main():
         batch_size=1,
         collate_fn=_identity_collate,
         num_workers=cfg.data.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=True,
         persistent_workers=(cfg.data.num_workers > 0),
         prefetch_factor=2 if cfg.data.num_workers > 0 else None,
     )
@@ -265,13 +243,12 @@ def main():
     )
     scheduler = _build_scheduler(optimizer, cfg)
 
-    dtype_name = str(amp_dtype).split(".")[-1] if amp_dtype else "fp32"
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
     print(f"Mode: {mode}")
     print(f"Train: {len(train_ds)} patients  Val: {len(val_ds)} patients")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
-        f"AMP={dtype_name} | batch=1 patient (모든 노드 누적 후 1 step) "
+        f"AMP=bfloat16 | batch=1 patient (모든 노드 누적 후 1 step) "
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
@@ -281,7 +258,7 @@ def main():
     best_score = 0.0
     for epoch in range(cfg.train.epochs):
         lr_now  = optimizer.param_groups[0]["lr"]
-        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion, train_ds.transform)
+        loss    = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, criterion, train_ds.transform)
         metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 

@@ -58,7 +58,8 @@ class PatchViT(nn.Module):
         self.cnn = CNNEncoder(cfg.embed_dim, with_backbone=not precomputed)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
-                              cfg.max_grid_size, num_landmarks=cfg.num_landmarks)
+                              cfg.max_grid_size, use_grad_checkpoint=cfg.grad_checkpoint,
+                              num_landmarks=cfg.num_landmarks)
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         self.classifier = nn.Sequential(

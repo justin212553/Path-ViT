@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train
+#SBATCH --job-name=PVT-T
 #SBATCH --partition=free-gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1

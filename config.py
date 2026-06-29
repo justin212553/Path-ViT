@@ -9,6 +9,9 @@ class ModelConfig:
     dropout:                float = 0.1
     max_grid_size:          int   = 1500
     num_landmarks:          int   = 128   # Nystrom attention landmark 수 (근사 정밀도/속도 트레이드오프)
+    # 대형 WSI(N 수만 패치) backward 메모리 절감용. 끄면 메모리↑ 속도↑
+    # (precomputed feature 모드처럼 메모리 여유가 있을 때 끄면 학습 시간 단축 가능)
+    grad_checkpoint:        bool  = True
 
 
 @dataclass
@@ -31,8 +34,6 @@ class TrainConfig:
     # --- GPU 최적화 파라미터 ---
     # gradient accumulation 단위 = 환자 1명(보유한 모든 노드 누적 후 1 step, train.py 참조)
     warmup_epochs:         int   = 3       # linear LR warmup → cosine decay
-    # AMP dtype: "auto" → A30은 bfloat16, V100은 float16 자동 선택 / "none" 비활성화
-    amp_dtype:             str   = "auto"
     # 대형 WSI(수천 패치)에서 CNN OOM 방지용 서브배치
     cnn_chunk_size:        int   = 64
 

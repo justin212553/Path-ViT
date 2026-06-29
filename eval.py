@@ -31,7 +31,7 @@ def evaluate_wsi_level(
     if cfg is None:
         cfg = Config()
     cfg.data.precomputed = not image_mode
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg.train.device)
 
     dataset = CAMELYON17NodeDataset(cfg.data, split=split)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_identity_collate)

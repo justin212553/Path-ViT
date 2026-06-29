@@ -23,7 +23,6 @@ from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from train import (
     _build_scheduler,
-    _get_amp_dtype,
     _identity_collate,
     _make_amp_ctx,
     evaluate,
@@ -64,12 +63,10 @@ def _build_cfg(base_cfg: Config, search_cfg: dict, tune_epochs: int) -> Config:
 def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     cfg = _build_cfg(base_cfg, search_cfg, tune_epochs)
     set_seed(cfg.train.seed)
-    device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
+    device = torch.device(cfg.train.device)
     torch.backends.cudnn.benchmark = True
 
-    amp_dtype = _get_amp_dtype(cfg.train.amp_dtype)
-    amp_ctx   = _make_amp_ctx(amp_dtype)
-    scaler    = torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
+    amp_ctx = _make_amp_ctx()
 
     train_ds = CAMELYON17NodeDataset(cfg.data, split="train")
     val_ds   = CAMELYON17NodeDataset(cfg.data, split="val")
@@ -78,7 +75,7 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
         batch_size=1,
         collate_fn=_identity_collate,
         num_workers=cfg.data.num_workers,
-        pin_memory=(device.type == "cuda"),
+        pin_memory=True,
         persistent_workers=(cfg.data.num_workers > 0),
         prefetch_factor=2 if cfg.data.num_workers > 0 else None,
     )
@@ -98,7 +95,7 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     scheduler = _build_scheduler(optimizer, cfg)
 
     for epoch in range(cfg.train.epochs):
-        loss    = train_one_epoch(model, train_loader, optimizer, scaler, cfg, device, amp_ctx, criterion, train_ds.transform)
+        loss    = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, criterion, train_ds.transform)
         metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 
