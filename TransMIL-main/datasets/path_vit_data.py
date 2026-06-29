@@ -66,7 +66,9 @@ class PathVitData(Dataset):
         # Path-ViT에는 별도 test split이 없으므로 test 단계는 val split을 재사용한다.
         split = "train" if state == "train" else "val"
 
-        node_cfg = DataConfig(patches_root=str(patches_root), csv_path=str(csv_path))
+        # 이 adapter는 자체 CNNEncoder(feat_dim=1024 등)로 직접 인코딩하므로
+        # Path-ViT의 사전 추출 캐시(features.pt, 2048-dim)와는 무관하다 — 항상 raw 이미지 모드로 고정.
+        node_cfg = DataConfig(patches_root=str(patches_root), csv_path=str(csv_path), precomputed=False)
         node_ds  = CAMELYON17NodeDataset(node_cfg, split=split)
 
         self.items     = node_ds.items.reset_index(drop=True)  # 노드 단위 rows

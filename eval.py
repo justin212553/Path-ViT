@@ -26,15 +26,17 @@ def evaluate_wsi_level(
     split: str = "val",
     save_vis: bool = False,
     vis_dir: str = "heatmaps",
+    image_mode: bool = False,
 ):
     if cfg is None:
         cfg = Config()
+    cfg.data.precomputed = not image_mode
     device = torch.device(cfg.train.device if torch.cuda.is_available() else "cpu")
 
     dataset = CAMELYON17NodeDataset(cfg.data, split=split)
     loader  = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=_identity_collate)
 
-    model = PatchViT(cfg.model).to(device)
+    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
     ckpt  = torch.load(checkpoint, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -45,12 +47,15 @@ def evaluate_wsi_level(
     with torch.no_grad():
         for patient_nodes in loader:
             for node in patient_nodes:
-                patch_paths = node["patch_paths"]                       # N개 경로 — 이미지는 model 내부에서 지연 로딩
-                coords      = node["coords"].to(device, non_blocking=True) # (N, 2) — 이미 0-기반 정규화됨
-                label       = int(node["label"].item())
-                slide_id    = f"{node['patient_id']}_node_{node['node']}"
+                coords   = node["coords"].to(device, non_blocking=True)  # (N, 2) — 이미 0-기반 정규화됨
+                label    = int(node["label"].item())
+                slide_id = f"{node['patient_id']}_node_{node['node']}"
 
-                out          = model(patch_paths, coords, dataset.transform, chunk_size=chunk_size)
+                if "features" in node:
+                    out = model(coords, features=node["features"])
+                else:
+                    out = model(coords, patch_paths=node["patch_paths"],
+                                transform=dataset.transform, chunk_size=chunk_size)
                 attn_weights = out["attn_weights"]
 
                 score = torch.softmax(out["wsi_logits"], dim=-1)[0, 1].float().item()
@@ -90,6 +95,10 @@ if __name__ == "__main__":
                         help="attention 히트맵 시각화 저장")
     parser.add_argument("--vis-dir", type=str, default="heatmaps",
                         help="시각화 저장 디렉토리")
+    parser.add_argument("--image", action="store_true",
+                        help="패치 jpg/png를 매 forward마다 ResNet50으로 직접 인코딩 "
+                             "(기본: data/extract_features.py로 사전 추출한 features.pt 사용)")
     args = parser.parse_args()
 
-    evaluate_wsi_level(args.checkpoint, split=args.split, save_vis=args.vis, vis_dir=args.vis_dir)
+    evaluate_wsi_level(args.checkpoint, split=args.split, save_vis=args.vis,
+                       vis_dir=args.vis_dir, image_mode=args.image)

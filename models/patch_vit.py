@@ -46,9 +46,16 @@ class AttentionPooling(nn.Module):
 
 
 class PatchViT(nn.Module):
-    def __init__(self, cfg: ModelConfig):
+    def __init__(self, cfg: ModelConfig, precomputed: bool = True):
+        """
+        Args:
+            precomputed: True면 ResNet50 backbone을 생성하지 않는다 — 항상 사전 추출된
+                         pooled feature(features 인자)만 입력으로 받는 모드.
+                         False면 patch_paths로 이미지를 직접 디코딩/forward한다.
+        """
         super().__init__()
-        self.cnn = CNNEncoder(cfg.embed_dim)
+        self.precomputed = precomputed
+        self.cnn = CNNEncoder(cfg.embed_dim, with_backbone=not precomputed)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
                               cfg.max_grid_size, num_landmarks=cfg.num_landmarks)
@@ -61,35 +68,41 @@ class PatchViT(nn.Module):
 
     def forward(
         self,
-        patch_paths: list[Path],
         coords: torch.Tensor,
-        transform,
+        patch_paths: list[Path] | None = None,
+        features: torch.Tensor | None = None,
+        transform=None,
         chunk_size: int | None = None,
     ) -> dict:
         """
         Args:
-            patch_paths: N개 패치 이미지 파일 경로 — 이미지 디코딩을 chunk_size 단위로
-                         지연 로딩해 한 번에 메모리에 올리는 패치 수를 제한한다
-                         (패치 수에 cap이 없는 대형 WSI에서 host RAM OOM 방지)
             coords:      (N_patches, 2)
-            transform:   패치 이미지 → 텐서 변환 (CAMELYON17NodeDataset.transform)
-            chunk_size:  CNN을 이 크기 단위로 나눠 실행. None이면 한 번에 실행
+            patch_paths: N개 패치 이미지 파일 경로 (precomputed=False 모드) — 이미지 디코딩을
+                         chunk_size 단위로 지연 로딩해 한 번에 메모리에 올리는 패치 수를 제한한다
+                         (패치 수에 cap이 없는 대형 WSI에서 host RAM OOM 방지)
+            features:    (N_patches, 2048) 사전 추출된 backbone+pool feature (precomputed=True 모드)
+            transform:   패치 이미지 → 텐서 변환 (CAMELYON17NodeDataset.transform). patch_paths 모드에서만 사용
+            chunk_size:  CNN을 이 크기 단위로 나눠 실행. None이면 한 번에 실행. patch_paths 모드에서만 사용
         Returns:
             wsi_logits:   (1, 2)
             attn_weights: (N_patches,)
         """
         device = coords.device
-        chunk_size = chunk_size or len(patch_paths)
 
-        patch_tokens = torch.cat([
-            self.cnn(
-                torch.stack([
-                    transform(Image.open(p).convert("RGB"))
-                    for p in patch_paths[i : i + chunk_size]
-                ]).to(device, non_blocking=True)
-            )
-            for i in range(0, len(patch_paths), chunk_size)
-        ])
+        if features is not None:
+            patch_tokens = self.cnn.forward_pooled(features.to(device, non_blocking=True))
+        else:
+            chunk_size = chunk_size or len(patch_paths)
+            patch_tokens = torch.cat([
+                self.cnn(
+                    torch.stack([
+                        transform(Image.open(p).convert("RGB"))
+                        for p in patch_paths[i : i + chunk_size]
+                    ]).to(device, non_blocking=True)
+                )
+                for i in range(0, len(patch_paths), chunk_size)
+            ])
+
         ctx_tokens   = self.vit(patch_tokens, coords)          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens)   # (D,), (N,)
         wsi_logits = self.classifier(wsi_embed.unsqueeze(0))   # (1, 2)

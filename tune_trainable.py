@@ -85,8 +85,9 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
-    model = PatchViT(cfg.model).to(device)
-    model.cnn.backbone.requires_grad_(False)
+    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+    if model.cnn.backbone is not None:
+        model.cnn.backbone.requires_grad_(False)
 
     criterion = nn.CrossEntropyLoss()
 
