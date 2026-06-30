@@ -112,24 +112,14 @@ class CAMELYON17NodeDataset(Dataset):
         has_patches = node_df.apply(_has_patches, axis=1)
         avail_df    = node_df[has_patches].reset_index(drop=True)
 
-        # center_id: CAMELYON17 환자 번호 순서가 center를 인코딩 (patient 000-019=center0, ...)
-        avail_df["center_id"] = (
-            avail_df["patient_id"].str.extract(r"patient_(\d+)")[0].astype(int) // 20
-        )
-
-        # center-stratified val split: center당 pos 2명 + neg 2명 (최대 10+10)
+        # 환자 단위로 양성(노드 중 1개라도 전이) / 음성(전부 정상) 분류 후 val 환자 샘플링
+        # (가용 환자가 10명보다 적을 수 있으므로 — 예: 패치 재추출 중간 — 실제 보유 수로 clamp)
         patient_label  = avail_df.groupby("patient_id")["label"].max()
-        patient_center = avail_df.drop_duplicates("patient_id").set_index("patient_id")["center_id"]
-        patient_df     = pd.DataFrame({"label": patient_label, "center_id": patient_center})
-
-        val_patients = set()
-        for _, center_grp in patient_df.groupby("center_id"):
-            for lbl, n_max in [(1, 2), (0, 2)]:
-                pool = center_grp[center_grp["label"] == lbl]
-                if len(pool) > 0:
-                    val_patients.update(
-                        pool.sample(min(n_max, len(pool)), random_state=SEED).index.tolist()
-                    )
+        pos_group      = patient_label[patient_label == 1]
+        neg_group      = patient_label[patient_label == 0]
+        pos_patients   = pos_group.sample(min(10, len(pos_group)), random_state=SEED).index
+        neg_patients   = neg_group.sample(min(10, len(neg_group)), random_state=SEED).index
+        val_patients   = set(pos_patients) | set(neg_patients)
 
         is_val = avail_df["patient_id"].isin(val_patients)
         if split == "val":

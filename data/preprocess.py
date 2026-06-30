@@ -27,7 +27,8 @@ ROOT              = Path("./data/")
 OUT_DIR           = Path("./data/patches")
 PATCH_SIZE        = 256
 PATCH_LEVEL       = 0
-TISSUE_THRESHOLD  = 0.5
+BG_PIXEL_THRESH   = 220   # RGB 평균이 이 값 이상인 픽셀 → 빈 유리(배경)
+BG_MAX_FRACTION   = 0.9   # 패치 내 배경 픽셀 비율이 이 값 이상이면 제거
 OVERLAP_THRESHOLD = 0.5
 NUM_WORKERS       = 8
 BLOCK_SIZE        = 4096  # PATCH_SIZE의 배수. read_region 호출 횟수를 줄이기 위한 일괄 읽기 단위
@@ -104,14 +105,17 @@ def _extract_slide(slide_path: Path, xml_path):
 
             block = slide.read_region((bx, by), PATCH_LEVEL, (bw, bh)).convert("RGB")
             block_arr = np.array(block)
-            sat = np.array(block.convert("HSV"))[:, :, 1].astype(np.float32) / 255.0
 
             n_rows, n_cols = bh // PATCH_SIZE, bw // PATCH_SIZE
-            sat_means = sat.reshape(n_rows, PATCH_SIZE, n_cols, PATCH_SIZE).mean(axis=(1, 3))
+            # 배경 감지: RGB 평균 > BG_PIXEL_THRESH인 픽셀(흰 유리)의 패치 내 비율
+            gray = block_arr.mean(axis=2)  # (H, W)
+            bg_fracs = (gray > BG_PIXEL_THRESH).reshape(
+                n_rows, PATCH_SIZE, n_cols, PATCH_SIZE
+            ).mean(axis=(1, 3))            # (n_rows, n_cols)
 
             for pr in range(n_rows):
                 for pc in range(n_cols):
-                    if sat_means[pr, pc] < TISSUE_THRESHOLD:
+                    if bg_fracs[pr, pc] >= BG_MAX_FRACTION:
                         continue
 
                     y, x = by + pr * PATCH_SIZE, bx + pc * PATCH_SIZE
