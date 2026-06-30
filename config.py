@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelConfig:
-    embed_dim:              int   = 128
-    num_heads:              int   = 8
+    embed_dim:              int   = 64
+    num_heads:              int   = 4
     num_transformer_layers: int   = 2
     dropout:                float = 0.25
     num_landmarks:          int   = 128   # Nystrom attention landmark 수 (근사 정밀도/속도 트레이드오프)
@@ -26,7 +26,7 @@ class DataConfig:
 @dataclass
 class TrainConfig:
     epochs:                int   = 50
-    lr:                    float = 1e-4
+    lr:                    float = 1e-5
     weight_decay:          float = 1e-2
     device:                str   = "cuda"
     seed:                  int   = 42
