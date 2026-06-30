@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class ModelConfig:
-    embed_dim:              int   = 256
+    embed_dim:              int   = 128
     num_heads:              int   = 8
     num_transformer_layers: int   = 2
     dropout:                float = 0.25

@@ -117,8 +117,8 @@ class CAMELYON17NodeDataset(Dataset):
         patient_label  = avail_df.groupby("patient_id")["label"].max()
         pos_group      = patient_label[patient_label == 1]
         neg_group      = patient_label[patient_label == 0]
-        pos_patients   = pos_group.sample(min(10, len(pos_group)), random_state=SEED).index
-        neg_patients   = neg_group.sample(min(10, len(neg_group)), random_state=SEED).index
+        pos_patients   = pos_group.sample(min(5, len(pos_group)), random_state=SEED).index
+        neg_patients   = neg_group.sample(min(5, len(neg_group)), random_state=SEED).index
         val_patients  = set(pos_patients) | set(neg_patients)
 
         is_val = avail_df["patient_id"].isin(val_patients)
