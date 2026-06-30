@@ -6,11 +6,9 @@ CAMELYON17 WSI(노드) 단위 MIL 학습 스크립트 (모델 파이프라인 �
 데이터: CAMELYON17NodeDataset (patches_root 노드 폴더 + stage_labels.csv 라벨, train/val만 사용)
 """
 import argparse
-import json
 import math
 import os
 import random
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 import numpy as np
@@ -30,28 +28,8 @@ from data.patch_dataset import CAMELYON17NodeDataset
 # from models import PatchViT                          # [LateFusion] 기존 단일 경로 모델
 from models import PatchViT, LateFusionViT             # [LateFusion] Late Fusion 모델 추가
 from data.fit_clusters import CENTROIDS_FILENAME       # [LateFusion] 군집 중심 파일명
+from utils import load_env, send_slack
 from utils.metrics import compute_patch_metrics
-
-
-def _load_env():
-    env_path = Path(__file__).parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-
-
-def send_slack(message: str):
-    url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not url:
-        return
-    try:
-        data = json.dumps({"text": message}).encode()
-        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def set_seed(seed: int):
@@ -196,7 +174,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
-    _load_env()
+    load_env()
     args   = _parse_args()
     cfg    = Config()
     cfg.data.precomputed = not args.image
@@ -210,6 +188,7 @@ def main():
             f"cluster_centroids.pt 없음: {centroids_path}\n"
             "  먼저 실행: python -m data.fit_clusters"
         )
+    cluster_centroids = torch.load(centroids_path, map_location="cpu") if args.fusion else None
     set_seed(cfg.train.seed)
     start_time = datetime.now()
     device = torch.device(cfg.train.device)
@@ -252,14 +231,14 @@ def main():
         persistent_workers=(cfg.data.num_workers > 0),
         prefetch_factor=2 if cfg.data.num_workers > 0 else None,
     )
-    train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
-    val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
+    train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
+    train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
+    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
     # [LateFusion] --fusion 플래그에 따라 모델 선택
     # PatchViT    : 기존 ViT+ABMIL 단일 경로 (ablation baseline)
     # LateFusionViT: ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion
     if args.fusion:
-        cluster_centroids = torch.load(centroids_path, map_location="cpu")
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     else:
         model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
@@ -298,36 +277,45 @@ def main():
 
     best_score = 0.0
     for epoch in range(cfg.train.epochs):
-        lr_now  = optimizer.param_groups[0]["lr"]
-        loss    = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, criterion, train_ds.transform)
-        metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
+        lr_now       = optimizer.param_groups[0]["lr"]
+        loss         = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, criterion, train_ds.transform)
+        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
+        metrics      = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 
         auc   = metrics.get("auc_roc", 0.0)
         score = auc if not math.isnan(auc) else metrics.get("f1", 0.0)
         print(
             f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
-            f"acc={metrics['accuracy']:.4f}  auc={metrics['auc_roc']:.4f}  "
-            f"f1={metrics['f1']:.4f}  prec={metrics['precision']:.4f}  rec={metrics['recall']:.4f}"
+            f"train_auc={train_metrics['auc_roc']:.4f} | "
+            f"val_auc={metrics['auc_roc']:.4f}  f1={metrics['f1']:.4f}  "
+            f"prec={metrics['precision']:.4f}  rec={metrics['recall']:.4f}"
         )
 
         if WANDB_AVAILABLE:
             scores, labels = metrics["scores"], metrics["labels"]
+
+            train_scores, train_labels = train_metrics["scores"], train_metrics["labels"]
             log_dict = {
-                "train/loss":      loss,
-                "train/lr":        lr_now,
-                "val/accuracy":    metrics["accuracy"],
-                "val/auc_roc":     metrics["auc_roc"],
-                "val/f1":          metrics["f1"],
-                "val/precision":   metrics["precision"],
-                "val/recall":      metrics["recall"],
+                "train/loss":               loss,
+                "train/lr":                 lr_now,
+                "train/auc_roc":            train_metrics["auc_roc"],
+                "val_performance/accuracy": metrics["accuracy"],
+                "val_performance/auc_roc":  metrics["auc_roc"],
+                "val_performance/f1":       metrics["f1"],
+                "val_performance/precision":metrics["precision"],
+                "val_performance/recall":   metrics["recall"],
             }
+            if (train_labels == 0).any():
+                log_dict["train_score/mean_neg"] = float(train_scores[train_labels == 0].mean())
+            if (train_labels == 1).any():
+                log_dict["train_score/mean_pos"] = float(train_scores[train_labels == 1].mean())
             if (labels == 0).any():
-                log_dict["val/score_hist_neg"] = wandb.Histogram(scores[labels == 0])
-                log_dict["val/score_mean_neg"] = float(scores[labels == 0].mean())
+                log_dict["val_score/hist_neg"] = wandb.Histogram(scores[labels == 0])
+                log_dict["val_score/mean_neg"] = float(scores[labels == 0].mean())
             if (labels == 1).any():
-                log_dict["val/score_hist_pos"] = wandb.Histogram(scores[labels == 1])
-                log_dict["val/score_mean_pos"] = float(scores[labels == 1].mean())
+                log_dict["val_score/hist_pos"] = wandb.Histogram(scores[labels == 1])
+                log_dict["val_score/mean_pos"] = float(scores[labels == 1].mean())
             wandb.log(log_dict, step=epoch + 1)
 
         if score > best_score:
@@ -362,6 +350,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _load_env()
+        load_env()
         send_slack(f":x: *Path-ViT 학습 에러*\n```{type(e).__name__}: {e}```")
         raise

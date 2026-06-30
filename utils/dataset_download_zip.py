@@ -15,15 +15,19 @@ dataset_download.py 와 동일하지만 압축 해제 없이 zip 파일 그대�
   python utils/dataset_download_zip.py --data-root /scratch/$USER/camelyon17
 """
 import argparse
-import json
 import logging
 import os
 import sys
 import time
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from utils import load_env, send_slack
 
 import requests
 from tqdm import tqdm
@@ -49,27 +53,6 @@ MISSING_PATIENTS = [
     97, 98,
 ]
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-def _load_env():
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-
-
-def send_slack(message: str):
-    url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not url:
-        return
-    try:
-        data = json.dumps({"text": message}).encode()
-        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def _setup_logging(log_file: Path) -> logging.Logger:
@@ -225,7 +208,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main():
-    _load_env()
+    load_env()
     start_time = datetime.now()
     args = _parse_args()
 
@@ -282,6 +265,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _load_env()
+        load_env()
         send_slack(f":x: *CAMELYON17 다운로드 에러*\n```{type(e).__name__}: {e}```")
         raise

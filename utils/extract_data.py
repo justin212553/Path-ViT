@@ -13,38 +13,22 @@ CAMELYON17 데이터 압축 해제 스크립트
     wsi_eval/
       patient_004/  ...
 """
-import json
 import os
 import shutil
-import urllib.request
+import sys
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from utils import load_env, send_slack
+
 DATA_ROOT   = Path("./data")
 NUM_WORKERS = 4  # extract_dataset.sh의 --cpus-per-task와 동일하게 맞출 것
-
-
-def _load_env():
-    env_path = Path(__file__).parent.parent / ".env"
-    if env_path.exists():
-        for line in env_path.read_text().splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
-
-
-def send_slack(message: str):
-    url = os.environ.get("SLACK_WEBHOOK_URL")
-    if not url:
-        return
-    try:
-        data = json.dumps({"text": message}).encode()
-        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=10)
-    except Exception as e:
-        print(f"[Slack] 알림 전송 실패: {e}")
 
 
 def _extract_zip_flat(zip_path: Path, out_dir: Path) -> None:
@@ -108,7 +92,7 @@ def extract_patient_zips(wsi_dir: Path) -> None:
 
 
 def main() -> None:
-    _load_env()
+    load_env()
     start_time = datetime.now()
 
     if not DATA_ROOT.is_dir():
@@ -139,6 +123,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        _load_env()
+        load_env()
         send_slack(f":x: *CAMELYON17 압축 해제 에러*\n```{type(e).__name__}: {e}```")
         raise
