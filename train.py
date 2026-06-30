@@ -198,7 +198,8 @@ def main():
     amp_ctx = _make_amp_ctx()
 
     if WANDB_AVAILABLE:
-        run_name = datetime.now().strftime("%m%d::%H%M")
+        prefix = "F_" if args.fusion else "N_"
+        run_name = prefix + datetime.now().strftime("%m%d::%H%M")
         wandb.init(
             project="Path-ViT",
             name=run_name,
