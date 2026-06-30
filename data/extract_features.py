@@ -1,19 +1,23 @@
 """
-패치 jpg/png → ResNet50(backbone+pool) feature 사전 추출 스크립트
+패치 jpg/png → CNN(backbone+pool) feature 사전 추출 스크립트
 
-train.py는 model.cnn.backbone.requires_grad_(False)로 ResNet50 backbone을 항상 고정해
+train.py는 model.cnn.backbone.requires_grad_(False)로 CNN backbone을 항상 고정해
 학습한다(BN도 eval로 고정). 즉 같은 패치에 대한 backbone 출력은 epoch마다 동일하므로,
-매 epoch JPEG 디코딩 + ResNet50 forward를 반복하는 대신 패치당 한 번만 계산해 캐싱한다.
+매 epoch JPEG 디코딩 + CNN forward를 반복하는 대신 패치당 한 번만 계산해 캐싱한다.
 (CNNEncoder.proj는 학습 대상이라 캐싱하지 않고 train.py에서 매번 forward한다.)
 
 출력:
-    <patches_root>/<slide_id>/features.pt   (N_patches, 2048) float32 tensor
+    <patches_root>/<slide_id>/features.pt   (N_patches, feature_dim) float32 tensor
     행 순서 = data.patch_dataset.list_patch_paths()와 동일한 정렬 순서
 
 사용법:
     python -m data.extract_features   (또는 python data/extract_features.py 직접 실행도 가능)
 """
+import json
+import os
 import sys
+import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -29,6 +33,28 @@ from models.cnn_encoder import CNNEncoder
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 BATCH_SIZE = 64
+
+
+def _load_env():
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        for line in env_path.read_text().splitlines():
+            if "=" in line and not line.startswith("#"):
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+
+
+def _send_slack(message: str):
+    _load_env()
+    url = os.environ.get("SLACK_WEBHOOK_URL")
+    if not url:
+        return
+    try:
+        data = json.dumps({"text": message}).encode()
+        req  = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
 
 
 def _build_encoder() -> CNNEncoder:
@@ -47,7 +73,7 @@ def _extract_node(encoder: CNNEncoder, patch_paths: list[Path]) -> torch.Tensor:
             for p in patch_paths[i : i + BATCH_SIZE]
         ]).to(DEVICE, non_blocking=True)
         feat_map = encoder.backbone(batch)
-        pooled   = encoder.pool(feat_map)   # (B, 2048)
+        pooled   = encoder.pool(feat_map)   # (B, BACKBONE_DIM)
         chunks.append(pooled.cpu())
     return torch.cat(chunks)
 
@@ -55,13 +81,14 @@ def _extract_node(encoder: CNNEncoder, patch_paths: list[Path]) -> torch.Tensor:
 def main():
     cfg = DataConfig()
     patches_root = Path(cfg.patches_root)
+    start_time = datetime.now()
 
     encoder   = _build_encoder()
     node_dirs = sorted(d for d in patches_root.iterdir() if d.is_dir())
 
     try:
         from tqdm import tqdm
-        node_dirs = tqdm(node_dirs, desc="Extracting ResNet50 features", unit="node")
+        node_dirs = tqdm(node_dirs, desc="Extracting CNN features", unit="node")
     except ImportError:
         pass
 
@@ -79,8 +106,22 @@ def main():
         torch.save(features, out_path)
         done += 1
 
+    elapsed = datetime.now() - start_time
+    h, rem  = divmod(int(elapsed.total_seconds()), 3600)
+    m, s    = divmod(rem, 60)
     print(f"완료: {done}개 노드 → {patches_root}/<slide_id>/{FEATURES_FILENAME}")
+    _send_slack(
+        f":white_check_mark: *Feature 추출 완료*\n"
+        f"> 저장 위치: `{patches_root}/<slide_id>/{FEATURES_FILENAME}`\n"
+        f"> 처리 노드: *{done}개*\n"
+        f"> 소요 시간: {h}h {m}m {s}s"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    _load_env()
+    try:
+        main()
+    except Exception as e:
+        _send_slack(f":x: *Feature 추출 에러*\n```{type(e).__name__}: {e}```")
+        raise
