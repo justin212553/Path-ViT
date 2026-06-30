@@ -23,6 +23,7 @@ from data.patch_dataset import CAMELYON17NodeDataset
 from models import PatchViT
 from train import (
     _build_scheduler,
+    _compute_class_weights,
     _identity_collate,
     _make_amp_ctx,
     evaluate,
@@ -86,7 +87,8 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
-    criterion = nn.CrossEntropyLoss()
+    class_weights = _compute_class_weights(train_ds, device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),

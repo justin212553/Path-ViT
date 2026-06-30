@@ -80,13 +80,17 @@ def _build_scheduler(optimizer, cfg):
     return LambdaLR(optimizer, lr_lambda)
 
 
-def _log_class_distribution(dataset: CAMELYON17NodeDataset) -> None:
-    """훈련 셋 WSI 라벨 분포 로깅 (참고용, loss weighting에는 사용하지 않음)."""
+def _compute_class_weights(dataset: CAMELYON17NodeDataset, device) -> torch.Tensor:
+    """훈련 셋 노드 라벨 분포로 inverse-frequency class weight 계산."""
     labels = dataset.items["label"].values
     n_neg = int((labels == 0).sum())
     n_pos = int((labels == 1).sum())
     total = n_neg + n_pos
     print(f"  Train slides: {n_neg} neg / {n_pos} pos  (pos ratio={n_pos/total:.3f})")
+    return torch.tensor(
+        [total / (2.0 * n_neg), total / (2.0 * n_pos)],
+        dtype=torch.float32, device=device,
+    )
 
 
 def _identity_collate(batch: list) -> list:
@@ -262,8 +266,9 @@ def main():
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
-    _log_class_distribution(train_ds)
-    criterion = nn.CrossEntropyLoss()
+    class_weights = _compute_class_weights(train_ds, device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    print(f"  Class weights: neg={class_weights[0]:.3f}  pos={class_weights[1]:.3f}")
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),

@@ -3,7 +3,7 @@ CAMELYON17 패치 데이터셋 — 노드(슬라이드) 단위 MIL
 
 각 아이템 = 환자 1명의 모든 노드(슬라이드) 리스트. 노드별 라벨/예측 단위는 그대로 유지하되,
 DataLoader가 한 번에 꺼내는 단위(배치/gradient accumulation 단위)를 환자로 묶기 위함이다.
-patches_root 하나에서 환자 단위로 val(양성 환자 5 / 음성 환자 5 랜덤)을 먼저 떼어내고
+patches_root 하나에서 환자 단위로 val(양성 환자 최대 10 / 음성 환자 최대 10 랜덤)을 먼저 떼어내고
 나머지 환자의 노드 전부를 train으로 사용한다 (같은 환자가 train/val에 동시에 들어가는
 leakage 방지, 모델 파이프라인 점검용 — eval split 없음).
 
