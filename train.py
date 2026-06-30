@@ -27,7 +27,9 @@ except ImportError:
 
 from config import Config
 from data.patch_dataset import CAMELYON17NodeDataset
-from models import PatchViT
+# from models import PatchViT                          # [LateFusion] 기존 단일 경로 모델
+from models import PatchViT, LateFusionViT             # [LateFusion] Late Fusion 모델 추가
+from data.fit_clusters import CENTROIDS_FILENAME       # [LateFusion] 군집 중심 파일명
 from utils.metrics import compute_patch_metrics
 
 
@@ -179,6 +181,13 @@ def _parse_args() -> argparse.Namespace:
         help="패치 jpg/png를 매 forward마다 ResNet50으로 직접 인코딩 (기본: data/extract_features.py로 "
              "사전 추출한 features.pt 사용)",
     )
+    # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
+    # 미지정 시 기존 PatchViT(ViT+ABMIL)로 동작 — ablation baseline 유지
+    parser.add_argument(
+        "--fusion", action="store_true",
+        help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
+             "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
+    )
     return parser.parse_args()
 
 
@@ -187,6 +196,16 @@ def main():
     args   = _parse_args()
     cfg    = Config()
     cfg.data.precomputed = not args.image
+
+    # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
+    if args.fusion and not cfg.data.precomputed:
+        raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
+    centroids_path = Path(__file__).parent / CENTROIDS_FILENAME
+    if args.fusion and not centroids_path.exists():
+        raise FileNotFoundError(
+            f"cluster_centroids.pt 없음: {centroids_path}\n"
+            "  먼저 실행: python -m data.fit_clusters"
+        )
     set_seed(cfg.train.seed)
     start_time = datetime.now()
     device = torch.device(cfg.train.device)
@@ -213,6 +232,9 @@ def main():
                 "dropout":               cfg.model.dropout,
                 "max_grid_size":         cfg.model.max_grid_size,
                 "num_landmarks":         cfg.model.num_landmarks,
+                # [LateFusion] 모델 종류 및 군집 수 기록 — ablation 비교용
+                "model":                 "LateFusionViT" if args.fusion else "PatchViT",
+                "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
             },
         )
 
@@ -230,7 +252,14 @@ def main():
     train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
-    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+    # [LateFusion] --fusion 플래그에 따라 모델 선택
+    # PatchViT    : 기존 ViT+ABMIL 단일 경로 (ablation baseline)
+    # LateFusionViT: ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion
+    if args.fusion:
+        cluster_centroids = torch.load(centroids_path, map_location="cpu")
+        model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
+    else:
+        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
@@ -245,6 +274,12 @@ def main():
 
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
     print(f"Mode: {mode}")
+    # [LateFusion] 모델 종류 및 군집 수 출력
+    if args.fusion:
+        K = int(cluster_centroids.shape[0])
+        print(f"Model: LateFusionViT (ViT+ABMIL + ClusterHistogram, K={K})")
+    else:
+        print(f"Model: PatchViT (ViT+ABMIL baseline)")
     print(f"Train: {len(train_ds)} patients  Val: {len(val_ds)} patients")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
@@ -253,7 +288,9 @@ def main():
     )
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / "camelyon_best.pt"
+    # [LateFusion] 모델 종류별로 별도 checkpoint 저장 — ablation 결과 보존
+    # ckpt_path = ckpt_dir / "camelyon_best.pt"                          # [LateFusion] 기존 경로
+    ckpt_path = ckpt_dir / ("camelyon_best_fusion.pt" if args.fusion else "camelyon_best.pt")
 
     best_score = 0.0
     for epoch in range(cfg.train.epochs):

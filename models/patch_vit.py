@@ -21,26 +21,46 @@ from config import ModelConfig
 class AttentionPooling(nn.Module):
     """
     Gated attention pooling (Ilse et al., 2018 ABMIL).
-    패치 토큰 집합 (N, D) → 가중합으로 단일 WSI 임베딩 (D,) 집계.
+
+    [존재 이유]
+    ViT를 지난 뒤 N개의 패치 토큰이 남는다. 이 토큰들은 WSI 내 각 위치의 표현이지만,
+    최종 분류는 WSI 단위 단일 벡터를 요구한다.
+    ABMIL은 "어떤 패치가 WSI 라벨 결정에 중요한가"를 학습 가능한 attention 가중치로
+    결정해 N개 토큰을 1개 WSI 임베딩으로 집계한다.
+
+    [Cluster Query Token으로 전환 시 이 모듈이 제거되는 이유]
+    Cluster Query Token 방식에서는 K개의 쿼리 토큰이 ViT 내부 attention을 통해
+    이미 유형별 집계를 완료한다. 즉 "N → 1 집계" 문제가 "K개 유형별 표현 → 히스토그램
+    가중합"으로 대체되므로, 별도의 ABMIL 단계가 불필요해진다.
+
+    [구조]
+    attn_v: tanh 게이트  — 패치 표현의 방향성 포착
+    attn_u: sigmoid 게이트 — 패치 표현의 크기/활성 포착
+    두 게이트의 element-wise 곱 → attn_w로 스칼라 점수 산출 (gated attention)
     """
 
     def __init__(self, embed_dim: int, hidden_dim: int = 128):
         super().__init__()
-        self.attn_v = nn.Linear(embed_dim, hidden_dim)
-        self.attn_u = nn.Linear(embed_dim, hidden_dim)
-        self.attn_w = nn.Linear(hidden_dim, 1)
+        self.attn_v = nn.Linear(embed_dim, hidden_dim)   # tanh 게이트
+        self.attn_u = nn.Linear(embed_dim, hidden_dim)   # sigmoid 게이트
+        self.attn_w = nn.Linear(hidden_dim, 1)           # 스칼라 점수
 
     def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            tokens: (N, D) — 패치 토큰
+            tokens: (N, D) — ViT를 지난 패치 토큰. N은 WSI마다 다름.
         Returns:
             wsi_embed:    (D,) — attention 가중합으로 집계된 WSI 임베딩
-            attn_weights: (N,) — 패치별 attention 가중치 (합=1)
+            attn_weights: (N,) — 패치별 attention 가중치 (합=1, 시각화·해석용)
         """
+        # gated attention: tanh × sigmoid → 두 게이트가 방향성과 크기를 동시에 제어
         gate = torch.tanh(self.attn_v(tokens)) * torch.sigmoid(self.attn_u(tokens))  # (N, H)
+
+        # 각 패치의 중요도 점수 → softmax로 확률 분포화 (합=1 보장)
         scores = self.attn_w(gate).squeeze(-1)        # (N,)
         attn_weights = torch.softmax(scores, dim=0)   # (N,)
+
+        # 중요도 가중합으로 N개 패치 토큰을 단일 WSI 임베딩으로 집계
         wsi_embed = (attn_weights.unsqueeze(-1) * tokens).sum(dim=0)  # (D,)
         return wsi_embed, attn_weights
 
