@@ -7,7 +7,6 @@ class ModelConfig:
     num_heads:              int   = 8
     num_transformer_layers: int   = 6
     dropout:                float = 0.1
-    max_grid_size:          int   = 1500
     num_landmarks:          int   = 128   # Nystrom attention landmark 수 (근사 정밀도/속도 트레이드오프)
     # 대형 WSI(N 수만 패치) backward 메모리 절감용. 끄면 메모리↑ 속도↑
     # (precomputed feature 모드처럼 메모리 여유가 있을 때 끄면 학습 시간 단축 가능)

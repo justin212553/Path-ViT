@@ -12,25 +12,34 @@ from nystrom_attention import NystromAttention
 
 class SpatialPositionEmbedding(nn.Module):
     """
-    WSI 패치의 (row, col) 그리드 좌표를 embed_dim 벡터로 인코딩.
-    학습 가능한 embedding을 사용하여 림프절 내부 구조적 위치 반영.
+    WSI 패치의 (row, col) 좌표를 sinusoidal 인코딩으로 변환.
+
+    학습 파라미터 없음 — 좌표값 자체를 결정론적으로 인코딩.
+    embed_dim은 4의 배수여야 한다 (row·col 각각 sin/cos 절반씩 할당).
     """
 
-    def __init__(self, max_grid_size: int = 64, embed_dim: int = 512):
+    def __init__(self, embed_dim: int = 512, temperature: float = 10000.0):
         super().__init__()
-        self.row_embed = nn.Embedding(max_grid_size, embed_dim // 2)
-        self.col_embed = nn.Embedding(max_grid_size, embed_dim // 2)
+        assert embed_dim % 4 == 0, "embed_dim must be divisible by 4"
+        self.embed_dim  = embed_dim
+        self.temperature = temperature
 
     def forward(self, coords: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            coords: (N_patches, 2) - 각 패치의 (row, col) 그리드 좌표
+            coords: (N_patches, 2) int64 — 각 패치의 (row, col) 그리드 좌표
         Returns:
             pos_embed: (N_patches, embed_dim)
         """
-        rows = self.row_embed(coords[:, 0])  # (N, D/2)
-        cols = self.col_embed(coords[:, 1])  # (N, D/2)
-        return torch.cat([rows, cols], dim=-1)  # (N, D)
+        quarter = self.embed_dim // 4
+        freq = self.temperature ** (
+            torch.arange(quarter, device=coords.device, dtype=torch.float32) / quarter
+        )                                               # (D/4,)  주파수 분모
+        row = coords[:, 0:1].float() / freq             # (N, D/4)
+        col = coords[:, 1:2].float() / freq             # (N, D/4)
+        return torch.cat(
+            [row.sin(), row.cos(), col.sin(), col.cos()], dim=-1
+        )                                               # (N, D)
 
 
 class NystromEncoderLayer(nn.Module):
@@ -87,12 +96,11 @@ class ViTEncoder(nn.Module):
         num_heads: int = 8,
         num_layers: int = 6,
         dropout: float = 0.1,
-        max_grid_size: int = 64,
         use_grad_checkpoint: bool = True,
         num_landmarks: int = 128,
     ):
         super().__init__()
-        self.pos_embedding = SpatialPositionEmbedding(max_grid_size, embed_dim)
+        self.pos_embedding = SpatialPositionEmbedding(embed_dim)
         self.use_grad_checkpoint = use_grad_checkpoint
 
         self.layers = nn.ModuleList([

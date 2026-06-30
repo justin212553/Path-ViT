@@ -230,7 +230,6 @@ def main():
                 "num_heads":             cfg.model.num_heads,
                 "num_transformer_layers":cfg.model.num_transformer_layers,
                 "dropout":               cfg.model.dropout,
-                "max_grid_size":         cfg.model.max_grid_size,
                 "num_landmarks":         cfg.model.num_landmarks,
                 # [LateFusion] 모델 종류 및 군집 수 기록 — ablation 비교용
                 "model":                 "LateFusionViT" if args.fusion else "PatchViT",

@@ -136,7 +136,6 @@ class LateFusionViT(nn.Module):
         self.vit = ViTEncoder(
             cfg.embed_dim, cfg.num_heads,
             cfg.num_transformer_layers, cfg.dropout,
-            cfg.max_grid_size,
             use_grad_checkpoint=cfg.grad_checkpoint,
             num_landmarks=cfg.num_landmarks,
         )
