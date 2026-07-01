@@ -13,6 +13,8 @@ CAMELYON17 WSI → 패치 사전 추출 스크립트
         slide_index.csv    # slide_id, label, center_id
         patch_index.csv    # slide_id, filename, row, col, patch_label
 """
+import os
+import time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,6 +26,8 @@ import openslide
 from PIL import Image
 from shapely.geometry import box as shapely_box, Polygon as ShapelyPolygon
 from shapely.ops import unary_union
+
+from utils import send_slack
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 ROOT              = Path("./data/")
@@ -245,15 +249,19 @@ def _process_slide(info):
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="CAMELYON17 patch extractor")
-    parser.add_argument("--task-id",    type=int, default=0,            help="0-indexed shard index")
-    parser.add_argument("--num-tasks",  type=int, default=1,            help="total number of shards")
-    parser.add_argument("--workers",    type=int, default=NUM_WORKERS,  help="mp.Pool process count")
+    parser.add_argument("--task-id",    type=int, default=0,              help="0-indexed shard index")
+    parser.add_argument("--num-tasks",  type=int, default=1,              help="total number of shards")
+    parser.add_argument("--workers",    type=int, default=NUM_WORKERS,    help="mp.Pool process count")
     parser.add_argument("--io-threads", type=int, default=NUM_IO_THREADS, help="JPEG save threads per worker")
     args = parser.parse_args()
 
     global NUM_WORKERS, NUM_IO_THREADS
     NUM_WORKERS    = args.workers
     NUM_IO_THREADS = args.io_threads
+
+    job_id = os.environ.get("SLURM_JOB_ID", "local")
+    tag    = f"job `{job_id}` task `{args.task_id}/{args.num_tasks}`"
+    start  = time.time()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -271,19 +279,27 @@ def main():
     except ImportError:
         use_tqdm = False
 
-    with mp.Pool(processes=NUM_WORKERS) as pool:
-        results = pool.imap_unordered(_process_slide, slides)
-        if use_tqdm:
-            results = tqdm(results, total=len(slides), desc=f"task {args.task_id}", unit="slide")
+    try:
+        with mp.Pool(processes=NUM_WORKERS) as pool:
+            results = pool.imap_unordered(_process_slide, slides)
+            if use_tqdm:
+                results = tqdm(results, total=len(slides), desc=f"task {args.task_id}", unit="slide")
 
-        for slide_record, patch_recs, skipped in results:
-            if slide_record is None:
-                continue
-            if skipped:
-                print(f"skip (exists): {slide_record['slide_id']}")
-            done += 1
+            for slide_record, patch_recs, skipped in results:
+                if slide_record is None:
+                    continue
+                if skipped:
+                    print(f"skip (exists): {slide_record['slide_id']}")
+                done += 1
 
-    print(f"[task {args.task_id}] 완료: {done}개 슬라이드 → {OUT_DIR}")
+        elapsed = int(time.time() - start)
+        print(f"[task {args.task_id}] 완료: {done}개 슬라이드 → {OUT_DIR}")
+        send_slack(f":white_check_mark: *preprocess 완료* {tag} — {done}슬라이드 — {elapsed//60}m{elapsed%60}s")
+
+    except Exception as exc:
+        elapsed = int(time.time() - start)
+        send_slack(f":x: *preprocess 실패* {tag} — {exc} — {elapsed//60}m{elapsed%60}s")
+        raise
 
 
 if __name__ == "__main__":
