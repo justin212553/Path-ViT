@@ -14,6 +14,7 @@ CAMELYON17 WSI → 패치 사전 추출 스크립트
         patch_index.csv    # slide_id, filename, row, col, patch_label
 """
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import multiprocessing as mp
 
@@ -21,6 +22,8 @@ import numpy as np
 import pandas as pd
 import openslide
 from PIL import Image
+from shapely.geometry import box as shapely_box, Polygon as ShapelyPolygon
+from shapely.ops import unary_union
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 ROOT              = Path("./data/")
@@ -31,6 +34,7 @@ BG_PIXEL_THRESH   = 220   # RGB 평균이 이 값 이상인 픽셀 → 빈 유�
 BG_MAX_FRACTION   = 0.9   # 패치 내 배경 픽셀 비율이 이 값 이상이면 제거
 OVERLAP_THRESHOLD = 0.5
 NUM_WORKERS       = 8
+NUM_IO_THREADS    = 4
 BLOCK_SIZE        = 4096  # PATCH_SIZE의 배수. read_region 호출 횟수를 줄이기 위한 일괄 읽기 단위
 JPEG_QUALITY      = 90
 # ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +53,7 @@ def _load_stage_map(root: Path) -> dict:
     return dict(zip(rows["patient"], rows["stage"]))
 
 
-def _load_annotations(xml_path: Path) -> list:
+def _load_annotations(xml_path: Path):
     polygons = []
     root_el = ET.parse(str(xml_path)).getroot()
     for annotation in root_el.findall(".//Annotation"):
@@ -58,22 +62,17 @@ def _load_annotations(xml_path: Path) -> list:
             key=lambda c: int(c.get("Order", 0)),
         )
         pts = [(float(c.get("X")), float(c.get("Y"))) for c in coords]
-        if pts:
-            polygons.append(np.array(pts, dtype=np.float64))
+        if len(pts) >= 3:
+            poly = ShapelyPolygon(pts)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            polygons.append(poly)
     return polygons
 
 
-def _patch_overlap_fraction(polygons: list, x: int, y: int) -> float:
-    from matplotlib.path import Path as MplPath
-    n = 8
-    xs = np.linspace(x + 0.5, x + PATCH_SIZE - 0.5, n)
-    ys = np.linspace(y + 0.5, y + PATCH_SIZE - 0.5, n)
-    gx, gy = np.meshgrid(xs, ys)
-    points = np.column_stack([gx.ravel(), gy.ravel()])
-    inside = np.zeros(len(points), dtype=bool)
-    for poly in polygons:
-        inside |= MplPath(poly).contains_points(points)
-    return float(inside.mean())
+def _patch_overlap_fraction(annotation_union, x: int, y: int) -> float:
+    patch_box = shapely_box(x, y, x + PATCH_SIZE, y + PATCH_SIZE)
+    return annotation_union.intersection(patch_box).area / (PATCH_SIZE * PATCH_SIZE)
 
 
 def _extract_slide(slide_path: Path, xml_path):
@@ -88,7 +87,12 @@ def _extract_slide(slide_path: Path, xml_path):
     """
     slide = openslide.OpenSlide(str(slide_path))
     w, h = slide.level_dimensions[PATCH_LEVEL]
-    polygons = _load_annotations(xml_path) if xml_path is not None else []
+
+    annotation_union = None
+    if xml_path is not None:
+        polys = _load_annotations(xml_path)
+        if polys:
+            annotation_union = unary_union(polys)
 
     patches, coords, labels = [], [], []
     for by in range(0, h - PATCH_SIZE + 1, BLOCK_SIZE):
@@ -125,8 +129,8 @@ def _extract_slide(slide_path: Path, xml_path):
                     ]
                     patches.append(Image.fromarray(patch_arr))
                     coords.append([y // PATCH_SIZE, x // PATCH_SIZE])
-                    if polygons:
-                        ratio = _patch_overlap_fraction(polygons, x, y)
+                    if annotation_union is not None:
+                        ratio = _patch_overlap_fraction(annotation_union, x, y)
                         labels.append(1 if ratio >= OVERLAP_THRESHOLD else 0)
                     else:
                         labels.append(-1)
@@ -136,21 +140,31 @@ def _extract_slide(slide_path: Path, xml_path):
     return patches, coords, labels
 
 
+def _write_jpeg(args):
+    path, patch = args
+    patch.save(path, format="JPEG", quality=JPEG_QUALITY)
+
+
 def _save_patches(slide_dir: Path, patches, coords, labels):
-    """패치를 JPEG로 저장하고 patch_index 레코드 목록을 반환."""
     if not patches:
         return []
     slide_dir.mkdir(parents=True, exist_ok=True)
+
     records = []
+    save_args = []
     for patch, (row, col), label in zip(patches, coords, labels):
-        fname = f"r{row:04d}_c{col:04d}.jpg"
-        patch.save(slide_dir / fname, format="JPEG", quality=JPEG_QUALITY)
+        fpath = slide_dir / f"r{row:04d}_c{col:04d}.jpg"
+        save_args.append((fpath, patch))
         records.append({
-            "filename":    str(slide_dir / fname),
+            "filename":    str(fpath),
             "row":         row,
             "col":         col,
             "patch_label": label,
         })
+
+    with ThreadPoolExecutor(max_workers=NUM_IO_THREADS) as ex:
+        list(ex.map(_write_jpeg, save_args))
+
     return records
 
 
@@ -229,10 +243,25 @@ def _process_slide(info):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="CAMELYON17 patch extractor")
+    parser.add_argument("--task-id",    type=int, default=0,            help="0-indexed shard index")
+    parser.add_argument("--num-tasks",  type=int, default=1,            help="total number of shards")
+    parser.add_argument("--workers",    type=int, default=NUM_WORKERS,  help="mp.Pool process count")
+    parser.add_argument("--io-threads", type=int, default=NUM_IO_THREADS, help="JPEG save threads per worker")
+    args = parser.parse_args()
+
+    global NUM_WORKERS, NUM_IO_THREADS
+    NUM_WORKERS    = args.workers
+    NUM_IO_THREADS = args.io_threads
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
     stage_map = _load_stage_map(ROOT)
     slides    = _build_slide_list(stage_map)
+    slides    = slides[args.task_id :: args.num_tasks]
+
+    print(f"[task {args.task_id}/{args.num_tasks}] {len(slides)} slides")
 
     done = 0
 
@@ -245,7 +274,7 @@ def main():
     with mp.Pool(processes=NUM_WORKERS) as pool:
         results = pool.imap_unordered(_process_slide, slides)
         if use_tqdm:
-            results = tqdm(results, total=len(slides), desc="Extracting patches", unit="slide")
+            results = tqdm(results, total=len(slides), desc=f"task {args.task_id}", unit="slide")
 
         for slide_record, patch_recs, skipped in results:
             if slide_record is None:
@@ -254,9 +283,9 @@ def main():
                 print(f"skip (exists): {slide_record['slide_id']}")
             done += 1
 
-    print(f"완료: {done}개 슬라이드 → {OUT_DIR}")
+    print(f"[task {args.task_id}] 완료: {done}개 슬라이드 → {OUT_DIR}")
 
 
 if __name__ == "__main__":
-    mp.freeze_support()  # Windows 멀티프로세싱 필수
+    mp.freeze_support()
     main()
