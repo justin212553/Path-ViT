@@ -247,6 +247,8 @@ def _process_slide(info):
 
 
 def main():
+    global NUM_WORKERS, NUM_IO_THREADS
+
     import argparse
     parser = argparse.ArgumentParser(description="CAMELYON17 patch extractor")
     parser.add_argument("--task-id",    type=int, default=0,              help="0-indexed shard index")
@@ -255,7 +257,6 @@ def main():
     parser.add_argument("--io-threads", type=int, default=NUM_IO_THREADS, help="JPEG save threads per worker")
     args = parser.parse_args()
 
-    global NUM_WORKERS, NUM_IO_THREADS
     NUM_WORKERS    = args.workers
     NUM_IO_THREADS = args.io_threads
 
