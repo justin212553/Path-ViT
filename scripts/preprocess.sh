@@ -13,4 +13,4 @@ cd /pub/wonseukl/Path-ViT/
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
-python -u ./data/preprocess.py "$@"
+python -um data.preprocess "$@"

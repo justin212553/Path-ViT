@@ -8,6 +8,7 @@ matplotlib>=3.7.0
 tqdm>=4.65.0
 openslide-python
 openslide-bin
+shapely>=2.0.0
 requests
 nystrom-attention
 wandb
