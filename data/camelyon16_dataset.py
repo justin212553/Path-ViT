@@ -30,6 +30,8 @@ import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+from utils import send_slack
+
 SEED = 42  # train/val 슬라이드 split 재현성
 N_VAL_PER_CLASS = 10  # 클래스별 val로 뗄 슬라이드 수 (가용 슬라이드가 적으면 clamp)
 
@@ -148,6 +150,13 @@ class CAMELYON16SlideDataset(Dataset):
             self.items = avail_df[is_val].reset_index(drop=True)
         else:  # train: val에 포함되지 않은 슬라이드 전체
             self.items = avail_df[~is_val].reset_index(drop=True)
+
+        n_pos = int((self.items["label"] == 1).sum())
+        n_neg = int((self.items["label"] == 0).sum())
+        send_slack(
+            f":file_folder: *CAMELYON16 `{split}` 데이터셋 로드 완료*\n"
+            f"> 슬라이드: {len(self.items)}개 (pos={n_pos}, neg={n_neg}) ← `{self.root}`"
+        )
 
     def __len__(self) -> int:
         return len(self.items)
