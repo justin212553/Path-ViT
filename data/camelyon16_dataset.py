@@ -1,10 +1,6 @@
 """
 CAMELYON16 패치 데이터셋 — 슬라이드 단위 MIL bag
 
-patch_dataset.py(CAMELYON17)와 달리 CAMELYON16은 환자당 슬라이드가 1장이므로
-"환자 단위로 여러 노드를 리스트로 묶는" 계층이 필요 없다. 아이템 단위 = 슬라이드 1장 = bag 1개.
-__getitem__은 dict 하나를 그대로 반환한다 (patch_dataset.py처럼 List[dict]가 아님).
-
 라벨 규칙:
     train: 슬라이드 파일명 접두사로 결정 (normal_* → 0, tumor_* → 1)
     test:  공식 reference.csv(image_name,label,Type)에서 매핑 (Normal → 0, Tumor → 1)
@@ -20,7 +16,9 @@ DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 
 반환 형식 (dict 1개 = 슬라이드 1장):
     patch_paths: List[Path]   N개 패치 이미지 파일 경로 (지연 로딩, precomputed=False일 때만)
     features:    (N, D) float32 (precomputed=True일 때만, extract_features.py 산출물)
-    coords:      (N, 2) int64 [row, col] (파일명 r####_c#### 파싱)
+    coords:      (N, 2) int64 [row, col] (패치 이미지가 있으면 파일명 r####_c#### 파싱,
+                 없으면 coords.pt에서 로딩 — utils/download_camelyon16_mil.py 같은
+                 외부 사전 추출 feature 데이터셋용)
     label:       (1,) int64 (0=normal, 1=tumor)
     slide_id:    str
 """
@@ -42,6 +40,8 @@ PATCH_TRANSFORM = transforms.Compose([
 ])
 
 FEATURES_FILENAME = "features.pt"  # data/extract_features.py 산출물 파일명
+COORDS_FILENAME = "coords.pt"  # utils/download_camelyon16_mil.py 산출물 — 원본 패치 이미지 없이
+                                # feature만 있는 외부 데이터셋일 때 좌표를 파일명 대신 여기서 읽음
 
 _COORD_RE = re.compile(r"r(\d+)_c(\d+)")
 _SLIDE_LABEL_RE = re.compile(r"^(normal|tumor|test)")
@@ -157,10 +157,14 @@ class CAMELYON16SlideDataset(Dataset):
         slide_dir = self.root / row["slide_id"]
         patch_paths = list_patch_paths(slide_dir)
 
-        coords = torch.tensor(
-            [_parse_coord(p.name) for p in patch_paths],
-            dtype=torch.long,
-        )
+        if patch_paths:
+            coords = torch.tensor(
+                [_parse_coord(p.name) for p in patch_paths],
+                dtype=torch.long,
+            )
+        else:
+            # 패치 이미지가 없는 경우(예: torchmil처럼 feature만 사전 추출된 외부 데이터셋)
+            coords = torch.load(slide_dir / COORDS_FILENAME)
         coords[:, 0] -= coords[:, 0].min()
         coords[:, 1] -= coords[:, 1].min()
 
@@ -172,10 +176,11 @@ class CAMELYON16SlideDataset(Dataset):
 
         if self.precomputed:
             features = torch.load(slide_dir / FEATURES_FILENAME)
-            if len(features) != len(patch_paths):
+            n_patches = len(patch_paths) if patch_paths else len(coords)
+            if len(features) != n_patches:
                 raise RuntimeError(
                     f"{slide_dir}: features.pt 행 수({len(features)})가 패치 수"
-                    f"({len(patch_paths)})와 다릅니다 — data/extract_features.py를 다시 실행하세요."
+                    f"({n_patches})와 다릅니다 — data/extract_features.py를 다시 실행하세요."
                 )
             item["features"] = features
         else:

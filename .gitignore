@@ -2,6 +2,7 @@ data/wsi_train
 data/wsi_eval
 data/patches
 data/patches_eval
+data/_torchmil_staging
 data/lesion_annotations
 
 utils/data
