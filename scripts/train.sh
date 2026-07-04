@@ -16,4 +16,4 @@ conda activate Path-ViT
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-python -u ./train.py
+python -u ./train.py "$@"
