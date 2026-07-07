@@ -6,11 +6,10 @@
 #SBATCH --cpus-per-task=8               # gdc-client 멀티스레드 병렬 처리를 위해 코어 8개 할당
 #SBATCH --mem=16G                       # 네트워크 버퍼 소화용 메모리 16GB
 #SBATCH --time=2-00:00:00               # Walltime 2일 지정 (free 상한선인 3일 이내 안착)
-#SBATCH --output=./gdc_download_%j.out  # 다운로드 로그 실시간 기록 파일
-#SBATCH --error=./gdc_download_%j.err   # 에러 발생 시 기록 파일
+#SBATCH --output=./gdc_download.log     # 다운로드 로그 실시간 기록 파일
 
 # ── 1. 경로 정의 ─────────────────────────────────────────────────────────────
-MANIFEST_PATH="./scripts/gdc_manifest_PAAD_WSI.txt"  # 아까 Portal에서 받아둔 매니페스트 경로
+MANIFEST_PATH="./scripts/gdc_manifest.txt"  # 아까 Portal에서 받아둔 매니페스트 경로
 DOWNLOAD_DIR="./data/tcga_paad_wsi"                  # SVS 저장할 폴더
 GDC_CLIENT="./.bin/gdc-client"                       # 위에서 세팅한 바이너리 경로
 
