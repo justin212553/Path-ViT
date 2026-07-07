@@ -22,7 +22,7 @@ echo "====================================================="
 
 # ── 2. GDC Client 매니페스트 기반 다운로드 실행 ──────────────────────────────
 # -n 8: 코어 8개를 모두 쥐고 8개 파일을 동시 병렬 다운로드하여 속도 극대화
-$GDC_CLIENT download -m $MANIFEST_PATH -d $DOWNLOAD_DIR -n 8
+$GDC_CLIENT download -m $MANIFEST_PATH -d $DOWNLOAD_DIR -n 8 --no-related-files --no-annotations
 
 echo "====================================================="
 echo "다운로드 프로세스 종료 시간: $(date)"
