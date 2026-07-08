@@ -421,13 +421,13 @@ def main():
         feat_msg = f" — feature {n_features}슬라이드" if n_features is not None else " (tiles-only)"
         print(f"[task {args.task_id}] 완료: {done}개 슬라이드 → {OUT_DIR}" + feat_msg)
         send_slack(
-            f":white_check_mark: *CPTAC preprocess 완료* {tag} — "
+            f":white_check_mark: *preprocess 완료* {tag} — "
             f"tile {done}슬라이드{feat_msg} — {elapsed//60}m{elapsed%60}s"
         )
 
     except Exception as exc:
         elapsed = int(time.time() - start)
-        send_slack(f":x: *CPTAC preprocess 실패* {tag} — {exc} — {elapsed//60}m{elapsed%60}s")
+        send_slack(f":x: *preprocess 실패* {tag} — {exc} — {elapsed//60}m{elapsed%60}s")
         raise
 
 

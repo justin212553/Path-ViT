@@ -27,7 +27,7 @@ from config import Config
 from data.camelyon16_dataset import CAMELYON16SlideDataset  # 변경: patch_dataset.CAMELYON17NodeDataset → camelyon16_dataset.CAMELYON16SlideDataset
 # from models import PatchViT                          # [LateFusion] 기존 단일 경로 모델
 from models import PatchViT, LateFusionViT             # [LateFusion] Late Fusion 모델 추가
-from data.fit_clusters import CENTROIDS_FILENAME       # [LateFusion] 군집 중심 파일명
+from data.fit_clusters import CENTROIDS_DIR       # [LateFusion] 군집 중심 파일명
 from utils import load_env, send_slack
 from utils.metrics import compute_patch_metrics
 
@@ -177,7 +177,7 @@ def main():
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
         raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
-    centroids_path = Path(__file__).parent / CENTROIDS_FILENAME
+    centroids_path = Path(__file__).parent / CENTROIDS_DIR
     if args.fusion and not centroids_path.exists():
         raise FileNotFoundError(
             f"cluster_centroids.pt 없음: {centroids_path}\n"

@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=64G
 #SBATCH --time=3-00:00:00
-#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_tcga_%j.log
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_tcga.log
 
 cd /pub/wonseukl/Path-ViT/
 
