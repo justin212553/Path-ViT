@@ -8,7 +8,7 @@ train.py는 model.cnn.backbone.requires_grad_(False)로 CNN backbone을 항상 �
 
 출력:
     <patches_root>/<slide_id>/features.pt   (N_patches, feature_dim) float32 tensor
-    행 순서 = data.patch_dataset.list_patch_paths()와 동일한 정렬 순서
+    행 순서 = data.patch_utils.list_patch_paths()와 동일한 정렬 순서
 
 사용법:
     python -m data.extract_features   (또는 python data/extract_features.py 직접 실행도 가능)
@@ -26,7 +26,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import DataConfig
-from data.patch_dataset import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths
+from data.patch_utils import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths
 from models.cnn_encoder import CNNEncoder
 from utils import load_env, send_slack
 

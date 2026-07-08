@@ -42,3 +42,39 @@ def compute_patch_metrics(
         "recall":    float(recall_score(patch_labels, patch_preds, zero_division=0)),
         "auc_roc":   auc_roc,
     }
+
+
+def compute_survival_metrics(
+    risk_scores: np.ndarray,
+    times: np.ndarray,
+    events: np.ndarray,
+) -> dict:
+    """
+    생존 분석 성능 지표: Harrell's concordance index (c-index).
+
+    모든 comparable 환자 쌍(더 이른 시점에 사망(event=1)한 환자 vs 그 시점 이후까지
+    관찰된 다른 환자)에 대해, risk score의 대소 관계가 실제 생존 순서와 일치하는 비율.
+    동점(risk score가 같은 쌍)은 0.5로 부분 반영한다.
+
+    Args:
+        risk_scores: (N,) 예측 risk score (클수록 위험/사망 가능성 높음)
+        times:       (N,) OS_time
+        events:      (N,) OS_event (1=사망, 0=censored)
+
+    Returns:
+        dict: c_index (comparable pair가 하나도 없으면 nan)
+    """
+    risk  = np.asarray(risk_scores, dtype=np.float64)
+    time  = np.asarray(times, dtype=np.float64)
+    event = np.asarray(events, dtype=bool)
+
+    comparable  = (time[:, None] < time[None, :]) & event[:, None]
+    concordant  = comparable & (risk[:, None] > risk[None, :])
+    tied_risk   = comparable & (risk[:, None] == risk[None, :])
+
+    n_permissible = int(comparable.sum())
+    c_index = (
+        float((concordant.sum() + 0.5 * tied_risk.sum()) / n_permissible)
+        if n_permissible > 0 else float("nan")
+    )
+    return {"c_index": c_index}

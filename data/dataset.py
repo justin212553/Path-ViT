@@ -1,16 +1,14 @@
 """
 TCGA-PAAD / CPTAC-PDA WSI 생존(OS) 데이터셋 — 환자(case) 단위 MIL.
 
-data/patch_dataset.py(CAMELYON17NodeDataset — 환자당 다중 노드를 리스트로 묶는 구조)를
-그대로 참고했다. 다만 라벨이 이진 분류(stage)가 아니라 OS_time/OS_event(생존 분석) 이고,
-슬라이드→환자 매핑도 파일명 파싱이 아니라 data/preprocess_cptac.py 산출물인
-slide_index_task*.csv의 case_id 컬럼을 그대로 쓴다는 점이 다르다.
+환자당 다중 슬라이드를 리스트로 묶는 구조다. 슬라이드→환자 매핑은 파일명 파싱이 아니라
+data/preprocess_cptac.py 산출물인 slide_index_task*.csv의 case_id 컬럼을 그대로 쓴다.
 
-각 아이템 = 환자(case) 1명이 보유한 모든 슬라이드 리스트(dict). CAMELYON17과 동일하게
+각 아이템 = 환자(case) 1명이 보유한 모든 슬라이드 리스트(dict).
 DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 한다.
 
 반환 형식 (환자 1명의 슬라이드 수만큼의 리스트, 각 원소는 dict):
-    patch_paths / features: patch_dataset.py와 동일 — precomputed 여부에 따라 둘 중 하나만 존재
+    patch_paths / features: precomputed 여부에 따라 둘 중 하나만 존재
     coords:      (N, 2) int64   [row, col]  (파일명 r####_c#### 파싱)
     case_id:     str
     slide_id:    str
@@ -21,9 +19,8 @@ DataLoader는 batch_size=1 + collate_fn=lambda batch: batch[0] 로 사용해야 
 data/extract_os_labels.py 산출물(data/os_labels_{tcga,cptac}.csv)에 없는 case(=raw clinical.tsv에
 없거나 vital_status 미상이라 OS를 알 수 없는 환자)의 슬라이드는 라벨이 없으므로 제외한다.
 
-train/val split은 OS_event(사망/생존) 그룹별로 환자 단위 val 샘플링을 한다
-(patch_dataset.py의 양성/음성 10명씩 val 규칙과 동일한 취지 — 슬라이드가 아니라 환자 단위로 나눠야
-같은 환자의 슬라이드가 train/val에 동시에 들어가는 leakage를 막을 수 있다).
+train/val split은 OS_event(사망/생존) 그룹별로 환자 단위 val 샘플링을 한다 — 슬라이드가 아니라
+환자 단위로 나눠야 같은 환자의 슬라이드가 train/val에 동시에 들어가는 leakage를 막을 수 있다.
 
 사용법 예:
     from config import DataConfig
@@ -37,9 +34,8 @@ import torch
 from torch.utils.data import Dataset
 
 from config import DataConfig
-from data.patch_dataset import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths, _parse_coord
+from data.patch_utils import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths, _parse_coord
 
-SEED = 42
 VAL_PER_GROUP = 15  # OS_event(사망/생존) 그룹별 val 환자 수
 
 OS_LABEL_PATHS = {
@@ -58,7 +54,7 @@ def _load_slide_index(patches_root: Path) -> pd.DataFrame:
     if not paths:
         raise FileNotFoundError(
             f"{patches_root}에 slide_index_task*.csv가 없습니다 — "
-            "먼저 python -m data.preprocess_cptac 을 실행하세요."
+            "먼저 python -m data.preprocess.py 을 실행하세요."
         )
     return pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
 
@@ -105,7 +101,7 @@ class WSISurvivalDataset(Dataset):
         avail_df    = merged[has_patches].reset_index(drop=True)
         if avail_df.empty:
             raise RuntimeError(
-                f"[{dataset}] 사용 가능한 슬라이드가 없습니다 — preprocess_cptac 산출물과 "
+                f"[{dataset}] 사용 가능한 슬라이드가 없습니다 — preprocess 산출물과 "
                 f"os_labels 병합 결과를 확인하세요."
             )
 
@@ -114,7 +110,7 @@ class WSISurvivalDataset(Dataset):
         val_cases  = set()
         for _, group in case_event.groupby(case_event):
             n = min(VAL_PER_GROUP, len(group))
-            val_cases |= set(group.sample(n, random_state=SEED).index)
+            val_cases |= set(group.sample(n, random_state=DataConfig.seed).index)
 
         is_val = avail_df["case_id"].isin(val_cases)
         self.items = (avail_df[is_val] if split == "val" else avail_df[~is_val]).reset_index(drop=True)

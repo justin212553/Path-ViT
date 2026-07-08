@@ -1,10 +1,12 @@
 """
-PatchViT — CAMELYON17 림프절 미세전이 탐지 모델 (WSI 단위 MIL)
+PatchViT — WSI 단위 MIL 모델 (ViT + ABMIL)
 
-패치 → CNN → 공간 임베딩 ViT(self-attention) → attention pooling → WSI 단위 분류
+패치 → CNN → 공간 임베딩 ViT(self-attention) → attention pooling → WSI 단위 예측
+out_dim로 헤드 크기를 조절해 이진 분류(out_dim=2)와 생존 분석 risk score(out_dim=1)
+양쪽에 사용한다.
 
 Forward 출력:
-    wsi_logits   : (1, 2)        — WSI(노드) 단위 전이 여부 logit (정상 / 전이)
+    wsi_logits   : (1, out_dim)  — WSI 단위 logit (out_dim=2: 이진 분류, out_dim=1: risk score)
     attn_weights : (N_patches,)  — 패치별 attention 가중치 (시각화용)
 """
 from pathlib import Path
@@ -66,12 +68,13 @@ class AttentionPooling(nn.Module):
 
 
 class PatchViT(nn.Module):
-    def __init__(self, cfg: ModelConfig, precomputed: bool = True):
+    def __init__(self, cfg: ModelConfig, precomputed: bool = True, out_dim: int = 2):
         """
         Args:
             precomputed: True면 ResNet50 backbone을 생성하지 않는다 — 항상 사전 추출된
                          pooled feature(features 인자)만 입력으로 받는 모드.
                          False면 patch_paths로 이미지를 직접 디코딩/forward한다.
+            out_dim:     classifier 출력 차원. 이진 분류는 2(logit), 생존 분석(risk score)은 1.
         """
         super().__init__()
         self.precomputed = precomputed
@@ -84,10 +87,10 @@ class PatchViT(nn.Module):
 
         self.classifier = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim),
-            nn.Linear(cfg.embed_dim, 2),
+            nn.Linear(cfg.embed_dim, out_dim),
         )
 
-    def forward(
+    def forward_embed(
         self,
         coords: torch.Tensor,
         patch_paths: list[Path] | None = None,
@@ -96,16 +99,20 @@ class PatchViT(nn.Module):
         chunk_size: int | None = None,
     ) -> dict:
         """
+        classifier를 적용하기 전, WSI 1장을 attention-pooled 임베딩 1개로 집계한다.
+        환자 1명이 슬라이드를 여러 장 보유하는 경우(WSISurvivalDataset) 슬라이드별로
+        이 메서드를 호출한 뒤 임베딩을 환자 단위로 풀링하고 나서 classifier를 적용해야 한다.
+
         Args:
             coords:      (N_patches, 2)
             patch_paths: N개 패치 이미지 파일 경로 (precomputed=False 모드) — 이미지 디코딩을
                          chunk_size 단위로 지연 로딩해 한 번에 메모리에 올리는 패치 수를 제한한다
                          (패치 수에 cap이 없는 대형 WSI에서 host RAM OOM 방지)
             features:    (N_patches, 2048) 사전 추출된 backbone+pool feature (precomputed=True 모드)
-            transform:   패치 이미지 → 텐서 변환 (CAMELYON17NodeDataset.transform). patch_paths 모드에서만 사용
+            transform:   패치 이미지 → 텐서 변환. patch_paths 모드에서만 사용
             chunk_size:  CNN을 이 크기 단위로 나눠 실행. None이면 한 번에 실행. patch_paths 모드에서만 사용
         Returns:
-            wsi_logits:   (1, 2)
+            embed:        (D,) — WSI 임베딩
             attn_weights: (N_patches,)
         """
         device = coords.device
@@ -126,5 +133,21 @@ class PatchViT(nn.Module):
 
         ctx_tokens   = self.vit(patch_tokens, coords)          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens)   # (D,), (N,)
-        wsi_logits = self.classifier(wsi_embed.unsqueeze(0))   # (1, 2)
-        return {"wsi_logits": wsi_logits, "attn_weights": attn_weights}
+        return {"embed": wsi_embed, "attn_weights": attn_weights}
+
+    def forward(
+        self,
+        coords: torch.Tensor,
+        patch_paths: list[Path] | None = None,
+        features: torch.Tensor | None = None,
+        transform=None,
+        chunk_size: int | None = None,
+    ) -> dict:
+        """
+        Returns:
+            wsi_logits:   (1, out_dim)
+            attn_weights: (N_patches,)
+        """
+        out = self.forward_embed(coords, patch_paths, features, transform, chunk_size)
+        wsi_logits = self.classifier(out["embed"].unsqueeze(0))   # (1, out_dim)
+        return {"wsi_logits": wsi_logits, "attn_weights": out["attn_weights"]}

@@ -16,7 +16,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import DataConfig
-from data.patch_dataset import FEATURES_FILENAME
+from data.patch_utils import FEATURES_FILENAME
 
 
 def main():
