@@ -15,11 +15,12 @@ class ModelConfig:
 
 @dataclass
 class DataConfig:
-    patches_root: str   = "data/patches"  # WSI 단위 MIL train/val 공용 노드 루트
-    csv_path:     str   = "data/stage_labels.csv"
-    num_workers: int   = 4
-    # True(기본): data/extract_features.py로 미리 뽑아둔 features.pt를 사용
-    # False(--image): 패치 jpg/png를 매번 ResNet50으로 디코딩/forward
+    wsi_root_tcga: str         = "data/tcga_paad_wsi"
+    wsi_root_cptac: str        = "data/cptac_pda_wsi"
+    patches_root_tcga: str      = "data/patches_tcga"  
+    patches_root_cptac: str     = "data/patches_cptac"  
+    csv_path:     str           = "data/stage_labels.csv"
+    num_workers: int            = 4
     precomputed: bool  = True
 
 
