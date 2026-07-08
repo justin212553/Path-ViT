@@ -8,6 +8,10 @@ LateFusionViT — ViT+ABMIL과 Cluster Histogram Branch의 Late Fusion 모델
 두 경로는 같은 features.pt를 입력으로 받되 서로 다른 정보를 추출하므로 상보적이다.
 Path B의 k-means 군집 중심(centroids)은 학습 전 사전 계산되며 학습 중 고정된다.
 
+PatchViT를 상속해 cnn/vit/attn_pool은 그대로 재사용하고, Path B(히스토그램 브랜치)와
+그에 맞춰 입력 차원이 2D로 늘어난 risk_head, raw feature 노출이 필요한 forward만
+오버라이드한다.
+
 [이 모델의 위치]
   PatchViT (ViT+ABMIL)
       → [현재] LateFusionViT (ViT+ABMIL + Cluster Histogram, Late Fusion)
@@ -21,7 +25,7 @@ Path B의 k-means 군집 중심(centroids)은 학습 전 사전 계산되며 학
   LateFusionViT 생성 시 해당 텐서를 cluster_centroids 인자로 전달한다.
 
 Forward 출력:
-    wsi_logits   : (1, out_dim) — WSI 단위 logit (out_dim=2: 이진 분류, out_dim=1: risk score)
+    embed        : (2D,)        — [z_vit ‖ z_hist] Late Fusion 임베딩 (risk_head 적용 전)
     attn_weights : (N_patches,) — ABMIL 패치 attention 가중치 (시각화·해석용)
     histogram    : (K,)         — 군집별 패치 비율 (해석용)
 """
@@ -32,9 +36,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from .cnn_encoder import CNNEncoder
-from .patch_vit import AttentionPooling
-from .vit_encoder import ViTEncoder
+from .patch_vit import PatchViT
 from config import ModelConfig
 
 
@@ -94,22 +96,23 @@ class ClusterHistogramBranch(nn.Module):
         return z_hist, histogram
 
 
-class LateFusionViT(nn.Module):
+class LateFusionViT(PatchViT):
     """
     ViT+ABMIL (Path A) + Cluster Histogram Branch (Path B) Late Fusion.
+    cnn/vit/attn_pool은 PatchViT에서 그대로 물려받는다.
 
     [Fusion 구조]
       z_vit  (1, D) — Path A 출력: 공간 문맥이 반영된 WSI 임베딩
       z_hist (1, D) — Path B 출력: 조직 구성 비율이 반영된 WSI 임베딩
-        → concat → (1, 2D) → LayerNorm → Linear → logits (1, 2)
+        → concat → (1, 2D) → LayerNorm → Linear → risk_score (1, 1)
 
     [Cluster Query Token으로의 전환 경로]
       이 모델에서 Path B가 성능에 기여함이 확인되면 다음 단계로 이동한다:
         1. attn_pool (ABMIL) 제거
         2. ClusterHistogramBranch 제거
         3. ViT 입력에 K개 cluster query token 추가
-        4. ViT 출력의 K query token × histogram 가중합 → WSI 임베딩 → 분류기
-      이 전환 후 classifier 입력 차원이 2D → D로 줄어든다.
+        4. ViT 출력의 K query token × histogram 가중합 → WSI 임베딩 → risk head
+      이 전환 후 risk head 입력 차원이 2D → D로 줄어든다.
     """
 
     def __init__(
@@ -117,52 +120,47 @@ class LateFusionViT(nn.Module):
         cfg: ModelConfig,
         cluster_centroids: torch.Tensor,
         precomputed: bool = True,
-        out_dim: int = 2,
     ):
         """
         Args:
             cfg               : ModelConfig
             cluster_centroids : (K, 2048) 사전 계산된 k-means 군집 중심. 학습 중 고정.
             precomputed       : True면 CNN backbone 없이 features.pt 사용
-            out_dim           : classifier 출력 차원. 이진 분류는 2(logit), 생존 분석(risk score)은 1.
         """
-        super().__init__()
+        super().__init__(cfg, precomputed)
         K = cluster_centroids.shape[0]
 
         # k-means 중심: gradient 없이 device 이동만 지원하는 buffer로 등록
         self.register_buffer("centroids", cluster_centroids.float())  # (K, 2048)
 
-        # Path A: ViT+ABMIL (공간 문맥)
-        self.precomputed = precomputed
-        self.cnn = CNNEncoder(cfg.embed_dim, with_backbone=not precomputed)
-        self.vit = ViTEncoder(
-            cfg.embed_dim, cfg.num_heads,
-            cfg.num_transformer_layers, cfg.dropout,
-            use_grad_checkpoint=cfg.grad_checkpoint,
-            num_landmarks=cfg.num_landmarks,
-        )
-        self.attn_pool = AttentionPooling(cfg.embed_dim)
-
         # Path B: 클러스터 히스토그램 (조직 구성 비율)
         self.hist_branch = ClusterHistogramBranch(K, cfg.embed_dim)
 
-        # Late Fusion 분류기: [z_vit ‖ z_hist] (2D,) → logits (out_dim,)
-        self.classifier = nn.Sequential(
+        # Late Fusion risk head: [z_vit ‖ z_hist] (2D,) → risk_score (1,)
+        # PatchViT가 만든 D 차원 risk_head를 2D 차원으로 교체한다.
+        self.risk_head = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim * 2),
-            nn.Linear(cfg.embed_dim * 2, out_dim),
+            nn.Linear(cfg.embed_dim * 2, 1),
         )
 
-    def _extract_raw_features(
+    def _raw_features(
         self,
-        patch_paths: list[Path],
-        transform,
-        chunk_size: int,
-        device: torch.device,
+        coords: torch.Tensor,
+        patch_paths: Optional[list[Path]] = None,
+        features: Optional[torch.Tensor] = None,
+        transform=None,
+        chunk_size: Optional[int] = None,
     ) -> torch.Tensor:
         """
-        raw image 모드 전용: backbone+pool까지 실행해 (N, 2048) raw feature를 추출한다.
-        proj는 적용하지 않는다 — histogram 계산에 2048-dim 원본이 필요하기 때문.
+        histogram 계산에 필요한 proj 이전의 (N, 2048) raw CNN feature를 반환한다.
+        precomputed 모드에서는 features.pt가 이미 raw feature이므로 그대로 쓰고,
+        raw image 모드에서는 backbone+pool까지만 실행한다(proj는 적용하지 않음).
         """
+        if features is not None:
+            return features.to(coords.device, non_blocking=True)
+
+        device = coords.device
+        chunk_size = chunk_size or len(patch_paths)
         chunks = []
         for i in range(0, len(patch_paths), chunk_size):
             batch = torch.stack([
@@ -170,58 +168,8 @@ class LateFusionViT(nn.Module):
                 for p in patch_paths[i: i + chunk_size]
             ]).to(device, non_blocking=True)
             feat_map = self.cnn.backbone(batch)
-            pooled = self.cnn.pool(feat_map)   # (B, 2048)
-            chunks.append(pooled)
-        return torch.cat(chunks)               # (N, 2048)
-
-    def forward_embed(
-        self,
-        coords: torch.Tensor,
-        patch_paths: Optional[list[Path]] = None,
-        features: Optional[torch.Tensor] = None,
-        transform=None,
-        chunk_size: Optional[int] = None,
-    ) -> dict:
-        """
-        classifier를 적용하기 전, WSI 1장을 Late Fusion 임베딩 1개로 집계한다.
-        환자 1명이 슬라이드를 여러 장 보유하는 경우(WSISurvivalDataset) 슬라이드별로
-        이 메서드를 호출한 뒤 임베딩을 환자 단위로 풀링하고 나서 classifier를 적용해야 한다.
-
-        Args:
-            coords      : (N, 2)
-            features    : (N, 2048) 사전 추출 feature — precomputed=True 모드
-            patch_paths : 패치 이미지 경로 리스트   — precomputed=False 모드
-            transform   : 이미지 전처리 변환         — patch_paths 모드에서만 사용
-            chunk_size  : CNN chunk 크기             — patch_paths 모드에서만 사용
-        Returns:
-            embed        : (2D,)  — [z_vit ‖ z_hist] Late Fusion 임베딩
-            attn_weights : (N,)   — ABMIL 패치 attention 가중치 (시각화용)
-            histogram    : (K,)   — 군집별 패치 비율 (해석용)
-        """
-        device = coords.device
-
-        if features is not None:
-            # precomputed 모드: features.pt의 2048-dim feature를 그대로 histogram에도 사용
-            raw_features = features.to(device, non_blocking=True)   # (N, 2048)
-            patch_tokens = self.cnn.forward_pooled(raw_features)    # (N, D)
-        else:
-            chunk_size = chunk_size or len(patch_paths)
-            raw_features = self._extract_raw_features(              # (N, 2048)
-                patch_paths, transform, chunk_size, device
-            )
-            patch_tokens = self.cnn.forward_pooled(raw_features)    # (N, D)
-
-        # Path A: 공간 문맥 → ABMIL 집계
-        ctx_tokens = self.vit(patch_tokens, coords)                 # (N, D)
-        z_vit, attn_weights = self.attn_pool(ctx_tokens)            # (D,), (N,)
-
-        # Path B: 조직 구성 비율 → 히스토그램 임베딩
-        z_hist, histogram = self.hist_branch(raw_features, self.centroids)  # (1, D), (K,)
-
-        # Late Fusion: z_vit와 z_hist를 concat
-        z_fused = torch.cat([z_vit.unsqueeze(0), z_hist], dim=-1).squeeze(0)  # (2D,)
-
-        return {"embed": z_fused, "attn_weights": attn_weights, "histogram": histogram}
+            chunks.append(self.cnn.pool(feat_map))   # (B, 2048)
+        return torch.cat(chunks)                      # (N, 2048)
 
     def forward(
         self,
@@ -232,15 +180,26 @@ class LateFusionViT(nn.Module):
         chunk_size: Optional[int] = None,
     ) -> dict:
         """
+        risk_head를 적용하기 전, WSI 1장을 Late Fusion 임베딩 1개로 집계한다.
+        환자 1명이 슬라이드를 여러 장 보유하는 경우(WSISurvivalDataset) 슬라이드별로
+        이 메서드를 호출한 뒤 임베딩을 환자 단위로 풀링하고 나서 risk_head를 적용해야 한다.
+
         Returns:
-            wsi_logits   : (1, out_dim)
-            attn_weights : (N,)    — ABMIL 패치 attention 가중치 (시각화용)
-            histogram    : (K,)    — 군집별 패치 비율 (해석용)
+            embed        : (2D,)  — [z_vit ‖ z_hist] Late Fusion 임베딩
+            attn_weights : (N,)   — ABMIL 패치 attention 가중치 (시각화용)
+            histogram    : (K,)   — 군집별 패치 비율 (해석용)
         """
-        out = self.forward_embed(coords, patch_paths, features, transform, chunk_size)
-        wsi_logits = self.classifier(out["embed"].unsqueeze(0))   # (1, out_dim)
-        return {
-            "wsi_logits":   wsi_logits,
-            "attn_weights": out["attn_weights"],
-            "histogram":    out["histogram"],
-        }
+        raw_features = self._raw_features(coords, patch_paths, features, transform, chunk_size)  # (N, 2048)
+        patch_tokens = self.cnn.forward_pooled(raw_features)                                      # (N, D)
+
+        # Path A: 공간 문맥 → ABMIL 집계
+        ctx_tokens = self.vit(patch_tokens, coords)                 # (N, D)
+        z_vit, attn_weights = self.attn_pool(ctx_tokens)             # (D,), (N,)
+
+        # Path B: 조직 구성 비율 → 히스토그램 임베딩
+        z_hist, histogram = self.hist_branch(raw_features, self.centroids)  # (1, D), (K,)
+
+        # Late Fusion: z_vit와 z_hist를 concat
+        z_fused = torch.cat([z_vit.unsqueeze(0), z_hist], dim=-1).squeeze(0)  # (2D,)
+
+        return {"embed": z_fused, "attn_weights": attn_weights, "histogram": histogram}

@@ -70,14 +70,14 @@ def _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
         for slide in patient_slides:
             coords = slide["coords"].to(device, non_blocking=True)
             if "features" in slide:
-                out = model.forward_embed(coords, features=slide["features"])
+                out = model(coords, features=slide["features"])
             else:
-                out = model.forward_embed(coords, patch_paths=slide["patch_paths"],
-                                           transform=transform, chunk_size=chunk_size)
+                out = model(coords, patch_paths=slide["patch_paths"],
+                             transform=transform, chunk_size=chunk_size)
             slide_embeds.append(out["embed"])
 
         patient_embed = torch.stack(slide_embeds).mean(dim=0)      # (D,) 또는 (2D,) — 슬라이드 평균 풀링
-        risk = model.classifier(patient_embed.unsqueeze(0)).view(1)  # (1,)
+        risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)  # (1,)
     return risk
 
 
@@ -243,9 +243,9 @@ def main():
     # PatchViT    : 기존 ViT+ABMIL 단일 경로 (ablation baseline)
     # LateFusionViT: ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion
     if args.fusion:
-        model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed, out_dim=1).to(device)
+        model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     else:
-        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed, out_dim=1).to(device)
+        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
