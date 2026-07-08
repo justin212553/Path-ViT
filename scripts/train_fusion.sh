@@ -13,8 +13,8 @@
 # 선행 조건: cluster_centroids.pt 생성 완료 (scripts/fit_clusters.sh)
 #
 # ablation 비교:
-#   baseline : sbatch scripts/train.sh          → camelyon_best.pt
-#   fusion   : sbatch scripts/train_fusion.sh   → camelyon_best_fusion.pt
+#   baseline : sbatch scripts/train.sh          → survival_{dataset}_best.pt
+#   fusion   : sbatch scripts/train_fusion.sh   → survival_{dataset}_best_fusion.pt
 
 cd /pub/wonseukl/Path-ViT/
 

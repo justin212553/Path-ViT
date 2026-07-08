@@ -13,17 +13,15 @@ import math
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ray import tune
 
 from config import Config
-from data.patch_dataset import CAMELYON17NodeDataset
+from data.dataset import WSISurvivalDataset
 from models import PatchViT
 from train import (
     _build_scheduler,
-    _compute_class_weights,
     _identity_collate,
     _make_amp_ctx,
     evaluate,
@@ -40,7 +38,7 @@ EMBED_HEAD_CHOICES = [
 ]
 
 # Ray Tune은 trial마다 작업 디렉터리를 trial별 결과 폴더로 바꾸므로,
-# config.py의 patches_root/csv_path 같은 상대 경로는 그대로 두면 깨진다.
+# config.py의 patches_root_tcga/patches_root_cptac 같은 상대 경로는 그대로 두면 깨진다.
 # 이 모듈(tune_trainable.py)이 위치한 프로젝트 루트를 기준으로 절대 경로화한다.
 PROJECT_ROOT = Path(__file__).resolve().parent
 
@@ -56,12 +54,12 @@ def _build_cfg(base_cfg: Config, search_cfg: dict, tune_epochs: int) -> Config:
     cfg.train.weight_decay           = search_cfg["weight_decay"]
     cfg.train.warmup_epochs          = search_cfg["warmup_epochs"]
     cfg.train.epochs                 = tune_epochs
-    cfg.data.patches_root            = str(PROJECT_ROOT / cfg.data.patches_root)
-    cfg.data.csv_path                = str(PROJECT_ROOT / cfg.data.csv_path)
+    cfg.data.patches_root_tcga       = str(PROJECT_ROOT / cfg.data.patches_root_tcga)
+    cfg.data.patches_root_cptac      = str(PROJECT_ROOT / cfg.data.patches_root_cptac)
     return cfg
 
 
-def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
+def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int, dataset: str = "cptac"):
     cfg = _build_cfg(base_cfg, search_cfg, tune_epochs)
     set_seed(cfg.train.seed)
     device = torch.device(cfg.train.device)
@@ -69,8 +67,8 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
 
     amp_ctx = _make_amp_ctx()
 
-    train_ds = CAMELYON17NodeDataset(cfg.data, split="train")
-    val_ds   = CAMELYON17NodeDataset(cfg.data, split="val")
+    train_ds = WSISurvivalDataset(cfg.data, dataset=dataset, split="train")
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=dataset, split="val")
 
     dl_kwargs = dict(
         batch_size=1,
@@ -83,12 +81,9 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
-    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed, out_dim=1).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
-
-    class_weights = _compute_class_weights(train_ds, device)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -97,16 +92,15 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int):
     scheduler = _build_scheduler(optimizer, cfg)
 
     for epoch in range(cfg.train.epochs):
-        loss    = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, criterion, train_ds.transform)
+        loss    = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform)
         metrics = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         scheduler.step()
 
-        auc = metrics.get("auc_roc", 0.0)
-        if math.isnan(auc):
-            auc = 0.0
+        c_index = metrics.get("c_index", float("nan"))
+        if math.isnan(c_index):
+            c_index = 0.0
 
         tune.report({
-            "val_auc_roc": auc,
-            "val_f1":      metrics["f1"],
+            "val_c_index": c_index,
             "train_loss":  loss,
         })

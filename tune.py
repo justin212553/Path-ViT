@@ -2,7 +2,7 @@
 Ray Tune 기반 하이퍼파라미터 탐색 드라이버 스크립트
 탐색 대상: lr, weight_decay, warmup_epochs, dropout, (embed_dim, num_heads) 조합, num_transformer_layers
 스케줄러:  ASHA — 성능이 낮은 trial을 조기 종료해 탐색 효율을 높임
-지표:      val_auc_roc (maximize)
+지표:      val_c_index (maximize) — WSI 생존(OS) 예측 concordance index (data/dataset.py::WSISurvivalDataset)
 
 trainable 본체는 tune_trainable.py에 있다 (이 스크립트는 __main__으로 실행되므로
 여기에 train_fn을 직접 정의하면 cloudpickle이 by-value 직렬화를 시도하다
@@ -30,10 +30,11 @@ SEARCH_SPACE = {
     "num_transformer_layers": tune.choice([2, 4, 6, 8]),
 }
 
-NUM_SAMPLES    = 20   # 탐색할 trial(하이퍼파라미터 조합) 수
-TUNE_EPOCHS    = 8    # trial당 학습 epoch 수 (본 학습보다 짧게)
+NUM_SAMPLES    = 20       # 탐색할 trial(하이퍼파라미터 조합) 수
+TUNE_EPOCHS    = 8        # trial당 학습 epoch 수 (본 학습보다 짧게)
 GPUS_PER_TRIAL = 1.0
 CPUS_PER_TRIAL = 4.0
+DATASET        = "cptac"  # "tcga" | "cptac" — data/dataset.py::WSISurvivalDataset 참조
 
 # dfs6b 같은 네트워크/분산 파일시스템에 Ray Tune의 experiment state를 자주 동기화하면
 # 쓰기 지연으로 "Saving the experiment state ... has already taken Ns" 경고가 뜬다.
@@ -47,7 +48,7 @@ def main():
     base_cfg = Config()
 
     asha = ASHAScheduler(
-        metric="val_auc_roc",
+        metric="val_c_index",
         mode="max",
         max_t=TUNE_EPOCHS,
         grace_period=2,
@@ -55,7 +56,7 @@ def main():
     )
 
     trainable = tune.with_resources(
-        tune.with_parameters(train_fn, base_cfg=base_cfg, tune_epochs=TUNE_EPOCHS),
+        tune.with_parameters(train_fn, base_cfg=base_cfg, tune_epochs=TUNE_EPOCHS, dataset=DATASET),
         resources={"cpu": CPUS_PER_TRIAL, "gpu": GPUS_PER_TRIAL},
     )
 
@@ -74,11 +75,11 @@ def main():
 
     results = tuner.fit()
 
-    best = results.get_best_result(metric="val_auc_roc", mode="max")
+    best = results.get_best_result(metric="val_c_index", mode="max")
     embed_dim, num_heads = best.config["embed_head"]
     print(f"\n결과 저장 위치(노드 로컬, job 종료 시 삭제될 수 있음): {STORAGE_PATH}/path_vit_raytune")
     print("=== Best trial ===")
-    print(f"  val_auc_roc             : {best.metrics['val_auc_roc']:.4f}")
+    print(f"  val_c_index             : {best.metrics['val_c_index']:.4f}")
     print(f"  lr                      : {best.config['lr']:.3e}")
     print(f"  weight_decay            : {best.config['weight_decay']:.3e}")
     print(f"  warmup_epochs           : {best.config['warmup_epochs']}")

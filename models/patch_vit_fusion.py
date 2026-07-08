@@ -21,7 +21,7 @@ Path B의 k-means 군집 중심(centroids)은 학습 전 사전 계산되며 학
   LateFusionViT 생성 시 해당 텐서를 cluster_centroids 인자로 전달한다.
 
 Forward 출력:
-    wsi_logits   : (1, 2)       — WSI 단위 이진 분류 logit (정상 / 전이)
+    wsi_logits   : (1, out_dim) — WSI 단위 logit (out_dim=2: 이진 분류, out_dim=1: risk score)
     attn_weights : (N_patches,) — ABMIL 패치 attention 가중치 (시각화·해석용)
     histogram    : (K,)         — 군집별 패치 비율 (해석용)
 """
@@ -117,12 +117,14 @@ class LateFusionViT(nn.Module):
         cfg: ModelConfig,
         cluster_centroids: torch.Tensor,
         precomputed: bool = True,
+        out_dim: int = 2,
     ):
         """
         Args:
             cfg               : ModelConfig
             cluster_centroids : (K, 2048) 사전 계산된 k-means 군집 중심. 학습 중 고정.
             precomputed       : True면 CNN backbone 없이 features.pt 사용
+            out_dim           : classifier 출력 차원. 이진 분류는 2(logit), 생존 분석(risk score)은 1.
         """
         super().__init__()
         K = cluster_centroids.shape[0]
@@ -144,10 +146,10 @@ class LateFusionViT(nn.Module):
         # Path B: 클러스터 히스토그램 (조직 구성 비율)
         self.hist_branch = ClusterHistogramBranch(K, cfg.embed_dim)
 
-        # Late Fusion 분류기: [z_vit ‖ z_hist] (2D,) → logits (2,)
+        # Late Fusion 분류기: [z_vit ‖ z_hist] (2D,) → logits (out_dim,)
         self.classifier = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim * 2),
-            nn.Linear(cfg.embed_dim * 2, 2),
+            nn.Linear(cfg.embed_dim * 2, out_dim),
         )
 
     def _extract_raw_features(
@@ -172,7 +174,7 @@ class LateFusionViT(nn.Module):
             chunks.append(pooled)
         return torch.cat(chunks)               # (N, 2048)
 
-    def forward(
+    def forward_embed(
         self,
         coords: torch.Tensor,
         patch_paths: Optional[list[Path]] = None,
@@ -181,6 +183,10 @@ class LateFusionViT(nn.Module):
         chunk_size: Optional[int] = None,
     ) -> dict:
         """
+        classifier를 적용하기 전, WSI 1장을 Late Fusion 임베딩 1개로 집계한다.
+        환자 1명이 슬라이드를 여러 장 보유하는 경우(WSISurvivalDataset) 슬라이드별로
+        이 메서드를 호출한 뒤 임베딩을 환자 단위로 풀링하고 나서 classifier를 적용해야 한다.
+
         Args:
             coords      : (N, 2)
             features    : (N, 2048) 사전 추출 feature — precomputed=True 모드
@@ -188,9 +194,9 @@ class LateFusionViT(nn.Module):
             transform   : 이미지 전처리 변환         — patch_paths 모드에서만 사용
             chunk_size  : CNN chunk 크기             — patch_paths 모드에서만 사용
         Returns:
-            wsi_logits   : (1, 2)  — 이진 분류 logit
-            attn_weights : (N,)    — ABMIL 패치 attention 가중치 (시각화용)
-            histogram    : (K,)    — 군집별 패치 비율 (해석용)
+            embed        : (2D,)  — [z_vit ‖ z_hist] Late Fusion 임베딩
+            attn_weights : (N,)   — ABMIL 패치 attention 가중치 (시각화용)
+            histogram    : (K,)   — 군집별 패치 비율 (해석용)
         """
         device = coords.device
 
@@ -212,12 +218,29 @@ class LateFusionViT(nn.Module):
         # Path B: 조직 구성 비율 → 히스토그램 임베딩
         z_hist, histogram = self.hist_branch(raw_features, self.centroids)  # (1, D), (K,)
 
-        # Late Fusion: z_vit와 z_hist를 concat 후 분류
-        z_fused = torch.cat([z_vit.unsqueeze(0), z_hist], dim=-1)  # (1, 2D)
-        wsi_logits = self.classifier(z_fused)                       # (1, 2)
+        # Late Fusion: z_vit와 z_hist를 concat
+        z_fused = torch.cat([z_vit.unsqueeze(0), z_hist], dim=-1).squeeze(0)  # (2D,)
 
+        return {"embed": z_fused, "attn_weights": attn_weights, "histogram": histogram}
+
+    def forward(
+        self,
+        coords: torch.Tensor,
+        patch_paths: Optional[list[Path]] = None,
+        features: Optional[torch.Tensor] = None,
+        transform=None,
+        chunk_size: Optional[int] = None,
+    ) -> dict:
+        """
+        Returns:
+            wsi_logits   : (1, out_dim)
+            attn_weights : (N,)    — ABMIL 패치 attention 가중치 (시각화용)
+            histogram    : (K,)    — 군집별 패치 비율 (해석용)
+        """
+        out = self.forward_embed(coords, patch_paths, features, transform, chunk_size)
+        wsi_logits = self.classifier(out["embed"].unsqueeze(0))   # (1, out_dim)
         return {
             "wsi_logits":   wsi_logits,
-            "attn_weights": attn_weights,
-            "histogram":    histogram,
+            "attn_weights": out["attn_weights"],
+            "histogram":    out["histogram"],
         }

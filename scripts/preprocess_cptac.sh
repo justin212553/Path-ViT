@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=preprocess_tcga
+#SBATCH --job-name=preprocess_cptac
 #SBATCH --partition=free-gpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
