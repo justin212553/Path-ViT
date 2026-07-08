@@ -37,7 +37,7 @@ def evaluate_survival(
     ds     = WSISurvivalDataset(cfg.data, dataset=dataset, split=split)
     loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=_identity_collate)
 
-    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed, out_dim=1).to(device)
+    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
     ckpt  = torch.load(checkpoint, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
@@ -55,16 +55,16 @@ def evaluate_survival(
                 coords = slide["coords"].to(device, non_blocking=True)  # (N, 2) — 이미 0-기반 정규화됨
 
                 if "features" in slide:
-                    out = model.forward_embed(coords, features=slide["features"])
+                    out = model(coords, features=slide["features"])
                 else:
-                    out = model.forward_embed(coords, patch_paths=slide["patch_paths"],
-                                              transform=ds.transform, chunk_size=chunk_size)
+                    out = model(coords, patch_paths=slide["patch_paths"],
+                                 transform=ds.transform, chunk_size=chunk_size)
                 slide_embeds.append(out["embed"])
                 if save_vis:
                     slide_vis.append((slide["slide_id"], out["attn_weights"], slide["coords"]))
 
             patient_embed = torch.stack(slide_embeds).mean(dim=0)
-            risk = model.classifier(patient_embed.unsqueeze(0)).view(1).float().item()
+            risk = model.risk_head(patient_embed.unsqueeze(0)).view(1).float().item()
 
             case_id  = patient_slides[0]["case_id"]
             os_time  = float(patient_slides[0]["OS_time"].item())
