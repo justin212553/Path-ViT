@@ -55,12 +55,20 @@ def _extract_node(encoder: CNNEncoder, patch_paths: list[Path]) -> torch.Tensor:
     return torch.cat(chunks)
 
 
-def main():
-    cfg = DataConfig()
-    patches_root = Path(cfg.patches_root)
-    start_time = datetime.now()
+def extract_features_for_root(patches_root: Path, encoder: CNNEncoder | None = None, notify: bool = True) -> int:
+    """patches_root 바로 아래의 각 디렉터리(슬라이드/노드 1개당 1폴더)에 features.pt를 생성한다.
+    이미 features.pt가 있는 디렉터리는 skip한다.
 
-    encoder   = _build_encoder()
+    다른 전처리 파이프라인(예: data/preprocess_cptac.py)이 타일링 직후 같은 프로세스 안에서
+    바로 이어 호출할 수 있도록 만든 진입점 — encoder를 넘기면 재사용하고, 안 넘기면 새로 로드한다.
+
+    Returns: 새로 추출한 디렉터리 수
+    """
+    start_time = datetime.now()
+    owns_encoder = encoder is None
+    if owns_encoder:
+        encoder = _build_encoder()
+
     node_dirs = sorted(d for d in patches_root.iterdir() if d.is_dir())
 
     try:
@@ -87,12 +95,19 @@ def main():
     h, rem  = divmod(int(elapsed.total_seconds()), 3600)
     m, s    = divmod(rem, 60)
     print(f"완료: {done}개 노드 → {patches_root}/<slide_id>/{FEATURES_FILENAME}")
-    send_slack(
-        f":white_check_mark: *Feature 추출 완료*\n"
-        f"> 저장 위치: `{patches_root}/<slide_id>/{FEATURES_FILENAME}`\n"
-        f"> 처리 노드: *{done}개*\n"
-        f"> 소요 시간: {h}h {m}m {s}s"
-    )
+    if notify:
+        send_slack(
+            f":white_check_mark: *Feature 추출 완료*\n"
+            f"> 저장 위치: `{patches_root}/<slide_id>/{FEATURES_FILENAME}`\n"
+            f"> 처리 노드: *{done}개*\n"
+            f"> 소요 시간: {h}h {m}m {s}s"
+        )
+    return done
+
+
+def main():
+    cfg = DataConfig()
+    extract_features_for_root(Path(cfg.patches_root))
 
 
 if __name__ == "__main__":
