@@ -1,7 +1,7 @@
 import os
 
 # ── [보스의 환경에 맞게 경로 설정] ─────────────────────────────────────────
-MANIFEST_PATH = "./scripts/gdc_manifest_PAAD_WSI.txt"  # GDC 매니페스트 파일 경로
+MANIFEST_PATH = "./scripts/gdc_manifest.txt"  # GDC 매니페스트 파일 경로
 DOWNLOAD_DIR  = "./data/tcga_paad_wsi" # WSI가 저장 중인 경로
 # ─────────────────────────────────────────────────────────────────────────────
 
