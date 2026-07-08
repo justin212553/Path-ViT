@@ -42,7 +42,7 @@ from config import DataConfig
 from data.patch_dataset import FEATURES_FILENAME
 from utils import load_env, send_slack
 
-CENTROIDS_FILENAME = "cluster_centroids.pt"
+CENTROIDS_DIR = "./data/cluster_centroids.pt"
 
 
 def _load_all_features(patches_root: Path, max_patches_per_node: int) -> np.ndarray:
@@ -143,7 +143,7 @@ def main():
 
     cfg = DataConfig()
     patches_root = Path(cfg.patches_root)
-    out_path = _ROOT / CENTROIDS_FILENAME
+    out_path = _ROOT / CENTROIDS_DIR
 
     np.random.seed(args.seed)
 
