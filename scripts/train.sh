@@ -1,19 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=PVT-T
-#SBATCH --partition=free-gpu
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --gres=gpu:A30:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=128G                  
-#SBATCH --time=24:00:00            
-#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/train_progress.log
+# TCGA-PAAD 와 CPTAC-PDA 기반 학습을 각각 별도 SLURM job으로 제출해
+# train.py를 코호트별로 병렬 실행한다.
+#
+# 사용법:
+#   bash scripts/train.sh              # tcga job + cptac job 둘 다 제출
+#   bash scripts/train.sh --fusion     # 나머지 인자는 두 job에 그대로 전달됨
 
-cd /pub/wonseukl/Path-ViT/
+set -euo pipefail
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate Path-ViT
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$(dirname "$SCRIPT_DIR")/.logs"
+mkdir -p "$LOG_DIR"
 
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+TCGA_JOB_ID=$(sbatch "${SCRIPT_DIR}/train_tcga.sh" "$@" | awk '{print $NF}')
+echo "Submitted TCGA-PAAD 학습  -> job ${TCGA_JOB_ID}"
 
-python -u ./train.py "$@"
+CPTAC_JOB_ID=$(sbatch "${SCRIPT_DIR}/train_cptac.sh" "$@" | awk '{print $NF}')
+echo "Submitted CPTAC-PDA 학습  -> job ${CPTAC_JOB_ID}"
+
+echo "----------------------------------------------"
+echo "Monitor: squeue -j ${TCGA_JOB_ID},${CPTAC_JOB_ID}"
