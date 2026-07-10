@@ -5,7 +5,13 @@ TCGA-PAAD / CPTAC-PDA WSI 생존(OS) 예측 학습 스크립트
         Cox loss는 위험집합(risk set) 비교를 위해 여러 환자를 한 minibatch(cox_batch_size)로
         묶어야 하므로, 그 minibatch가 찰 때마다 backward + optimizer.step()을 수행한다.
 손실:   Cox partial negative log-likelihood (utils/losses.py::cox_ph_loss)
-데이터: WSISurvivalDataset (data/dataset.py, --dataset {tcga,cptac}, train/val만 사용)
+데이터: WSISurvivalDataset (data/dataset.py, --dataset {tcga,cptac})
+
+검증:   stratified k-fold(cfg.data.n_folds). 코호트가 180명 안팎으로 작아 고정 단일
+        train/val split은 val c-index 추정 분산이 크다 — 전체 환자를 한 번씩 val로
+        순환시키는 fold마다 모델을 처음부터 새로 학습하고, 각 fold의 최고 체크포인트로
+        얻은 val 예측을 모두 pooling해 코호트 전체에 대한 c-index(OOF c-index)를 최종
+        지표로 삼는다. fold별 c-index의 평균±표준편차도 함께 참고용으로 보고한다.
 """
 import argparse
 import math
@@ -171,7 +177,136 @@ def _parse_args() -> argparse.Namespace:
         help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
              "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
     )
+    parser.add_argument(
+        "--n-folds", type=int, default=None,
+        help="stratified k-fold 수 (기본: config.py의 DataConfig.n_folds)",
+    )
     return parser.parse_args()
+
+
+def _run_fold(
+    fold: int, cfg: Config, args: argparse.Namespace, cluster_centroids,
+    device: torch.device, amp_ctx, ckpt_dir: Path, wandb_group: str,
+) -> tuple[float, dict]:
+    """
+    fold 1개에 대해 모델을 처음부터 학습한다 (모델/optimizer/scheduler를 새로 생성).
+
+    Returns:
+        best_score: 이 fold에서 얻은 최고 val c-index (comparable pair가 없으면 -1.0)
+        oof:        최고 체크포인트로 val set을 다시 평가한 결과 (risks/times/events 포함)
+                    — fold 간 pooling으로 전체 코호트 OOF c-index를 구하는 데 사용
+    """
+    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train",
+                                   fold=fold, n_folds=cfg.data.n_folds)
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",
+                                   fold=fold, n_folds=cfg.data.n_folds)
+
+    dl_kwargs = dict(
+        batch_size=1,
+        collate_fn=_identity_collate,
+        num_workers=cfg.data.num_workers,
+        pin_memory=True,
+        persistent_workers=(cfg.data.num_workers > 0),
+        prefetch_factor=2 if cfg.data.num_workers > 0 else None,
+    )
+    train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
+    train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
+    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
+
+    if args.fusion:
+        model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
+    else:
+        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+    if model.cnn.backbone is not None:
+        model.cnn.backbone.requires_grad_(False)
+
+    optimizer = torch.optim.AdamW(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+    )
+    scheduler = _build_scheduler(optimizer, cfg)
+
+    suffix = "_fusion" if args.fusion else ""
+    ckpt_path = ckpt_dir / f"survival_{args.dataset}_fold{fold}_best{suffix}.pt"
+
+    print(f"  Train: {len(train_ds)} patients  Val: {len(val_ds)} patients  "
+          f"Params: {sum(p.numel() for p in model.parameters()):,}")
+
+    if WANDB_AVAILABLE:
+        wandb.init(
+            project="Path-ViT",
+            group=wandb_group,
+            name=f"{wandb_group}_fold{fold}",
+            reinit=True,
+            config={
+                "fold": fold, "n_folds": cfg.data.n_folds,
+                "epochs":                cfg.train.epochs,
+                "lr":                    cfg.train.lr,
+                "weight_decay":          cfg.train.weight_decay,
+                "seed":                  cfg.train.seed,
+                "warmup_epochs":         cfg.train.warmup_epochs,
+                "cnn_chunk_size":        cfg.train.cnn_chunk_size,
+                "cox_batch_size":        cfg.train.cox_batch_size,
+                "embed_dim":             cfg.model.embed_dim,
+                "num_heads":             cfg.model.num_heads,
+                "num_transformer_layers":cfg.model.num_transformer_layers,
+                "dropout":               cfg.model.dropout,
+                "num_landmarks":         cfg.model.num_landmarks,
+                "model":                 "LateFusionViT" if args.fusion else "PatchViT",
+                "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
+                "dataset":               args.dataset,
+            },
+        )
+
+    best_score = -1.0
+    for epoch in range(cfg.train.epochs):
+        lr_now        = optimizer.param_groups[0]["lr"]
+        loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform)
+        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
+        metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
+        scheduler.step()
+
+        c_index = metrics.get("c_index", float("nan"))
+        score   = c_index if not math.isnan(c_index) else -1.0
+        print(
+            f"  [fold {fold}] Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
+            f"train_c_index={train_metrics['c_index']:.4f} | "
+            f"val_c_index={metrics['c_index']:.4f}"
+        )
+
+        if WANDB_AVAILABLE:
+            wandb.log({
+                "train/loss":              loss,
+                "train/lr":                lr_now,
+                "train/c_index":           train_metrics["c_index"],
+                "val_performance/c_index": metrics["c_index"],
+            }, step=epoch + 1)
+
+        if score > best_score:
+            best_score = score
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "epoch":            epoch + 1,
+                    "val_c_index":      best_score,
+                    "fold":             fold,
+                },
+                ckpt_path,
+            )
+
+    # 이 fold의 최고 체크포인트로 val 예측을 다시 계산 — fold 간 pooling(OOF c-index)에 사용
+    if best_score > -1.0:
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+    oof = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
+
+    print(f"  → fold {fold} best val c-index: {best_score:.4f} (checkpoint: {ckpt_path.name})")
+
+    if WANDB_AVAILABLE:
+        wandb.run.summary["best_val_c_index"] = best_score
+        wandb.finish()
+
+    return best_score, oof
 
 
 def main():
@@ -179,6 +314,8 @@ def main():
     args   = _parse_args()
     cfg    = Config()
     cfg.data.precomputed = not args.image
+    if args.n_folds is not None:
+        cfg.data.n_folds = args.n_folds
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
@@ -198,133 +335,51 @@ def main():
 
     amp_ctx = _make_amp_ctx()
 
-    if WANDB_AVAILABLE:
-        prefix = "F_" if args.fusion else "N_"
-        run_name = prefix + datetime.now().strftime("%m%d::%H%M")
-        wandb.init(
-            project="Path-ViT",
-            name=run_name,
-            config={
-                "epochs":                cfg.train.epochs,
-                "lr":                    cfg.train.lr,
-                "weight_decay":          cfg.train.weight_decay,
-                "seed":                  cfg.train.seed,
-                "warmup_epochs":         cfg.train.warmup_epochs,
-                "cnn_chunk_size":        cfg.train.cnn_chunk_size,
-                "cox_batch_size":        cfg.train.cox_batch_size,
-                "embed_dim":             cfg.model.embed_dim,
-                "num_heads":             cfg.model.num_heads,
-                "num_transformer_layers":cfg.model.num_transformer_layers,
-                "dropout":               cfg.model.dropout,
-                "num_landmarks":         cfg.model.num_landmarks,
-                # [LateFusion] 모델 종류 및 군집 수 기록 — ablation 비교용
-                "model":                 "LateFusionViT" if args.fusion else "PatchViT",
-                "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
-                "dataset":               args.dataset,
-            },
-        )
-
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train")
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val")
-
-    dl_kwargs = dict(
-        batch_size=1,
-        collate_fn=_identity_collate,
-        num_workers=cfg.data.num_workers,
-        pin_memory=True,
-        persistent_workers=(cfg.data.num_workers > 0),
-        prefetch_factor=2 if cfg.data.num_workers > 0 else None,
-    )
-    train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
-    train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
-    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
-
-    # [LateFusion] --fusion 플래그에 따라 모델 선택
-    # PatchViT    : 기존 ViT+ABMIL 단일 경로 (ablation baseline)
-    # LateFusionViT: ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion
-    if args.fusion:
-        model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
-    else:
-        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
-    if model.cnn.backbone is not None:
-        model.cnn.backbone.requires_grad_(False)
-
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
-    )
-    scheduler = _build_scheduler(optimizer, cfg)
-
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
     print(f"Mode: {mode}")
-    # [LateFusion] 모델 종류 및 군집 수 출력
     if args.fusion:
         K = int(cluster_centroids.shape[0])
         print(f"Model: LateFusionViT (ViT+ABMIL + ClusterHistogram, K={K})")
     else:
-        print(f"Model: PatchViT (ViT+ABMIL baseline)")
-    print(f"Dataset: {args.dataset}  Train: {len(train_ds)} patients  Val: {len(val_ds)} patients")
-    print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
+        print("Model: PatchViT (ViT+ABMIL baseline)")
+    print(f"Dataset: {args.dataset}  |  {cfg.data.n_folds}-fold stratified CV")
     print(
         f"AMP=bfloat16 | batch={cfg.train.cox_batch_size} patients (Cox risk set 단위) "
         f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
     )
-    ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
+
+    ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    # [LateFusion] 모델 종류별로 별도 checkpoint 저장 — ablation 결과 보존
-    ckpt_path = ckpt_dir / (
-        f"survival_{args.dataset}_best_fusion.pt" if args.fusion else f"survival_{args.dataset}_best.pt"
+    prefix = "F_" if args.fusion else "N_"
+    wandb_group = prefix + datetime.now().strftime("%m%d::%H%M")
+
+    fold_scores = []
+    oof_risks, oof_times, oof_events = [], [], []
+    for fold in range(cfg.data.n_folds):
+        print(f"\n=== Fold {fold+1}/{cfg.data.n_folds} ===")
+        score, oof = _run_fold(fold, cfg, args, cluster_centroids, device, amp_ctx, ckpt_dir, wandb_group)
+        fold_scores.append(score)
+        oof_risks.append(oof["risks"])
+        oof_times.append(oof["times"])
+        oof_events.append(oof["events"])
+
+    fold_scores = np.array(fold_scores)
+    pooled = compute_survival_metrics(
+        np.concatenate(oof_risks), np.concatenate(oof_times), np.concatenate(oof_events),
     )
+    pooled_c_index = pooled["c_index"]
 
-    best_score = -1.0
-    for epoch in range(cfg.train.epochs):
-        lr_now        = optimizer.param_groups[0]["lr"]
-        loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform)
-        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
-        metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
-        scheduler.step()
-
-        c_index = metrics.get("c_index", float("nan"))
-        score   = c_index if not math.isnan(c_index) else -1.0
-        print(
-            f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
-            f"train_c_index={train_metrics['c_index']:.4f} | "
-            f"val_c_index={metrics['c_index']:.4f}"
-        )
-
-        if WANDB_AVAILABLE:
-            log_dict = {
-                "train/loss":            loss,
-                "train/lr":              lr_now,
-                "train/c_index":         train_metrics["c_index"],
-                "val_performance/c_index": metrics["c_index"],
-            }
-            wandb.log(log_dict, step=epoch + 1)
-
-        if score > best_score:
-            best_score = score
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "epoch":            epoch + 1,
-                    "val_c_index":      best_score,
-                },
-                ckpt_path,
-            )
-            print(f"  → checkpoint saved (c_index={best_score:.4f})")
-            if WANDB_AVAILABLE:
-                wandb.run.summary["best_val_c_index"] = best_score
-                wandb.run.summary["best_epoch"]       = epoch + 1
-
-    if WANDB_AVAILABLE:
-        wandb.finish()
+    print("\n=== Cross-Validation Summary ===")
+    print(f"Per-fold val c-index : {[f'{s:.4f}' for s in fold_scores]}")
+    print(f"Mean ± std           : {fold_scores.mean():.4f} ± {fold_scores.std():.4f}")
+    print(f"Pooled OOF c-index   : {pooled_c_index:.4f}  (전체 {len(np.concatenate(oof_risks))}명 pooling)")
 
     elapsed = datetime.now() - start_time
     h, rem  = divmod(int(elapsed.total_seconds()), 3600)
     m, s    = divmod(rem, 60)
     send_slack(
-        f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS) 학습 완료*\n"
-        f"> Epochs: {cfg.train.epochs} | Best val C-index: *{best_score:.4f}*\n"
+        f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS) {cfg.data.n_folds}-fold CV 완료*\n"
+        f"> Pooled OOF C-index: *{pooled_c_index:.4f}* | fold 평균: {fold_scores.mean():.4f} ± {fold_scores.std():.4f}\n"
         f"> 소요 시간: {h}h {m}m {s}s"
     )
 

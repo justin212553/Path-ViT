@@ -22,8 +22,8 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
 # cluster_centroids.pt 존재 확인
-if [ ! -f cluster_centroids.pt ]; then
-    echo "오류: cluster_centroids.pt 없음 — fit_clusters.sh를 먼저 실행하세요."
+if [ ! -f data/cluster_centroids.pt ]; then
+    echo "오류: data/cluster_centroids.pt 없음 — fit_clusters.sh를 먼저 실행하세요."
     exit 1
 fi
 
