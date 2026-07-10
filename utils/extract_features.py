@@ -11,8 +11,10 @@ train.py는 model.cnn.backbone.requires_grad_(False)로 CNN backbone을 항상 �
     행 순서 = data.patch_utils.list_patch_paths()와 동일한 정렬 순서
 
 사용법:
-    python -m data.extract_features   (또는 python data/extract_features.py 직접 실행도 가능)
+    python -m utils.extract_features                  # 기본: cptac, <patches_root_cptac>/tiles/
+    python -m utils.extract_features --dataset tcga    # tcga 코호트
 """
+import argparse
 import os
 import sys
 from datetime import datetime
@@ -26,6 +28,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import DataConfig
+from data.dataset import PATCHES_ROOT_ATTRS
 from data.patch_utils import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths
 from models.cnn_encoder import CNNEncoder
 from utils import load_env, send_slack
@@ -106,8 +109,15 @@ def extract_features_for_root(patches_root: Path, encoder: CNNEncoder | None = N
 
 
 def main():
+    parser = argparse.ArgumentParser(description="패치 jpg/png → CNN feature 사전 추출")
+    parser.add_argument("--dataset", type=str, default="cptac", choices=["tcga", "cptac"],
+                        help="처리할 코호트 (기본: cptac). config.DataConfig()의 "
+                             "patches_root_{tcga,cptac}/tiles/ 를 대상으로 한다.")
+    args = parser.parse_args()
+
     cfg = DataConfig()
-    extract_features_for_root(Path(cfg.patches_root))
+    patches_root = Path(getattr(cfg, PATCHES_ROOT_ATTRS[args.dataset]))
+    extract_features_for_root(patches_root / "tiles")
 
 
 if __name__ == "__main__":

@@ -25,6 +25,8 @@ def evaluate_survival(
     cfg: Config | None = None,
     dataset: str = "cptac",
     split: str = "val",
+    fold: int = 0,
+    n_folds: int | None = None,
     save_vis: bool = False,
     vis_dir: str = "heatmaps",
     image_mode: bool = False,
@@ -32,9 +34,13 @@ def evaluate_survival(
     if cfg is None:
         cfg = Config()
     cfg.data.precomputed = not image_mode
+    if n_folds is not None:
+        cfg.data.n_folds = n_folds
     device = torch.device(cfg.train.device)
 
-    ds     = WSISurvivalDataset(cfg.data, dataset=dataset, split=split)
+    # checkpoint는 train.py가 fold별로 따로 저장하므로(survival_{dataset}_fold{k}_best.pt),
+    # 여기 넘기는 --fold는 그 checkpoint를 학습할 때 val로 썼던 fold와 일치해야 한다.
+    ds     = WSISurvivalDataset(cfg.data, dataset=dataset, split=split, fold=fold, n_folds=cfg.data.n_folds)
     loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=_identity_collate)
 
     model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
@@ -108,6 +114,10 @@ if __name__ == "__main__":
     parser.add_argument("--split", type=str, default="val",
                         choices=["train", "val"],
                         help="평가에 사용할 split (기본: val)")
+    parser.add_argument("--fold", type=int, default=0,
+                        help="검증 fold 번호 — checkpoint를 학습할 때의 fold와 일치해야 함 (기본: 0)")
+    parser.add_argument("--n-folds", type=int, default=None,
+                        help="stratified k-fold 총 개수 (기본: config.py의 DataConfig.n_folds)")
     parser.add_argument("--vis", action="store_true",
                         help="attention 히트맵 시각화 저장 (슬라이드 단위)")
     parser.add_argument("--vis-dir", type=str, default="heatmaps",
@@ -118,4 +128,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     evaluate_survival(args.checkpoint, dataset=args.dataset, split=args.split,
+                       fold=args.fold, n_folds=args.n_folds,
                        save_vis=args.vis, vis_dir=args.vis_dir, image_mode=args.image)

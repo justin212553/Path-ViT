@@ -13,4 +13,5 @@ cd /pub/wonseukl/Path-ViT/
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
-python -u data/extract_features.py
+python -u -m utils.extract_features --dataset cptac
+python -u -m utils.extract_features --dataset tcga

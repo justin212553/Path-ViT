@@ -25,7 +25,8 @@ class DataConfig:
     patches_root_cptac: str     = "data/patches_cptac"
     num_workers: int            = 4
     precomputed: bool           = True
-    seed: int                   = 42  # 환자 단위 train/val split 재현성 (data/dataset.py 참조)
+    seed: int                   = 42  # 환자 단위 fold 배정 재현성 (data/dataset.py 참조)
+    n_folds: int                = 5   # stratified k-fold 수 (data/dataset.py::WSISurvivalDataset 참조)
 
 
 @dataclass
