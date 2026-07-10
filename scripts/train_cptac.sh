@@ -16,4 +16,12 @@ conda activate Path-ViT
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# --fusion이면 SBATCH --output(train_cptac.log) 대신 별도 로그 파일로 재지정
+for arg in "$@"; do
+    if [ "$arg" = "--fusion" ]; then
+        exec > /pub/wonseukl/Path-ViT/.logs/train_cptac_fusion.log 2>&1
+        break
+    fi
+done
+
 python -u ./train.py --dataset cptac "$@"
