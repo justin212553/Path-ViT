@@ -21,13 +21,14 @@ from ray.tune.schedulers import ASHAScheduler
 from config import Config
 from tune_trainable import EMBED_HEAD_CHOICES, train_fn
 
+# config.py의 표준값(ModelConfig/TrainConfig 기본값)을 중심으로 위아래 적당한 폭을 둔다.
 SEARCH_SPACE = {
-    "lr":                     tune.loguniform(1e-6, 1e-5),
-    "weight_decay":           tune.loguniform(1e-5, 1e-4),
-    "warmup_epochs":          tune.choice([1, 2, 3, 4, 5]),
-    "dropout":                tune.uniform(0.0, 0.4),
-    "embed_head":             tune.choice(EMBED_HEAD_CHOICES),
-    "num_transformer_layers": tune.choice([2, 4, 6, 8]),
+    "lr":                     tune.loguniform(3e-5, 3e-4),   # config 기본 1e-4 기준 ±1 decade
+    "weight_decay":           tune.loguniform(1e-3, 1e-1),   # config 기본 1e-2 기준 ±1 decade
+    "warmup_epochs":          tune.choice([1, 2, 3, 4, 5]),  # config 기본 3 기준 위아래
+    "dropout":                tune.uniform(0.0, 0.3),        # config 기본 0.1 기준 위아래
+    "embed_head":             tune.choice(EMBED_HEAD_CHOICES),  # config 기본 (256,4) 포함
+    "num_transformer_layers": tune.choice([2, 4, 6, 8]),     # config 기본 2 기준 위아래
 }
 
 NUM_SAMPLES    = 20       # 탐색할 trial(하이퍼파라미터 조합) 수
