@@ -2,7 +2,15 @@
 Screening 성능 평가 지표
 """
 import numpy as np
+import pandas as pd
 from sklearn.metrics import roc_curve, auc
+
+try:
+    from lifelines import CoxPHFitter
+    from lifelines.statistics import logrank_test
+    LIFELINES_AVAILABLE = True
+except ImportError:
+    LIFELINES_AVAILABLE = False
 
 
 def compute_patch_metrics(
@@ -50,11 +58,16 @@ def compute_survival_metrics(
     events: np.ndarray,
 ) -> dict:
     """
-    생존 분석 성능 지표: Harrell's concordance index (c-index).
+    생존 분석 성능 지표: c-index, hazard ratio(HR), log-rank p-value.
 
-    모든 comparable 환자 쌍(더 이른 시점에 사망(event=1)한 환자 vs 그 시점 이후까지
-    관찰된 다른 환자)에 대해, risk score의 대소 관계가 실제 생존 순서와 일치하는 비율.
-    동점(risk score가 같은 쌍)은 0.5로 부분 반영한다.
+    c_index: Harrell's concordance index. 모든 comparable 환자 쌍(더 이른 시점에
+        사망(event=1)한 환자 vs 그 시점 이후까지 관찰된 다른 환자)에 대해, risk score의
+        대소 관계가 실제 생존 순서와 일치하는 비율. 동점(risk score가 같은 쌍)은 0.5로
+        부분 반영한다.
+    hr / log_rank_p: risk score의 중앙값으로 저위험/고위험 두 그룹으로 이분화한 뒤
+        - hr: 그룹(고위험=1)을 단일 공변량으로 한 Cox 모델의 hazard ratio
+        - log_rank_p: 두 그룹 KM 곡선 차이에 대한 log-rank test p-value
+      (병리 생존예측 보고서에서 흔히 쓰는 저위험/고위험 이분화 방식과 동일)
 
     Args:
         risk_scores: (N,) 예측 risk score (클수록 위험/사망 가능성 높음)
@@ -62,7 +75,8 @@ def compute_survival_metrics(
         events:      (N,) OS_event (1=사망, 0=censored)
 
     Returns:
-        dict: c_index (comparable pair가 하나도 없으면 nan)
+        dict: c_index, hr, log_rank_p — 계산 불가한 경우(comparable pair 없음, 표본 부족,
+              lifelines 미설치 등) 해당 값은 nan
     """
     risk  = np.asarray(risk_scores, dtype=np.float64)
     time  = np.asarray(times, dtype=np.float64)
@@ -77,4 +91,29 @@ def compute_survival_metrics(
         float((concordant.sum() + 0.5 * tied_risk.sum()) / n_permissible)
         if n_permissible > 0 else float("nan")
     )
-    return {"c_index": c_index}
+
+    hr, log_rank_p = float("nan"), float("nan")
+    if LIFELINES_AVAILABLE and len(risk) >= 4 and event.sum() >= 2:
+        high_risk = risk > np.median(risk)
+        if high_risk.any() and (~high_risk).any():
+            try:
+                cph = CoxPHFitter()
+                cph.fit(
+                    pd.DataFrame({
+                        "time":      time,
+                        "event":     event.astype(int),
+                        "high_risk": high_risk.astype(int),
+                    }),
+                    duration_col="time", event_col="event",
+                )
+                hr = float(np.exp(cph.params_["high_risk"]))
+
+                lr = logrank_test(
+                    time[high_risk], time[~high_risk],
+                    event_observed_A=event[high_risk], event_observed_B=event[~high_risk],
+                )
+                log_rank_p = float(lr.p_value)
+            except Exception:
+                pass  # 표본이 작으면 Cox fit이 수렴하지 않을 수 있음 — nan으로 둔다
+
+    return {"c_index": c_index, "hr": hr, "log_rank_p": log_rank_p}
