@@ -65,7 +65,23 @@ NUM_WORKERS         = 8
 NUM_IO_THREADS       = 4
 JPEG_QUALITY         = 90
 DONE_MARKER          = ".done"
+IO_RETRY_ATTEMPTS    = 5     # DFS 통신 에러(Errno 70 등) 재시도 횟수
+IO_RETRY_BACKOFF_SEC = 2.0   # 재시도 간 대기 시간(지수 백오프 base)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _retry_io(fn, *args, **kwargs):
+    """네트워크 파일시스템(DFS/NFS)의 일시적 통신 에러(OSError)를 지수 백오프로 재시도한다.
+    HPC 공유 스토리지가 순간적으로 응답하지 않는 경우(Errno 70 등)를 흡수하기 위함."""
+    last_exc = None
+    for attempt in range(IO_RETRY_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except OSError as exc:
+            last_exc = exc
+            if attempt < IO_RETRY_ATTEMPTS - 1:
+                time.sleep(IO_RETRY_BACKOFF_SEC * (2 ** attempt))
+    raise last_exc
 
 
 def _get_native_mpp(slide: openslide.OpenSlide) -> float:
@@ -276,35 +292,35 @@ def _process_slide(info):
     slide_dir = OUT_DIR / "tiles" / info["slide_id"]
     marker = slide_dir / DONE_MARKER
 
-    if marker.exists():
-        tile_records = []
-        for img_path in sorted(slide_dir.glob("*.jpg")):
-            parts = img_path.stem.split("_")
-            row, col = int(parts[0][1:]), int(parts[1][1:])
-            tile_records.append({
-                "slide_id":     info["slide_id"],
-                "case_id":      info["case_id"],
-                "filename":     str(img_path),
-                "row":          row,
-                "col":          col,
-                "tissue_ratio": np.nan,
-            })
-        slide_record = {
-            "slide_id":  info["slide_id"],
-            "case_id":   info["case_id"],
-            "svs_path":  str(info["svs_path"]),
-            "status":    "ok",
-            "n_tiles_kept": len(tile_records),
-        }
-        return slide_record, tile_records, True  # skipped=True
-
     try:
+        if _retry_io(marker.exists):
+            tile_records = []
+            for img_path in sorted(_retry_io(lambda: list(slide_dir.glob("*.jpg")))):
+                parts = img_path.stem.split("_")
+                row, col = int(parts[0][1:]), int(parts[1][1:])
+                tile_records.append({
+                    "slide_id":     info["slide_id"],
+                    "case_id":      info["case_id"],
+                    "filename":     str(img_path),
+                    "row":          row,
+                    "col":          col,
+                    "tissue_ratio": np.nan,
+                })
+            slide_record = {
+                "slide_id":  info["slide_id"],
+                "case_id":   info["case_id"],
+                "svs_path":  str(info["svs_path"]),
+                "status":    "ok",
+                "n_tiles_kept": len(tile_records),
+            }
+            return slide_record, tile_records, True  # skipped=True
+
         tiles, grid, ratios, meta = _extract_slide(info["svs_path"])
         recs = _save_tiles(slide_dir, tiles, grid, ratios, info["slide_id"], info["case_id"])
         if not recs:
             print(f"WARN no tissue tiles extracted: {info['slide_id']}")
-        slide_dir.mkdir(parents=True, exist_ok=True)
-        marker.touch()
+        _retry_io(slide_dir.mkdir, parents=True, exist_ok=True)
+        _retry_io(marker.touch)
 
         slide_record = {
             "slide_id":  info["slide_id"],
