@@ -21,6 +21,7 @@ from config import Config
 from data.dataset import WSISurvivalDataset
 from models import PatchViT
 from train import (
+    OTHER_DATASET,
     _build_scheduler,
     _identity_collate,
     _make_amp_ctx,
@@ -67,10 +68,9 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int, dataset: str 
 
     amp_ctx = _make_amp_ctx()
 
-    # HPO는 fold 0 하나로만 비교 랭킹을 매긴다 — trial마다 전체 k-fold를 다 돌리면
-    # 비용이 n_folds배로 뛰기 때문에, 상대적 우열만 빠르게 가리는 용도로는 과함.
-    train_ds = WSISurvivalDataset(cfg.data, dataset=dataset, split="train", fold=0, n_folds=cfg.data.n_folds)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=dataset, split="val",   fold=0, n_folds=cfg.data.n_folds)
+    # train.py와 동일하게 cross-dataset 검증: dataset으로 학습하고 반대 코호트로 검증한다.
+    train_ds = WSISurvivalDataset(cfg.data, dataset=dataset)
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=OTHER_DATASET[dataset])
 
     dl_kwargs = dict(
         batch_size=1,

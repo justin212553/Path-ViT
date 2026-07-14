@@ -7,10 +7,9 @@ TCGA-PAAD / CPTAC-PDA WSI 생존(OS) 예측 학습 스크립트
 손실:   Cox partial negative log-likelihood (utils/losses.py::cox_ph_loss)
 데이터: WSISurvivalDataset (data/dataset.py, --dataset {tcga,cptac})
 
-검증:   단일 seed 기반 deterministic split — cfg.data.n_folds개의 stratified fold 중
-        --fold(기본 0)번을 val로, 나머지를 train으로 고정해서 쓴다(data/dataset.py 참조).
-        k-fold 전체를 순회하는 CV는 하지 않는다 — 파이프라인/아키텍처가 아직 바뀔 여지가
-        많은 단계에서는 학습 1회당 비용이 커지는 k-fold보다 빠르게 반복 확인하는 쪽이 우선.
+검증:   cross-dataset — --dataset으로 지정한 코호트 전체로 학습하고, 나머지 한 코호트
+        전체(tcga↔cptac)를 val로 사용한다(같은 코호트 내부 split은 하지 않는다).
+        반대 방향(tcga↔cptac)은 --dataset을 바꿔 별도로 실행한다.
 지표:   c-index, hazard ratio(HR), log-rank p-value (utils/metrics.py::compute_survival_metrics).
         HR/log-rank p는 risk score 중앙값으로 저위험/고위험군을 나눠 계산한다.
 """
@@ -37,6 +36,9 @@ from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics
+
+# cross-dataset 검증: tcga로 학습하면 cptac으로, cptac으로 학습하면 tcga로 검증한다.
+OTHER_DATASET = {"tcga": "cptac", "cptac": "tcga"}
 
 
 def set_seed(seed: int):
@@ -178,14 +180,6 @@ def _parse_args() -> argparse.Namespace:
         help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
              "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
     )
-    parser.add_argument(
-        "--fold", type=int, default=0,
-        help="검증(val)으로 쓸 stratified fold 번호 (기본: 0) — seed가 같으면 항상 동일한 split",
-    )
-    parser.add_argument(
-        "--n-folds", type=int, default=None,
-        help="fold를 나눌 때의 총 fold 수 (기본: config.py의 DataConfig.n_folds)",
-    )
     return parser.parse_args()
 
 
@@ -194,8 +188,7 @@ def main():
     args   = _parse_args()
     cfg    = Config()
     cfg.data.precomputed = not args.image
-    if args.n_folds is not None:
-        cfg.data.n_folds = args.n_folds
+    val_dataset = OTHER_DATASET[args.dataset]
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
@@ -217,13 +210,11 @@ def main():
 
     if WANDB_AVAILABLE:
         model_prefix = "M1_C" if args.fusion else "M1"
-        run_name = f"{args.dataset.upper()}_{model_prefix}_" + datetime.now().strftime("%m%d::%H%M")
+        run_name = f"{args.dataset.upper()}2{val_dataset.upper()}_{model_prefix}_" + datetime.now().strftime("%m%d::%H%M")
         wandb.init(
             project="Path-ViT",
             name=run_name,
             config={
-                "fold":                  args.fold,
-                "n_folds":               cfg.data.n_folds,
                 "epochs":                cfg.train.epochs,
                 "lr":                    cfg.train.lr,
                 "weight_decay":          cfg.train.weight_decay,
@@ -240,13 +231,12 @@ def main():
                 "model":                 "LateFusionViT" if args.fusion else "PatchViT",
                 "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
                 "dataset":               args.dataset,
+                "val_dataset":           val_dataset,
             },
         )
 
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train",
-                                   fold=args.fold, n_folds=cfg.data.n_folds)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",
-                                   fold=args.fold, n_folds=cfg.data.n_folds)
+    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset)
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=val_dataset)
 
     dl_kwargs = dict(
         batch_size=1,
@@ -284,8 +274,8 @@ def main():
         print(f"Model: LateFusionViT (ViT+ABMIL + ClusterHistogram, K={K})")
     else:
         print(f"Model: PatchViT (ViT+ABMIL baseline)")
-    print(f"Dataset: {args.dataset}  Fold: {args.fold}/{cfg.data.n_folds}  "
-          f"Train: {len(train_ds)} patients  Val: {len(val_ds)} patients")
+    print(f"Train dataset: {args.dataset} ({len(train_ds)} patients)  "
+          f"Val dataset: {val_dataset} ({len(val_ds)} patients)")
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
         f"AMP=bfloat16 | batch={cfg.train.cox_batch_size} patients (Cox risk set 단위) "
@@ -294,8 +284,9 @@ def main():
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     # [LateFusion] 모델 종류별로 별도 checkpoint 저장 — ablation 결과 보존
+    tag = f"{args.dataset}"
     ckpt_path = ckpt_dir / (
-        f"survival_{args.dataset}_best_fusion.pt" if args.fusion else f"survival_{args.dataset}_best.pt"
+        f"survival_{tag}_best_fusion.pt" if args.fusion else f"survival_{tag}_best.pt"
     )
 
     best_score   = -1.0
@@ -357,7 +348,7 @@ def main():
     h, rem  = divmod(int(elapsed.total_seconds()), 3600)
     m, s    = divmod(rem, 60)
     send_slack(
-        f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS) 학습 완료*\n"
+        f":white_check_mark: *Path-ViT ({args.dataset.upper()}→{val_dataset.upper()} OS) 학습 완료*\n"
         f"> Epochs: {cfg.train.epochs} (best={best_metrics.get('epoch', '-')}) | "
         f"Best val C-index: *{best_score:.4f}* | HR: {best_metrics.get('hr', float('nan')):.3f} | "
         f"log-rank p: {best_metrics.get('log_rank_p', float('nan')):.4f}\n"

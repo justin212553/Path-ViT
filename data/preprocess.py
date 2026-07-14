@@ -36,6 +36,7 @@ case_id 파싱 로직만 dataset별로 분기한다 — 나머지 tiling/tissue-
 """
 import argparse
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,6 +46,10 @@ import numpy as np
 import pandas as pd
 import openslide
 from PIL import Image, ImageFilter
+
+_ROOT = Path(__file__).resolve().parent.parent  # Path-ViT 프로젝트 루트
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 from config import DataConfig
 from utils import send_slack
@@ -61,7 +66,7 @@ SAT_MEDIAN_FILTER   = 7      # thumbnail saturation 채널 노이즈 제거용 m
 MAX_TILES_PER_SLIDE = 512    # 학습 시 slide 당 최대 사용 tile 수 (sample_tile_paths 참고)
 THUMB_MAX_SIDE      = 2048   # 배경 grid cell을 미리 걸러내기 위한 thumbnail 최대 변 길이
 THUMB_TISSUE_MARGIN = 0.02   # thumbnail 기준 이 비율보다 tissue가 적은 cell은 실제 read_region 생략
-NUM_WORKERS         = 8
+NUM_WORKERS         = 10    # 로컬 머신 실측: 물리 코어 14개 중 4개는 OS/GPU 프로세스용으로 남김
 NUM_IO_THREADS       = 4
 JPEG_QUALITY         = 90
 DONE_MARKER          = ".done"

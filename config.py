@@ -23,10 +23,8 @@ class DataConfig:
     wsi_root_cptac: str         = "data/cptac_pda_wsi"
     patches_root_tcga: str      = "data/patches_tcga"
     patches_root_cptac: str     = "data/patches_cptac"
-    num_workers: int            = 4
+    num_workers: int            = 0
     precomputed: bool           = True
-    seed: int                   = 42  # 환자 단위 fold 배정 재현성 (data/dataset.py 참조)
-    n_folds: int                = 5   # stratified k-fold 수 (data/dataset.py::WSISurvivalDataset 참조)
 
 
 @dataclass
