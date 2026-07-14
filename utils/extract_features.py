@@ -34,7 +34,8 @@ from models.cnn_encoder import CNNEncoder
 from utils import load_env, send_slack
 
 DEVICE     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = 64
+BATCH_SIZE = 8   # RTX 4060 8GB VRAM 기준 실측 최적치 — 64는 VRAM 초과로 system RAM에
+                 # spill 되어 27배 느려짐(0.9 img/s), 8은 peak_mem 2GB로 24 img/s 유지
 
 
 def _build_encoder() -> CNNEncoder:

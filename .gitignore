@@ -1,12 +1,3 @@
-data/wsi_train
-data/wsi_eval
-data/patches
-data/patches_eval
-data/_torchmil_staging
-data/lesion_annotations
-
-utils/data
-
 .venv
 .vscode
 .claude
@@ -15,6 +6,12 @@ __pycache__
 *.logs
 *.zip
 .env
+wandb
 
 raw
 PKG*
+*wsi
+patches_*
+utils/data
+
+checkpoint
