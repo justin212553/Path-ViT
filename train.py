@@ -209,8 +209,8 @@ def main():
     amp_ctx = _make_amp_ctx()
 
     if WANDB_AVAILABLE:
-        model_prefix = "M1_C" if args.fusion else "M1"
-        run_name = f"{args.dataset.upper()}2{val_dataset.upper()}_{model_prefix}_" + datetime.now().strftime("%m%d::%H%M")
+        model_prefix = "M1C" if args.fusion else "M1"
+        run_name = f"{args.dataset.upper()}_{model_prefix}_" + datetime.now().strftime("%m%d::%H%M")
         wandb.init(
             project="Path-ViT",
             name=run_name,
