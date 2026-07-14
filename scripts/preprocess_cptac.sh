@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=10
-#SBATCH --mem=64G
+#SBATCH --mem=128G
 #SBATCH --time=3-00:00:00
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_cptac.log
 
