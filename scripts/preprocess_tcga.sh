@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=128G
-#SBATCH --time=2-00:00:00
+#SBATCH --time=1-12:00:00
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_tcga.log
 
 cd /pub/wonseukl/Path-ViT/
