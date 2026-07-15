@@ -44,13 +44,20 @@ class DomainClassifier(nn.Module):
 
 
 def _load_patch_features(cfg, dataset: str) -> np.ndarray:
-    """dataset("tcga"|"cptac") 코호트 전체의 patch-level raw CNN feature (N, 2048)를 모은다."""
-    ds = WSISurvivalDataset(cfg.data, dataset=dataset)
-    feats = [
-        slide["features"].numpy()
-        for case_idx in range(len(ds))
-        for slide in ds[case_idx]
-    ]
+    """
+    dataset("tcga"|"cptac") 코호트 전체의 patch-level raw CNN feature (N, 2048)를 모은다.
+
+    WSISurvivalDataset은 이제 6:2:2 stratified split을 적용하므로(data/dataset.py 참조),
+    train/val/test 세 split을 모두 합쳐 코호트 전체를 대상으로 도메인 분리 여부를 검사한다.
+    """
+    feats = []
+    for split in ("train", "val", "test"):
+        ds = WSISurvivalDataset(cfg.data, dataset=dataset, split=split)
+        feats.extend(
+            slide["features"].numpy()
+            for case_idx in range(len(ds))
+            for slide in ds[case_idx]
+        )
     return np.concatenate(feats, axis=0)
 
 

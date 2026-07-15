@@ -6,7 +6,7 @@ __pycache__
 *.logs
 *.zip
 .env
-wandb
+.wandb
 
 raw
 PKG*
