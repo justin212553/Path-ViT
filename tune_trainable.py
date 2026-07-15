@@ -21,7 +21,6 @@ from config import Config
 from data.dataset import WSISurvivalDataset
 from models import PatchViT
 from train import (
-    OTHER_DATASET,
     _build_scheduler,
     _identity_collate,
     _make_amp_ctx,
@@ -68,9 +67,9 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int, dataset: str 
 
     amp_ctx = _make_amp_ctx()
 
-    # train.py와 동일하게 cross-dataset 검증: dataset으로 학습하고 반대 코호트로 검증한다.
-    train_ds = WSISurvivalDataset(cfg.data, dataset=dataset)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=OTHER_DATASET[dataset])
+    # train.py와 동일하게 case 단위 6:2:2 stratified split의 train/val을 사용한다.
+    train_ds = WSISurvivalDataset(cfg.data, dataset=dataset, split="train")
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=dataset, split="val")
 
     dl_kwargs = dict(
         batch_size=1,
