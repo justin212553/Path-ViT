@@ -43,6 +43,12 @@ $Suffix = ""
 if ($args -contains "--fusion") { $Suffix += "_fusion" }
 if ($args -contains "--M2")     { $Suffix += "_M2" }
 if ($args -contains "--M4")     { $Suffix += "_M4" }
+if ($args -contains "--M4A")    { $Suffix += "_M4A" }
+
+# [wandb Group] 이 스윕에서 나오는 모든 run(모든 시드/코호트, internal+external)이 하나의
+# wandb Group(<모델종류>_<GroupTs>)으로 묶이도록, 첫 실행 전에 타임스탬프를 한 번만 계산해
+# 모든 python train.py 호출에 동일하게 넘긴다(train.py --group-ts 참조).
+$GroupTs = Get-Date -Format "MMdd::HHmm"
 
 $Total = $Seeds.Count * $Datasets.Count
 $Run   = 0
@@ -52,7 +58,7 @@ foreach ($seed in $Seeds) {
         $Run++
         Write-Host "=== [$Run/$Total] dataset=$dataset seed=$seed Train Start: $(Get-Date) ==="
         $log = Join-Path $LogDir "train_${dataset}_seed${seed}${Suffix}.log"
-        python -u .\train.py --dataset $dataset --seed $seed --external @args | Tee-Object -FilePath $log
+        python -u .\train.py --dataset $dataset --seed $seed --external --group-ts $GroupTs @args | Tee-Object -FilePath $log
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         Write-Host "=== [$Run/$Total] dataset=$dataset seed=$seed Train Complete: $(Get-Date) ==="
     }

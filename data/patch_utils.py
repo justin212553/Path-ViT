@@ -29,8 +29,9 @@ UNI_PATCH_TRANSFORM = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
-FEATURES_FILENAME     = "features.pt"      # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
-FEATURES_UNI_FILENAME = "features_uni.pt"  # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
+FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
+FEATURES_UNI_FILENAME  = "features_uni.pt"   # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
+FEATURES_NORM_FILENAME = "features_norm.pt"  # Macenko stain-normalized + ResNet50 산출물 (utils/extract_features_stain_norm.py)
 
 _COORD_RE = re.compile(r"r(\d+)_c(\d+)")
 

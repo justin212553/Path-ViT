@@ -52,12 +52,14 @@ from torch.utils.data import Dataset
 
 from config import DataConfig
 from data.patch_utils import (
-    FEATURES_FILENAME, FEATURES_UNI_FILENAME, PATCH_TRANSFORM, list_patch_paths, _parse_coord,
+    FEATURES_FILENAME, FEATURES_NORM_FILENAME, FEATURES_UNI_FILENAME,
+    PATCH_TRANSFORM, list_patch_paths, _parse_coord,
 )
 
 FEATURES_FILENAME_BY_BACKBONE = {
-    "resnet50": FEATURES_FILENAME,
-    "uni":      FEATURES_UNI_FILENAME,
+    "resnet50":      FEATURES_FILENAME,
+    "uni":           FEATURES_UNI_FILENAME,
+    "resnet50_norm": FEATURES_NORM_FILENAME,  # Macenko stain-normalized (utils/extract_features_stain_norm.py)
 }
 from models.clinical_encoder import SEX_TO_IDX
 
@@ -109,6 +111,27 @@ def pdac_subtype_gene_ids() -> list[str]:
     name_to_id   = common_genes.set_index("gene_name")["gene_id"]
     gene_ids     = name_to_id.reindex(symbols).dropna().unique()
     return sorted(gene_ids.tolist())
+
+
+@lru_cache(maxsize=None)
+def literature_guided_gene_ids(top_n: int = 1500) -> list[str]:
+    """
+    pdac_subtype_gene_ids()의 대안 — data/select_rnaseq_genes.py 산출물을 로드한다.
+
+    subtype 분류(Bailey/Moffitt)가 아니라 **생존 예측**에 직접 최적화된 기준으로 고른
+    유전자셋이다: 문헌 큐레이션 PDAC 유전자(8개 카테고리, PDAC_LITERATURE_GENE_SETS)를
+    train split(--dataset both 기준, val/test 라벨 미사용) 내부 TCGA/CPTAC 각각의
+    univariate Cox score test 순위로 우선 배치하고, 남는 자리는 나머지 유전자의 Cox
+    순위(Stouffer meta-analysis로 두 코호트 결합)로 채운다. 레퍼런스
+    (Leeyoungsup/pancreatic_cancer_pathology) scripts/select_rnaseq_gene_features.py
+    방법론을 그대로 재구현한 것 — 원 논문은 1000/1500/2000개를 ablation으로 비교한다.
+    """
+    path = Path(f"data/rna_gene_selection/selected_genes_top_{top_n}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes --n-genes {top_n}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
 PATCHES_ROOT_ATTRS = {
     "tcga":  "patches_root_tcga",
     "cptac": "patches_root_cptac",
@@ -191,6 +214,10 @@ class WSISurvivalDataset(Dataset):
                        선택한다 — "resnet50"(기본, features.pt) 또는 "uni"(features_uni.pt).
                        data/extract_features.py --backbone으로 미리 추출해둔 파일이 있어야
                        한다. 모델(ViT_M1 등) 생성 시 backbone 인자와 반드시 일치시켜야 한다.
+        rna_gene_ids:  with_rna=True일 때 사용할 유전자 ENSG id 목록. None(기본)이면
+                       pdac_subtype_gene_ids()(Bailey/Moffitt subtype 분류용, ~340개)를
+                       쓴다. literature_guided_gene_ids(top_n)(data/select_rnaseq_genes.py
+                       산출물, 생존 예측에 직접 최적화된 유전자셋)를 넘기면 그걸 대신 쓴다.
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -204,6 +231,7 @@ class WSISurvivalDataset(Dataset):
         with_clinical: bool = False,
         with_rna: bool = False,
         feature_backbone: str = "resnet50",
+        rna_gene_ids: list[str] | None = None,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -220,6 +248,7 @@ class WSISurvivalDataset(Dataset):
         self.with_clinical    = with_clinical
         self.with_rna         = with_rna
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
+        self.rna_gene_ids     = rna_gene_ids
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -243,8 +272,8 @@ class WSISurvivalDataset(Dataset):
 
             if with_rna:
                 rna_df       = pd.read_csv(RNA_PATHS[name])
-                subtype_ids  = set(pdac_subtype_gene_ids())
-                gene_cols    = [c for c in rna_df.columns if c in subtype_ids]
+                target_ids   = set(self.rna_gene_ids) if self.rna_gene_ids is not None else set(pdac_subtype_gene_ids())
+                gene_cols    = [c for c in rna_df.columns if c in target_ids]
                 if self.rna_gene_cols is None:
                     self.rna_gene_cols = gene_cols
                 elif gene_cols != self.rna_gene_cols:

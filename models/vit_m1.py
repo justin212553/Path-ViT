@@ -25,9 +25,14 @@ from config import ModelConfig
 
 # tile encoder(backbone) 선택 레지스트리 — CNNEncoder/UNIEncoder 둘 다 forward/forward_pooled/
 # .backbone 인터페이스가 동일해 여기서만 바꾸면 나머지 코드는 그대로 재사용된다.
+# "resnet50_norm"(Macenko stain-normalized 후 ResNet50/Lunit SwAV로 재추출한 feature,
+# utils/extract_features_stain_norm.py)은 인코더 자체는 "resnet50"과 완전히 동일한
+# CNNEncoder(2048-dim)다 — 달라지는 건 어느 캐싱 feature 파일을 읽는지뿐이라
+# (data/dataset.py::FEATURES_FILENAME_BY_BACKBONE), 여기서는 같은 클래스를 매핑한다.
 TILE_ENCODER_REGISTRY = {
-    "resnet50": CNNEncoder,
-    "uni":      UNIEncoder,
+    "resnet50":      CNNEncoder,
+    "uni":           UNIEncoder,
+    "resnet50_norm": CNNEncoder,
 }
 
 
@@ -50,24 +55,49 @@ class AttentionPooling(nn.Module):
     attn_v: tanh 게이트  — 패치 표현의 방향성 포착
     attn_u: sigmoid 게이트 — 패치 표현의 크기/활성 포착
     두 게이트의 element-wise 곱 → attn_w로 스칼라 점수 산출 (gated attention)
+
+    [context — RNA-guided attention pooling, vit_m4.py::ViT_M4]
+    context_dim을 주면 attn_v/attn_u 게이트에 외부 컨텍스트 벡터(z_rna)를 FiLM식
+    additive bias로 더한다 — gate = tanh(Wv·token + Cv·context) * sigmoid(Wu·token + Cu·context).
+    즉 "어떤 패치가 중요한가"를 패치 토큰만이 아니라 환자의 RNA subtype까지 함께 보고
+    결정한다. ViT_M4는 이 방식으로 WSI 집계 이후 RNA 게이트를 곱하는 post-hoc 아핀변환
+    대신, 집계 *과정 자체*를 RNA로 조건화한다. context=None이면 기존 ABMIL과 동일
+    (M1/M2는 항상 context=None).
     """
 
-    def __init__(self, embed_dim: int, hidden_dim: int = 128):
+    def __init__(self, embed_dim: int, hidden_dim: int = 128, context_dim: int | None = None):
         super().__init__()
         self.attn_v = nn.Linear(embed_dim, hidden_dim)   # tanh 게이트
         self.attn_u = nn.Linear(embed_dim, hidden_dim)   # sigmoid 게이트
         self.attn_w = nn.Linear(hidden_dim, 1)           # 스칼라 점수
 
-    def forward(self, tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self.context_v: nn.Linear | None = None
+        self.context_u: nn.Linear | None = None
+        if context_dim is not None:
+            self.context_v = nn.Linear(context_dim, hidden_dim, bias=False)
+            self.context_u = nn.Linear(context_dim, hidden_dim, bias=False)
+
+    def forward(
+        self, tokens: torch.Tensor, context: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            tokens: (N, D) — ViT를 지난 패치 토큰. N은 WSI마다 다름.
+            tokens:  (N, D) — ViT를 지난 패치 토큰. N은 WSI마다 다름.
+            context: (C,)   — 패치 attention 게이트에 더할 외부 컨텍스트(RNA 임베딩 등).
+                              context_dim으로 생성된 모델에서만 사용, 그 외엔 무시된다.
         Returns:
             wsi_embed:    (D,) — attention 가중합으로 집계된 WSI 임베딩
             attn_weights: (N,) — 패치별 attention 가중치 (합=1, 시각화·해석용)
         """
+        v = self.attn_v(tokens)  # (N, H)
+        u = self.attn_u(tokens)  # (N, H)
+        if context is not None and self.context_v is not None:
+            # context: (C,) → (H,) → 모든 패치에 동일하게 broadcast (환자 단위 정보라 패치마다 다르지 않음)
+            v = v + self.context_v(context)
+            u = u + self.context_u(context)
+
         # gated attention: tanh × sigmoid → 두 게이트가 방향성과 크기를 동시에 제어
-        gate = torch.tanh(self.attn_v(tokens)) * torch.sigmoid(self.attn_u(tokens))  # (N, H)
+        gate = torch.tanh(v) * torch.sigmoid(u)  # (N, H)
 
         # 각 패치의 중요도 점수 → softmax로 확률 분포화 (합=1 보장)
         scores = self.attn_w(gate).squeeze(-1)        # (N,)
@@ -150,17 +180,22 @@ class ViT_M1(nn.Module):
         features: torch.Tensor | None = None,
         transform=None,
         chunk_size: int | None = None,
+        rna_context: torch.Tensor | None = None,
     ) -> dict:
         """
         risk_head를 적용하기 전, WSI 1장을 attention-pooled 임베딩 1개로 집계한다.
         환자 1명이 슬라이드를 여러 장 보유하는 경우(WSISurvivalDataset) 슬라이드별로
         이 메서드를 호출한 뒤 임베딩을 환자 단위로 풀링하고 나서 risk_head를 적용해야 한다.
 
+        Args:
+            rna_context: (D,) — RNA-guided attention pooling용 컨텍스트(ViT_M4에서만 사용).
+                         attn_pool이 context_dim으로 생성되지 않은 모델(M1/M2)에서는 무시된다.
+
         Returns:
             embed:        (D,) — WSI 임베딩
             attn_weights: (N_patches,)
         """
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
-        ctx_tokens   = self.vit(patch_tokens, coords)          # (N, D)
-        wsi_embed, attn_weights = self.attn_pool(ctx_tokens)   # (D,), (N,)
+        ctx_tokens   = self.vit(patch_tokens, coords)                          # (N, D)
+        wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         return {"embed": wsi_embed, "attn_weights": attn_weights}

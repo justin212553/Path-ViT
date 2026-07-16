@@ -47,7 +47,33 @@ class TrainConfig:
 
 
 @dataclass
+class LightTrainConfig:
+    """WSI 없이 Clinical/RNA만 쓰는 모델(M5/M6/M6X/M7, train_light.py) 학습 설정.
+
+    TrainConfig와 lr/weight_decay가 다른 이유: TrainConfig.lr(1e-5)은 ViT self-attention +
+    ABMIL이 포함된 WSI 스택의 학습 안정성을 위해 낮게 잡은 값이다. 여기 모델들은 그런
+    구조가 전혀 없는 작은 MLP(clinical/RNA 인코더 + risk_head)뿐이라 그 정도로 낮출 이유가
+    없다 — 실제로 train_clinical_rna_only.py(M7)가 lr=1e-3(Adam 기본값 수준)으로 지금까지
+    가장 좋은 external 성능(0.575)을 냈다. M5/M6/M6X를 train.py에 배선하면서 이 값 대신
+    TrainConfig를 그대로 물려받은 게 이 프로젝트의 실수였다 — train_light.py는 그 실수를
+    바로잡되, 여전히 config.py 한 곳에서 모든 하이퍼파라미터를 관리한다는 원칙은 유지한다.
+
+    embed_dim/dropout(모델 폭)은 여기 두지 않는다 — train.py로 배선된 M5/M6/M6X와 동일한
+    ModelConfig(cfg.model)를 그대로 써서, train_light.py와 train.py의 결과 차이가 "아키텍처"가
+    아니라 "이 학습 설정(lr/schedule)"때문임을 명확히 분리해 비교할 수 있게 한다.
+    """
+    epochs:                int   = 30
+    lr:                    float = 1e-3
+    weight_decay:          float = 1e-2
+    device:                str   = "cuda"
+    seed:                  int   = 42
+    warmup_epochs:         int   = 3
+    cox_batch_size:        int   = 16
+
+
+@dataclass
 class Config:
-    model: ModelConfig = field(default_factory=ModelConfig)
-    data:  DataConfig  = field(default_factory=DataConfig)
-    train: TrainConfig = field(default_factory=TrainConfig)
+    model: ModelConfig      = field(default_factory=ModelConfig)
+    data:  DataConfig       = field(default_factory=DataConfig)
+    train: TrainConfig      = field(default_factory=TrainConfig)
+    light: LightTrainConfig = field(default_factory=LightTrainConfig)

@@ -5,8 +5,18 @@ from .clinical_encoder import ClinicalEncoder
 from .vit_m2 import ViT_M2
 from .rna_encoder import RNAEncoder
 from .vit_m4 import ViT_M4
+from .vit_m4a import ViT_M4A
+from .vit_m4b import ViT_M4B
+from .clinical_only import ClinicalOnly
+from .rna_only import RNAOnly
+from .rna_only_extend import RNAOnlyExtend
+from .clinical_rna_only import ClinicalRNAOnly
+from .vit_pm4 import ViT_PM4
+from .vit_pma import ViT_PMA
 
 __all__ = [
-    "ViT_M1", "ViT_M1_AvgPool", "ViT_M2", "ViT_M4",
-    "LateFusionViT", "ClinicalEncoder", "RNAEncoder",
+    "ViT_M1", "ViT_M1_AvgPool", "ViT_M2", "ViT_M4", "ViT_M4A", "ViT_M4B",
+    "ViT_PM4", "ViT_PMA",
+    "LateFusionViT", "ClinicalEncoder", "RNAEncoder", "ClinicalOnly", "RNAOnly",
+    "RNAOnlyExtend", "ClinicalRNAOnly",
 ]
