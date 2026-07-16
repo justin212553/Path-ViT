@@ -51,7 +51,14 @@ import torch
 from torch.utils.data import Dataset
 
 from config import DataConfig
-from data.patch_utils import FEATURES_FILENAME, PATCH_TRANSFORM, list_patch_paths, _parse_coord
+from data.patch_utils import (
+    FEATURES_FILENAME, FEATURES_UNI_FILENAME, PATCH_TRANSFORM, list_patch_paths, _parse_coord,
+)
+
+FEATURES_FILENAME_BY_BACKBONE = {
+    "resnet50": FEATURES_FILENAME,
+    "uni":      FEATURES_UNI_FILENAME,
+}
 from models.clinical_encoder import SEX_TO_IDX
 
 OS_LABEL_PATHS = {
@@ -180,6 +187,10 @@ class WSISurvivalDataset(Dataset):
                        dataset="both"면 두 코호트의 유전자 컬럼 순서가 같아야 하며
                        (extract_rna_clinical.py가 보장), 다르면 에러.
                        (models/vit_m4.py::ViT_M4, train.py --M4 용)
+        feature_backbone: precomputed=True일 때 어느 backbone의 캐싱된 feature 파일을 읽을지
+                       선택한다 — "resnet50"(기본, features.pt) 또는 "uni"(features_uni.pt).
+                       data/extract_features.py --backbone으로 미리 추출해둔 파일이 있어야
+                       한다. 모델(ViT_M1 등) 생성 시 backbone 인자와 반드시 일치시켜야 한다.
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -192,16 +203,23 @@ class WSISurvivalDataset(Dataset):
         transform=None,
         with_clinical: bool = False,
         with_rna: bool = False,
+        feature_backbone: str = "resnet50",
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
         if split not in SPLIT_CHOICES:
             raise ValueError(f"split must be one of {SPLIT_CHOICES}, got {split!r}")
+        if feature_backbone not in FEATURES_FILENAME_BY_BACKBONE:
+            raise ValueError(
+                f"feature_backbone must be one of {list(FEATURES_FILENAME_BY_BACKBONE)}, "
+                f"got {feature_backbone!r}"
+            )
 
-        self.transform     = transform or PATCH_TRANSFORM
-        self.precomputed   = cfg.precomputed
-        self.with_clinical = with_clinical
-        self.with_rna       = with_rna
+        self.transform        = transform or PATCH_TRANSFORM
+        self.precomputed      = cfg.precomputed
+        self.with_clinical    = with_clinical
+        self.with_rna         = with_rna
+        self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -244,7 +262,7 @@ class WSISurvivalDataset(Dataset):
             def _has_patches(slide_id: str, root=root) -> bool:
                 d = root / "tiles" / slide_id
                 if self.precomputed:
-                    return (d / FEATURES_FILENAME).exists()
+                    return (d / self.features_filename).exists()
                 return (next(d.glob("*.jpg"), None) or next(d.glob("*.png"), None)) is not None
 
             has_patches = merged["slide_id"].apply(_has_patches)
@@ -311,10 +329,10 @@ class WSISurvivalDataset(Dataset):
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])
 
         if self.precomputed:
-            features = torch.load(slide_dir / FEATURES_FILENAME, weights_only=True)
+            features = torch.load(slide_dir / self.features_filename, weights_only=True)
             if len(features) != len(patch_paths):
                 raise RuntimeError(
-                    f"{slide_dir}: features.pt 행 수({len(features)})가 패치 수"
+                    f"{slide_dir}: {self.features_filename} 행 수({len(features)})가 패치 수"
                     f"({len(patch_paths)})와 다릅니다 — utils.extract_features를 다시 실행하세요."
                 )
             item["features"] = features

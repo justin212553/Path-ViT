@@ -14,8 +14,8 @@ from config import ModelConfig
 
 
 class ViT_M1_AvgPool(ViT_M1):
-    def __init__(self, cfg: ModelConfig, precomputed: bool = True):
-        super().__init__(cfg, precomputed)
+    def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50"):
+        super().__init__(cfg, precomputed, backbone)
         del self.attn_pool  # 게이트 파라미터 제거 — 평균 풀링은 학습 파라미터가 없음
 
     def forward(

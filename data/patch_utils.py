@@ -15,7 +15,22 @@ PATCH_TRANSFORM = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
-FEATURES_FILENAME = "features.pt"  # data/extract_features.py 산출물 파일명
+# UNI(ViT-L/16, models/uni_encoder.py)용 transform. 패치는 1024x1024 @ 1.0MPP로 저장돼
+# 있는데, UNI 학습 해상도(224, ~0.5MPP)로 그대로 리사이즈하면 실효 해상도가 4.57MPP까지
+# 뭉개져 UNI 학습 분포와 크게 어긋난다(실측상 ResNet50/Lunit SwAV보다 성능이 낮았음).
+# 512로 리사이즈하면 실효 2.0MPP로 그나마 덜 뭉개진다 — Leeyoungsup/pancreatic_cancer_pathology
+# 레퍼런스도 같은 이유로 224 대신 512를 썼다. UNIEncoder가 dynamic_img_size=True라 224가
+# 아닌 해상도도 positional embedding을 보간해 그대로 받는다.
+UNI_PATCH_TRANSFORM = transforms.Compose([
+    transforms.Resize(512),
+    transforms.CenterCrop(512),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+FEATURES_FILENAME     = "features.pt"      # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
+FEATURES_UNI_FILENAME = "features_uni.pt"  # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
 
 _COORD_RE = re.compile(r"r(\d+)_c(\d+)")
 

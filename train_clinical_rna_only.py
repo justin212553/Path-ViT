@@ -12,6 +12,7 @@ train.py와 달리 WSI 처리가 전혀 없어 별도 스크립트로 뺐다(패
 
 사용법:
     python train_clinical_rna_only.py --dataset tcga --seed 42
+    python train_clinical_rna_only.py --dataset tcga --seed 42 --external   # internal + external(반대 코호트 전체)
 """
 import argparse
 import math
@@ -136,6 +137,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", type=str, default="cptac", choices=["tcga", "cptac"])
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--external", action="store_true",
+        help="internal test와 별도로, 학습에 전혀 쓰지 않은 반대 코호트 전체(tcga↔cptac 자동 "
+             "선택)를 external test로 평가한다. train.py --external과 동일한 의미.",
+    )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-2)
@@ -194,6 +200,16 @@ def main():
     print(f"\n=== Internal Test (best checkpoint epoch {best_epoch}) ===")
     print(_log_line("test", test_metrics))
     print(f"train_c_index(at best epoch)={train_metrics_final['c_index']:.4f}")
+
+    if args.external:
+        external_dataset = {"tcga": "cptac", "cptac": "tcga"}[args.dataset]
+        external_ds = WSISurvivalDataset(
+            cfg.data, dataset=external_dataset, split="all", with_clinical=True, with_rna=True,
+        )
+        external_loader = DataLoader(external_ds, shuffle=False, **dl_kwargs)
+        external_metrics = evaluate(model, external_loader, device)
+        print(f"\n=== External Test ({external_dataset} 전체 코호트, n={len(external_ds)}) ===")
+        print(_log_line("external", external_metrics))
 
 
 if __name__ == "__main__":

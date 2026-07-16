@@ -50,8 +50,9 @@ class ViT_M4(ViT_M1):
         age_std: float,
         rna_input_dim: int,
         precomputed: bool = True,
+        backbone: str = "resnet50",
     ):
-        super().__init__(cfg, precomputed)
+        super().__init__(cfg, precomputed, backbone)
         self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
 

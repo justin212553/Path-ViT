@@ -209,6 +209,12 @@ def _parse_args() -> argparse.Namespace:
         help="패치 jpg/png를 매 forward마다 ResNet50으로 직접 인코딩 (기본: data/extract_features.py로 "
              "사전 추출한 features.pt 사용)",
     )
+    parser.add_argument(
+        "--backbone", type=str, default="resnet50", choices=["resnet50", "uni"],
+        help="frozen tile encoder 선택 (기본: resnet50=Lunit SwAV, 2048-dim). uni는 UNI ViT-L/16"
+             "(1024-dim, 224 리사이즈) — 미리 `python -m utils.extract_features --backbone uni`로 "
+             "features_uni.pt를 뽑아둬야 한다(HuggingFace gated repo 접근 승인 + .env HF_TOKEN 필요).",
+    )
     # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
     # 미지정 시 기존 ViT_M1(ViT+ABMIL)로 동작 — ablation baseline 유지
     parser.add_argument(
@@ -276,6 +282,12 @@ def main():
         raise ValueError("--M4(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if args.avgpool and (args.M2 or args.M4 or args.fusion):
         raise ValueError("--avgpool은 --M1(기본)에서만 지원됩니다 — --M2/--M4/--fusion과 동시 사용 불가.")
+    if args.fusion and args.backbone != "resnet50":
+        raise ValueError(
+            "--fusion(LateFusionViT)의 cluster_centroids.pt는 ResNet50 raw feature(2048-dim) "
+            "기준으로 사전 계산돼 있어 --backbone uni(1024-dim)와 호환되지 않습니다. "
+            "uni로 --fusion을 쓰려면 data/fit_clusters.py를 features_uni.pt 기준으로 다시 돌려야 합니다."
+        )
     centroids_path = Path(__file__).parent / CENTROIDS_DIR
     if args.fusion and not centroids_path.exists():
         raise FileNotFoundError(
@@ -334,6 +346,8 @@ def main():
         model_prefix = "M1avg"
     else:
         model_prefix = "M1"
+    if args.backbone != "resnet50":
+        model_prefix += f"_{args.backbone}"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -361,6 +375,7 @@ def main():
                                            else "LateFusionViT" if args.fusion
                                            else "ViT_M1_AvgPool" if args.avgpool else "ViT_M1"),
                 "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
+                "backbone":              args.backbone,
                 "age_mean":              age_mean,
                 "age_std":               age_std,
                 "rna_input_dim":         rna_input_dim,
@@ -370,12 +385,13 @@ def main():
         )
 
     with_clinical = args.M2 or args.M4
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", with_clinical=with_clinical, with_rna=args.M4)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   with_clinical=with_clinical, with_rna=args.M4)
-    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  with_clinical=with_clinical, with_rna=args.M4)
+    ds_kwargs = dict(with_clinical=with_clinical, with_rna=args.M4, feature_backbone=args.backbone)
+    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
+    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
     # [ExternalTest] 학습에 전혀 쓰이지 않은 코호트 전체(split="all") — 없으면 None
     external_ds = (
-        WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", with_clinical=with_clinical, with_rna=args.M4)
+        WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
     )
 
@@ -399,17 +415,17 @@ def main():
     # ViT_M2        : ViT+ABMIL (WSI) + Clinical age/sex MLP Late Fusion 멀티모달 (--M2)
     # ViT_M4        : ViT+ABMIL (WSI) + Clinical age/sex MLP + RNA-seq MLP 3-모달 Late Fusion (--M4)
     if args.M4:
-        model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std,
-                        rna_input_dim=rna_input_dim, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                        precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
-                        precomputed=cfg.data.precomputed).to(device)
+                        precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     elif args.avgpool:
-        model = ViT_M1_AvgPool(cfg.model, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M1_AvgPool(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     else:
-        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
@@ -449,8 +465,10 @@ def main():
     )
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    # [Clinical/RNA/LateFusion] 모델 종류별로 별도 checkpoint 저장 — ablation 결과 보존
-    tag = args.dataset
+    # [Clinical/RNA/LateFusion] 모델 종류·backbone별로 별도 checkpoint 저장 — ablation 결과 보존.
+    # backbone을 태그에 안 넣으면 --backbone uni/resnet50을 오가며 돌릴 때 같은 파일을 덮어써서
+    # 서로 다른 feature 차원의 checkpoint가 섞여버린다.
+    tag = args.dataset if args.backbone == "resnet50" else f"{args.dataset}_{args.backbone}"
     if args.M4:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna.pt"
     elif args.M2:
