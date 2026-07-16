@@ -41,7 +41,7 @@ except ImportError:
 
 from config import Config
 from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids
-from models import PatchViT, LateFusionViT, ClinicalFusionViT, ClinicalRNAFusionViT
+from models import ViT_M1, LateFusionViT, ViT_M2, ViT_M4
 from models.clinical_encoder import age_stats_from_csv
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
@@ -210,30 +210,30 @@ def _parse_args() -> argparse.Namespace:
              "사전 추출한 features.pt 사용)",
     )
     # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
-    # 미지정 시 기존 PatchViT(ViT+ABMIL)로 동작 — ablation baseline 유지
+    # 미지정 시 기존 ViT_M1(ViT+ABMIL)로 동작 — ablation baseline 유지
     parser.add_argument(
         "--fusion", action="store_true",
         help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
              "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
     )
     # [Clinical/RNA] --M1/--M2/--M4로 모델 종류 선택 (상호 배타)
-    # --M1(기본값): 순수 WSI 모델(PatchViT, --fusion 지정 시 LateFusionViT)
-    # --M2        : ClinicalFusionViT — WSI 임베딩 + Clinical(age/sex) MLP Late Fusion 멀티모달
-    # --M4        : ClinicalRNAFusionViT — WSI + Clinical(age/sex) + RNA-seq MLP 3-모달 Late Fusion
+    # --M1(기본값): 순수 WSI 모델(ViT_M1, --fusion 지정 시 LateFusionViT)
+    # --M2        : ViT_M2 — WSI 임베딩 + Clinical(age/sex) MLP Late Fusion 멀티모달
+    # --M4        : ViT_M4 — WSI + Clinical(age/sex) + RNA-seq MLP 3-모달 Late Fusion
     model_group = parser.add_mutually_exclusive_group()
     model_group.add_argument(
         "--M1", action="store_true",
         help="순수 WSI 모델 사용 (기본값). --fusion과 함께 쓰면 LateFusionViT, "
-             "아니면 PatchViT.",
+             "아니면 ViT_M1.",
     )
     model_group.add_argument(
         "--M2", action="store_true",
-        help="ClinicalFusionViT 사용 (ViT+ABMIL + Clinical(age/sex) MLP Late Fusion 멀티모달). "
+        help="ViT_M2 사용 (ViT+ABMIL + Clinical(age/sex) MLP Late Fusion 멀티모달). "
              "data/clinical_{tcga,cptac}.csv 필요. --fusion과 동시 사용 불가.",
     )
     model_group.add_argument(
         "--M4", action="store_true",
-        help="ClinicalRNAFusionViT 사용 (ViT+ABMIL + Clinical(age/sex) MLP + RNA-seq MLP "
+        help="ViT_M4 사용 (ViT+ABMIL + Clinical(age/sex) MLP + RNA-seq MLP "
              "3-모달 Late Fusion). data/clinical_{tcga,cptac}.csv, data/rna_{tcga,cptac}.csv "
              "필요. --fusion과 동시 사용 불가.",
     )
@@ -346,9 +346,9 @@ def main():
                 "dropout":               cfg.model.dropout,
                 "num_landmarks":         cfg.model.num_landmarks,
                 # [LateFusion/Clinical/RNA] 모델 종류 및 군집 수 기록 — ablation 비교용
-                "model":                 ("ClinicalRNAFusionViT" if args.M4
-                                           else "ClinicalFusionViT" if args.M2
-                                           else "LateFusionViT" if args.fusion else "PatchViT"),
+                "model":                 ("ViT_M4" if args.M4
+                                           else "ViT_M2" if args.M2
+                                           else "LateFusionViT" if args.fusion else "ViT_M1"),
                 "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
                 "age_mean":              age_mean,
                 "age_std":               age_std,
@@ -383,20 +383,20 @@ def main():
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
 
     # [Clinical/RNA/LateFusion] --M1/--M2/--M4/--fusion에 따라 모델 선택
-    # PatchViT           : 순수 WSI ViT+ABMIL 단일 경로 (--M1, ablation baseline)
-    # LateFusionViT      : ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion (--M1 --fusion)
-    # ClinicalFusionViT  : ViT+ABMIL (WSI) + Clinical age/sex MLP Late Fusion 멀티모달 (--M2)
-    # ClinicalRNAFusionViT: ViT+ABMIL (WSI) + Clinical age/sex MLP + RNA-seq MLP 3-모달 Late Fusion (--M4)
+    # ViT_M1        : 순수 WSI ViT+ABMIL 단일 경로 (--M1, ablation baseline)
+    # LateFusionViT : ViT+ABMIL (Path A) + Cluster Histogram (Path B) Late Fusion (--M1 --fusion)
+    # ViT_M2        : ViT+ABMIL (WSI) + Clinical age/sex MLP Late Fusion 멀티모달 (--M2)
+    # ViT_M4        : ViT+ABMIL (WSI) + Clinical age/sex MLP + RNA-seq MLP 3-모달 Late Fusion (--M4)
     if args.M4:
-        model = ClinicalRNAFusionViT(cfg.model, age_mean=age_mean, age_std=age_std,
-                                      rna_input_dim=rna_input_dim, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std,
+                        rna_input_dim=rna_input_dim, precomputed=cfg.data.precomputed).to(device)
     elif args.M2:
-        model = ClinicalFusionViT(cfg.model, age_mean=age_mean, age_std=age_std,
-                                   precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
+                        precomputed=cfg.data.precomputed).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     else:
-        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
@@ -410,16 +410,16 @@ def main():
     print(f"Mode: {mode}")
     # [Clinical/RNA/LateFusion] 모델 종류 출력
     if args.M4:
-        print(f"Model: ClinicalRNAFusionViT (ViT+ABMIL + Clinical age/sex MLP + RNA-seq MLP, "
+        print(f"Model: ViT_M4 (ViT+ABMIL + Clinical age/sex MLP + RNA-seq MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M2:
-        print(f"Model: ClinicalFusionViT (ViT+ABMIL + Clinical age/sex MLP, "
+        print(f"Model: ViT_M2 (ViT+ABMIL + Clinical age/sex MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")
     elif args.fusion:
         K = int(cluster_centroids.shape[0])
         print(f"Model: LateFusionViT (ViT+ABMIL + ClusterHistogram, K={K})")
     else:
-        print(f"Model: PatchViT (ViT+ABMIL baseline)")
+        print(f"Model: ViT_M1 (ViT+ABMIL baseline)")
     print(f"Dataset: {args.dataset}  (6:2:2 stratified split)  "
           f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
     if external_ds is not None:
@@ -551,9 +551,9 @@ def main():
                 config={
                     "dataset":          args.dataset,
                     "external_dataset": external_dataset,
-                    "model":            ("ClinicalRNAFusionViT" if args.M4
-                                          else "ClinicalFusionViT" if args.M2
-                                          else "LateFusionViT" if args.fusion else "PatchViT"),
+                    "model":            ("ViT_M4" if args.M4
+                                          else "ViT_M2" if args.M2
+                                          else "LateFusionViT" if args.fusion else "ViT_M1"),
                 },
             )
             wandb.run.summary["external_dataset"]     = external_dataset

@@ -1,11 +1,11 @@
-from .patch_vit import PatchViT
+from .vit_m1 import ViT_M1
 from .patch_vit_fusion import LateFusionViT
 from .clinical_encoder import ClinicalEncoder
-from .patch_vit_clinical_fusion import ClinicalFusionViT
+from .vit_m2 import ViT_M2
 from .rna_encoder import RNAEncoder
-from .patch_vit_clinical_rna_fusion import ClinicalRNAFusionViT
+from .vit_m4 import ViT_M4
 
 __all__ = [
-    "PatchViT", "LateFusionViT", "ClinicalEncoder", "ClinicalFusionViT",
-    "RNAEncoder", "ClinicalRNAFusionViT",
+    "ViT_M1", "ViT_M2", "ViT_M4",
+    "LateFusionViT", "ClinicalEncoder", "RNAEncoder", 
 ]

@@ -25,7 +25,7 @@ class DataConfig:
     patches_root_cptac: str     = "data/patches_cptac"
     num_workers: int            = 0
     precomputed: bool           = True
-    seed: int                   = 126  # case 단위 train/val/test stratified split 재현성 (data/dataset.py 참조)
+    seed: int                   = 42  # case 단위 train/val/test stratified split 재현성 (data/dataset.py 참조)
 
 
 @dataclass
@@ -34,7 +34,7 @@ class TrainConfig:
     lr:                    float = 1e-5
     weight_decay:          float = 1e-1
     device:                str   = "cuda"
-    seed:                  int   = 126
+    seed:                  int   = 42
     # --- GPU 최적화 파라미터 ---
     # gradient accumulation 단위 = 환자 1명(보유한 모든 노드 누적 후 1 step, train.py 참조)
     warmup_epochs:         int   = 3       # linear LR warmup → cosine decay (epochs의 10%, 표준 warmup 비율)
