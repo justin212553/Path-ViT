@@ -41,7 +41,7 @@ except ImportError:
 
 from config import Config
 from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids
-from models import ViT_M1, LateFusionViT, ViT_M2, ViT_M4
+from models import ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4
 from models.clinical_encoder import age_stats_from_csv
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
@@ -216,6 +216,12 @@ def _parse_args() -> argparse.Namespace:
         help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
              "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
     )
+    parser.add_argument(
+        "--avgpool", action="store_true",
+        help="ViT_M1_AvgPool 사용 — ABMIL(학습되는 gated attention pooling) 대신 학습 파라미터가 "
+             "없는 단순 평균 풀링으로 패치→WSI 집계를 대체한다. --M1(기본)에서만 지원, "
+             "--M2/--M4/--fusion과 동시 사용 불가.",
+    )
     # [Clinical/RNA] --M1/--M2/--M4로 모델 종류 선택 (상호 배타)
     # --M1(기본값): 순수 WSI 모델(ViT_M1, --fusion 지정 시 LateFusionViT)
     # --M2        : ViT_M2 — WSI 임베딩 + Clinical(age/sex) MLP Late Fusion 멀티모달
@@ -268,6 +274,8 @@ def main():
         raise ValueError("--M2(Clinical fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if args.M4 and args.fusion:
         raise ValueError("--M4(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
+    if args.avgpool and (args.M2 or args.M4 or args.fusion):
+        raise ValueError("--avgpool은 --M1(기본)에서만 지원됩니다 — --M2/--M4/--fusion과 동시 사용 불가.")
     centroids_path = Path(__file__).parent / CENTROIDS_DIR
     if args.fusion and not centroids_path.exists():
         raise FileNotFoundError(
@@ -322,6 +330,8 @@ def main():
         model_prefix = "M2"
     elif args.fusion:
         model_prefix = "M1C"
+    elif args.avgpool:
+        model_prefix = "M1avg"
     else:
         model_prefix = "M1"
 
@@ -348,7 +358,8 @@ def main():
                 # [LateFusion/Clinical/RNA] 모델 종류 및 군집 수 기록 — ablation 비교용
                 "model":                 ("ViT_M4" if args.M4
                                            else "ViT_M2" if args.M2
-                                           else "LateFusionViT" if args.fusion else "ViT_M1"),
+                                           else "LateFusionViT" if args.fusion
+                                           else "ViT_M1_AvgPool" if args.avgpool else "ViT_M1"),
                 "num_clusters":          int(cluster_centroids.shape[0]) if args.fusion else 0,
                 "age_mean":              age_mean,
                 "age_std":               age_std,
@@ -395,6 +406,8 @@ def main():
                         precomputed=cfg.data.precomputed).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
+    elif args.avgpool:
+        model = ViT_M1_AvgPool(cfg.model, precomputed=cfg.data.precomputed).to(device)
     else:
         model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed).to(device)
     if model.cnn.backbone is not None:
@@ -418,6 +431,8 @@ def main():
     elif args.fusion:
         K = int(cluster_centroids.shape[0])
         print(f"Model: LateFusionViT (ViT+ABMIL + ClusterHistogram, K={K})")
+    elif args.avgpool:
+        print(f"Model: ViT_M1_AvgPool (ViT + 무학습 평균 풀링, ABMIL 제거)")
     else:
         print(f"Model: ViT_M1 (ViT+ABMIL baseline)")
     print(f"Dataset: {args.dataset}  (6:2:2 stratified split)  "
@@ -442,6 +457,8 @@ def main():
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical.pt"
     elif args.fusion:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_fusion.pt"
+    elif args.avgpool:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_avgpool.pt"
     else:
         ckpt_path = ckpt_dir / f"survival_{tag}_best.pt"
 
