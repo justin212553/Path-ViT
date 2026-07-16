@@ -1,9 +1,0 @@
-addict==2.2.1
-nystrom-attention==0.0.9
-opencv-python==4.2.0.34
-opencv-python-headless==4.2.0.34
-pandas==1.2.3
-Pillow==8.4.0
-pytorch-lightning==1.2.3
-torchvision
-
