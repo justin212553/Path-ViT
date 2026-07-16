@@ -19,8 +19,16 @@ import torch.nn as nn
 from PIL import Image
 
 from .cnn_encoder import CNNEncoder
+from .uni_encoder import UNIEncoder
 from .vit_encoder import ViTEncoder
 from config import ModelConfig
+
+# tile encoder(backbone) 선택 레지스트리 — CNNEncoder/UNIEncoder 둘 다 forward/forward_pooled/
+# .backbone 인터페이스가 동일해 여기서만 바꾸면 나머지 코드는 그대로 재사용된다.
+TILE_ENCODER_REGISTRY = {
+    "resnet50": CNNEncoder,
+    "uni":      UNIEncoder,
+}
 
 
 class AttentionPooling(nn.Module):
@@ -71,16 +79,23 @@ class AttentionPooling(nn.Module):
 
 
 class ViT_M1(nn.Module):
-    def __init__(self, cfg: ModelConfig, precomputed: bool = True):
+    def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50"):
         """
         Args:
-            precomputed: True면 ResNet50 backbone을 생성하지 않는다 — 항상 사전 추출된
+            precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
                          pooled feature(features 인자)만 입력으로 받는 모드.
                          False면 patch_paths로 이미지를 직접 디코딩/forward한다.
+            backbone:    "resnet50"(기본, CNNEncoder=ResNet50 Lunit SwAV, 2048-dim) 또는
+                         "uni"(UNIEncoder=UNI ViT-L/16, 1024-dim, 224 리사이즈).
+                         data/extract_features.py --backbone과 값을 맞춰야 캐싱된 feature
+                         차원이 일치한다. attribute 이름은 backbone이 uni여도 관례상 self.cnn을
+                         유지한다(train.py의 model.cnn.backbone 참조 전부와 호환).
         """
         super().__init__()
         self.precomputed = precomputed
-        self.cnn = CNNEncoder(cfg.embed_dim, with_backbone=not precomputed)
+        self.backbone_name = backbone
+        encoder_cls = TILE_ENCODER_REGISTRY[backbone]
+        self.cnn = encoder_cls(cfg.embed_dim, with_backbone=not precomputed)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
                               use_grad_checkpoint=cfg.grad_checkpoint,

@@ -35,8 +35,9 @@ class ViT_M2(ViT_M1):
         age_mean: float,
         age_std: float,
         precomputed: bool = True,
+        backbone: str = "resnet50",
     ):
-        super().__init__(cfg, precomputed)
+        super().__init__(cfg, precomputed, backbone)
         self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
 
         # Late Fusion risk head: [z_wsi ‖ z_clinical] (2D,) → risk_score (1,)
