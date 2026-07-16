@@ -43,16 +43,20 @@ class DomainClassifier(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-def _load_patch_features(cfg, dataset: str) -> np.ndarray:
+def _load_patch_features(cfg, dataset: str, feature_backbone: str = "resnet50") -> np.ndarray:
     """
     dataset("tcga"|"cptac") 코호트 전체의 patch-level raw CNN feature (N, 2048)를 모은다.
 
     WSISurvivalDataset은 이제 6:2:2 stratified split을 적용하므로(data/dataset.py 참조),
     train/val/test 세 split을 모두 합쳐 코호트 전체를 대상으로 도메인 분리 여부를 검사한다.
+
+    feature_backbone="resnet50_norm"이면 원본 features.pt 대신 Macenko stain-normalized
+    features_norm.pt(utils/extract_features_stain_norm.py 산출물)를 읽는다 — 둘 다 2048-dim이라
+    같은 DomainClassifier로 바로 비교 가능하다.
     """
     feats = []
     for split in ("train", "val", "test"):
-        ds = WSISurvivalDataset(cfg.data, dataset=dataset, split=split)
+        ds = WSISurvivalDataset(cfg.data, dataset=dataset, split=split, feature_backbone=feature_backbone)
         feats.extend(
             slide["features"].numpy()
             for case_idx in range(len(ds))
@@ -68,6 +72,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--test-size", type=float, default=0.2, help="held-out 평가용 패치 비율")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--feature-backbone", type=str, default="resnet50",
+        choices=["resnet50", "resnet50_norm"],
+        help="resnet50_norm이면 Macenko stain-normalized feature(features_norm.pt)로 검사한다.",
+    )
     return parser.parse_args()
 
 
@@ -77,12 +86,12 @@ def main():
     cfg.data.precomputed = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print("Loading TCGA patch features...")
-    tcga_feats = _load_patch_features(cfg, "tcga")
+    print(f"Loading TCGA patch features... (feature_backbone={args.feature_backbone})")
+    tcga_feats = _load_patch_features(cfg, "tcga", args.feature_backbone)
     print(f"  {tcga_feats.shape[0]:,} patches")
 
-    print("Loading CPTAC patch features...")
-    cptac_feats = _load_patch_features(cfg, "cptac")
+    print(f"Loading CPTAC patch features... (feature_backbone={args.feature_backbone})")
+    cptac_feats = _load_patch_features(cfg, "cptac", args.feature_backbone)
     print(f"  {cptac_feats.shape[0]:,} patches")
 
     X = np.concatenate([tcga_feats, cptac_feats], axis=0).astype(np.float32)
