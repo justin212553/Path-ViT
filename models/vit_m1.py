@@ -1,5 +1,5 @@
 """
-PatchViT — WSI 단위 MIL 모델 (ViT + ABMIL)
+ViT_M1 — WSI 단위 MIL 모델 (ViT + ABMIL), train.py의 --M1(기본값) 플래그로 선택되는 모델
 
 패치 → CNN → 공간 임베딩 ViT(self-attention) → attention pooling → WSI 임베딩.
 OS(overall survival) risk score 예측(Cox Proportional Hazards)을 위한 표현을 만든다.
@@ -70,7 +70,7 @@ class AttentionPooling(nn.Module):
         return wsi_embed, attn_weights
 
 
-class PatchViT(nn.Module):
+class ViT_M1(nn.Module):
     def __init__(self, cfg: ModelConfig, precomputed: bool = True):
         """
         Args:

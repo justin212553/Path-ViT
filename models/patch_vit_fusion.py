@@ -8,12 +8,12 @@ LateFusionViT — ViT+ABMIL과 Cluster Histogram Branch의 Late Fusion 모델
 두 경로는 같은 features.pt를 입력으로 받되 서로 다른 정보를 추출하므로 상보적이다.
 Path B의 k-means 군집 중심(centroids)은 학습 전 사전 계산되며 학습 중 고정된다.
 
-PatchViT를 상속해 cnn/vit/attn_pool은 그대로 재사용하고, Path B(히스토그램 브랜치)와
+ViT_M1을 상속해 cnn/vit/attn_pool은 그대로 재사용하고, Path B(히스토그램 브랜치)와
 그에 맞춰 입력 차원이 2D로 늘어난 risk_head, raw feature 노출이 필요한 forward만
 오버라이드한다.
 
 [이 모델의 위치]
-  PatchViT (ViT+ABMIL)
+  ViT_M1 (ViT+ABMIL)
       → [현재] LateFusionViT (ViT+ABMIL + Cluster Histogram, Late Fusion)
       → [다음]  ClusterQueryViT (ABMIL 제거, K개 query token이 ViT 내부에서 집계)
 
@@ -36,7 +36,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from .patch_vit import PatchViT
+from .vit_m1 import ViT_M1
 from config import ModelConfig
 
 
@@ -96,10 +96,10 @@ class ClusterHistogramBranch(nn.Module):
         return z_hist, histogram
 
 
-class LateFusionViT(PatchViT):
+class LateFusionViT(ViT_M1):
     """
     ViT+ABMIL (Path A) + Cluster Histogram Branch (Path B) Late Fusion.
-    cnn/vit/attn_pool은 PatchViT에서 그대로 물려받는다.
+    cnn/vit/attn_pool은 ViT_M1에서 그대로 물려받는다.
 
     [Fusion 구조]
       z_vit  (1, D) — Path A 출력: 공간 문맥이 반영된 WSI 임베딩
@@ -137,7 +137,7 @@ class LateFusionViT(PatchViT):
         self.hist_branch = ClusterHistogramBranch(K, cfg.embed_dim)
 
         # Late Fusion risk head: [z_vit ‖ z_hist] (2D,) → risk_score (1,)
-        # PatchViT가 만든 D 차원 risk_head를 2D 차원으로 교체한다.
+        # ViT_M1이 만든 D 차원 risk_head를 2D 차원으로 교체한다.
         self.risk_head = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim * 2),
             nn.Linear(cfg.embed_dim * 2, 1),

@@ -19,7 +19,7 @@ from torch.utils.data import DataLoader
 from config import Config
 from data.dataset import WSISurvivalDataset
 from data.fit_clusters import CENTROIDS_DIR
-from models import LateFusionViT, PatchViT
+from models import LateFusionViT, ViT_M1
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
 
 
@@ -146,7 +146,7 @@ def evaluate_survival(
         cluster_centroids = torch.load(centroids_path, map_location="cpu")
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     else:
-        model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed).to(device)
 
     ckpt = torch.load(checkpoint, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])

@@ -168,8 +168,8 @@ class WSISurvivalDataset(Dataset):
         transform:     패치에 적용할 transform (precomputed=False일 때만 사용)
         with_clinical: True면 data/clinical_{tcga,cptac}.csv(age_years, sex)를 case_id로
                        inner-join한다 — clinical 정보가 없는 case의 슬라이드는 제외되고,
-                       각 아이템 dict에 age_years/sex_idx가 추가된다(models/patch_vit_clinical_fusion.py
-                       ::ClinicalFusionViT, train.py --M2 용).
+                       각 아이템 dict에 age_years/sex_idx가 추가된다(models/vit_m2.py::ViT_M2,
+                       train.py --M2 용).
         with_rna:      True면 data/rna_{tcga,cptac}.csv(유전자 발현)를 case_id로 inner-join한다 —
                        RNA 정보가 없는 case의 슬라이드는 제외되고, 각 아이템 dict에 rna가
                        추가된다. 컬럼은 전체 protein-coding 유전자(~2만 개)가 아니라
@@ -179,8 +179,7 @@ class WSISurvivalDataset(Dataset):
                        수만큼 중복 저장 방지) merged 테이블에는 case_id만 inner-join한다.
                        dataset="both"면 두 코호트의 유전자 컬럼 순서가 같아야 하며
                        (extract_rna_clinical.py가 보장), 다르면 에러.
-                       (models/patch_vit_clinical_rna_fusion.py::ClinicalRNAFusionViT,
-                       train.py --M4 용)
+                       (models/vit_m4.py::ViT_M4, train.py --M4 용)
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """

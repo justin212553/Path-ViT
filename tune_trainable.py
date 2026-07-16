@@ -19,7 +19,7 @@ from ray import tune
 
 from config import Config
 from data.dataset import WSISurvivalDataset
-from models import PatchViT
+from models import ViT_M1
 from train import (
     _build_scheduler,
     _identity_collate,
@@ -82,7 +82,7 @@ def train_fn(search_cfg: dict, base_cfg: Config, tune_epochs: int, dataset: str 
     train_loader = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     val_loader   = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
 
-    model = PatchViT(cfg.model, precomputed=cfg.data.precomputed).to(device)
+    model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed).to(device)
     if model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
 
