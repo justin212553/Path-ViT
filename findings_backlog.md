@@ -21,30 +21,32 @@
 - **판단 결과**: M4A가 M4보다 0.01 높지만(0.549 vs 0.539) 시드 간 편차(0.50~0.59) 안에 묻히는 수준이라 "새로운 RNA-이미지 상호작용을 발견했다"고 부를 근거는 없음. M4B는 오히려 M4보다 낮음. **RNA 개입 지점(post-hoc/게이트-bias/co-attention/pre-ViT FiLM)은 결과에 유의미한 영향이 없다는 결론이 재확인됨.**
 - **해석**: 병리 인코더/MIL 집계 자체는 문제가 아니다(M1이 이미 맞아떨어지므로). 격차는 clinical+RNA를 WSI와 **결합(fusion)하는 방식**에서 발생한다. 유력 원인: 우리 WSI 표현이 ABMIL로 만든 단일 벡터라 RNA가 조절할 "손잡이"가 너무 적다(아래 1번 항목) — 개입 *지점*을 바꿔봐도 안 되니, 개입 *대상*(표현 자체의 풍부함)을 바꿔야 한다는 쪽으로 결론.
 
----
+### 1. ABMIL 단일 벡터 압축 → 다성분(multi-component) pooling + co-attention (PMA) + 레퍼런스식 유전자 재선정
+**상태: 1차 검증 완료, 지금까지 가장 뚜렷한 개선.**
 
-## 최우선순위
+| | Internal C-index | HR | log-rank p |
+|---|---|---|---|
+| M4A (기존, 단일 벡터+co-attention) | 0.549 | 1.42 | 0.32 |
+| PM4 (다성분 4개 + post-hoc 게이트) | 0.553 | 1.24 | 0.54 |
+| PMA (다성분 4개 + co-attention) | 0.583 | 1.65 | 0.32 |
+| **PMA_EX (PMA + literature_1500 유전자)** | **0.656** (seed 범위 0.604~0.733) | **2.15** | **0.10** |
+| 레퍼런스 M4 | 0.722 | 3.32 | 0.00064 |
 
-### 1. ABMIL 단일 벡터 압축 → 다성분(multi-component) pooling으로 교체
-**우선순위: 최우선** — M4 both 결과가 레퍼런스에 크게 못 미친 근본 원인으로 지목됨 (0번 항목 참조).
+- **핵심 발견**: 다성분 pooling(표현력 확보) + co-attention(RNA가 능동적으로 관점 선택) + 레퍼런스식 유전자 재선정(생존 예측에 최적화된 Cox+Stouffer 1500개, 아래 2번 항목) — **세 가지를 함께 적용하니 처음으로 레퍼런스에 근접**. 개별 요소만으로는(PM4/PMA 단독, M6X 단독) 전부 미미했는데 함께 쌓으니 확실히 다른 그림. seed126은 c-index 0.733/HR 3.27/p 0.0003으로 레퍼런스(0.722/3.32/0.00064)와 거의 정확히 일치.
+- **주의**: seed42(0.604)/seed84(0.630)는 seed126(0.733)보다 수수함 — 평균이 진짜 실력인지 seed126이 특히 잘 맞은 표본인지 추가 시드로 확인 필요. 그래도 최소값(0.604)조차 이전 최고 기록(PMA-subtype 0.583)보다 높다는 점은 고무적.
+- **문제의 정확한 위치(다성분 pooling 자체)**: "ABMIL이냐 CLAM이냐"가 핵심이 아니었다 — CLAM(Lu et al. 2021)도 내부적으로 동일한 gated attention pooling을 쓰고 최종 표현은 여전히 압축 벡터 1개다. 레퍼런스가 쓰는 Morphology Burden Pooling처럼 **여러 통계적 관점을 압축 없이 병렬로 유지**하는 게 핵심이었다.
+- **노벨티**: ViT self-attention(Nystromformer) 공간 컨텍스트 블록(레퍼런스에는 없음) + RNA 개입 지점 체계적 비교(M4/M4A/M4B/PM4/PMA 사다리, 레퍼런스는 게이트 하나만 고정) + 멀티시드/internal-external/both 프로토콜 rigor — 레퍼런스와 겹치는 다성분 pooling·유전자 재선정 인프라 위에 이 세 축을 얹은 조합이 차별점.
+- **다음 액션**: (a) PMA_EX 추가 시드로 seed126이 이상치인지 확인, (b) 같은 유전자셋을 M4/M4A/PM4에도 적용해 "다성분+co-attention" 조합이 정말 필요한지 vs 유전자셋만으로도 되는지 분리, (c) external 프로토콜에서도 재현되는지 확인(지금은 both만 확인).
 
-- **문제의 정확한 위치**: "ABMIL이냐 CLAM이냐"가 핵심이 아니다 — CLAM(Lu et al. 2021)도 내부적으로 동일한 gated attention pooling을 쓰고, 최종 표현은 여전히 압축된 벡터 1개다(instance-level clustering loss로 attention을 추가 지도할 뿐). 레퍼런스가 실제로 쓰는 건 CLAM이 아니라 자체 설계한 Morphology Burden Pooling — **mean, std, risk-weighted pooling, top10%/top25% high-risk-tile 평균, risk 분포 통계(mean/std/max/quartile/top5%/top10%)까지 여러 벡터를 concat**해서 정보를 압축하지 않는다. RNA 게이트가 이 풍부한 표현의 각 성분을 따로 조절할 수 있다는 게 핵심 차이.
-- **액션**: `AttentionPooling`(vit_m1.py)을 다성분 pooling 모듈로 교체 — 최소 mean/std/attention-weighted/top-k 정도부터 시작해 레퍼런스 수준(6개 성분)까지 단계적으로 확장 검토.
-- **노벨티 확보**: 다성분 pooling 자체는 레퍼런스와 겹치는 인프라 교정이라, 그 위에 이 프로젝트만의 차별점을 최대한 얹는다:
-  - **ViT self-attention(Nystromformer) 공간 컨텍스트 블록** — 레퍼런스는 좌표 임베딩만 더하고 패치 간 self-attention 층이 없음(각 타일 독립 임베딩 후 곧장 pooling). 우리는 pooling 전에 패치들이 서로 주목하는 self-attention이 있다 — "공간 문맥을 주고받은 뒤 다성분 요약"이라는 조합이 차별점.
-  - **RNA 개입 지점 체계적 비교(M4/M4A/M4B)** — 레퍼런스는 sigmoid 게이트 하나만 고정. 우리는 post-hoc/게이트-bias/co-attention/pre-ViT FiLM을 통제 비교한 사다리를 이미 구축함(0번 항목에서 M4A/M4B가 이기면 이 축의 의의가 더 커짐).
-  - **평가 rigor**: 멀티시드 + internal/external 이중 검증 + 프로토콜 난이도 자체의 별도 검증(0번 항목). 레퍼런스 쪽 보고서도 스스로 "반복 split/CV, bootstrap CI 부재"를 gap으로 지적했던 부분.
-  - 그 외 추가로 올릴 수 있는 노벨티 축이 있으면 이 항목 진행하면서 계속 탐색.
+### 2. RNA 브랜치 유전자 선정 기준 (레퍼런스 방법론 이식)
+**상태: 파이프라인 구축 + 검증 완료.** `data/select_rnaseq_genes.py` — 문헌 큐레이션 PDAC 유전자(8개 카테고리, 163개, `PDAC_LITERATURE_GENE_SETS`) + train split(both 기준) 내부 TCGA/CPTAC 각각 독립적인 univariate Cox score test + Stouffer meta-analysis(단순 결합, `meta_z = sum(z)/sqrt(2)`)로 순위 산정, 상위 1000/1500/2000개 저장. `data/dataset.py::literature_guided_gene_ids(top_n)`로 로드, `train.py --rna-genes literature_{1000,1500,2000}`로 사용(wandb에 `_EX` 접미사 자동 부착).
+
+- **확인된 사실**: 인코더 폭만 넓힌 M6X는 M6 대비 미미한 변화(internal -0.02, external +0.02)였지만, **유전자셋 자체를 literature_1500으로 바꾸자 PMA 기준 internal이 0.583→0.656으로 크게 뛰었다**(1번 항목 참조) — "인코더 폭보다 유전자 선정 기준(어떤 유전자를 보는가)이 핵심"이었다는 가설이 사실상 확인됨.
+- **다음 액션**: 1000/2000개 버전과도 비교(1500이 최적인지), M6/M6X 자체도 이 유전자셋으로 재검증.
 
 ---
 
 ## 중간 우선순위
-
-### 2. RNA 브랜치 유전자 선정 기준 (레퍼런스 참고)
-현재 339개(Bailey 2016 + Moffitt 2015 subtype 분류용) 유전자 사용. 레퍼런스는 1000~2000개를 문헌 큐레이션 9개 카테고리 + train split 내부 univariate Cox score test + Stouffer meta-analysis로 선정(생존 예측에 직접 최적화).
-
-- **확인된 사실**: 인코더 폭만 레퍼런스 사양(64→256차원, dropout 0.25)으로 넓힌 M6X는 M6 대비 internal -0.02, external +0.02 — 방향은 긍정적이나 크지 않음. "개수"보다 "선정 기준"이 핵심일 가능성.
-- **다음 액션**: train split 내부 Cox score test + Stouffer meta-analysis 파이프라인 구축(`scripts/select_rnaseq_gene_features.py` 참고), literature-curated seed gene 목록 정리.
 
 ### 3. 학습 하이퍼파라미터 검증 (light + WSI 모델 모두)
 - **WSI-free 모델(M5/M6/M6X/M7)**: `train_light.py`(`LightTrainConfig`, lr=1e-3)가 아직 검증된 값이 아님 — 스모크 테스트에서 lr=1e-3이 M6를 train_c_index 0.99까지 과적합시키는 것도 확인했다. lr 스윕(1e-5/1e-4/1e-3/3e-3 등) 필요.

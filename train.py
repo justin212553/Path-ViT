@@ -485,6 +485,10 @@ def main():
         model_prefix = "M1"
     if args.backbone != "resnet50":
         model_prefix += f"_{args.backbone}"
+    if args.rna_genes != "subtype":
+        # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
+        # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
+        model_prefix += "_EX"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -673,6 +677,10 @@ def main():
     # backbone을 태그에 안 넣으면 --backbone uni/resnet50을 오가며 돌릴 때 같은 파일을 덮어써서
     # 서로 다른 feature 차원의 checkpoint가 섞여버린다.
     tag = args.dataset if args.backbone == "resnet50" else f"{args.dataset}_{args.backbone}"
+    if args.rna_genes != "subtype":
+        # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
+        # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.
+        tag += "_EX"
     if args.M4:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna.pt"
     elif args.M4A:
