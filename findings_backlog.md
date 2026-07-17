@@ -22,7 +22,7 @@
 - **해석**: 병리 인코더/MIL 집계 자체는 문제가 아니다(M1이 이미 맞아떨어지므로). 격차는 clinical+RNA를 WSI와 **결합(fusion)하는 방식**에서 발생한다. 유력 원인: 우리 WSI 표현이 ABMIL로 만든 단일 벡터라 RNA가 조절할 "손잡이"가 너무 적다(아래 1번 항목) — 개입 *지점*을 바꿔봐도 안 되니, 개입 *대상*(표현 자체의 풍부함)을 바꿔야 한다는 쪽으로 결론.
 
 ### 1. ABMIL 단일 벡터 압축 → 다성분(multi-component) pooling + co-attention (PMA) + 레퍼런스식 유전자 재선정
-**상태: 1차 검증 완료, 지금까지 가장 뚜렷한 개선.**
+**상태: PMA(subtype 유전자)는 external 재현 안 됐지만, PMA_EX(literature_1500)는 external에서도 재현됨 — 지금까지 나온 모델 중 internal/external 모두 최고.**
 
 | | Internal C-index | HR | log-rank p |
 |---|---|---|---|
@@ -36,7 +36,45 @@
 - **주의**: seed42(0.604)/seed84(0.630)는 seed126(0.733)보다 수수함 — 평균이 진짜 실력인지 seed126이 특히 잘 맞은 표본인지 추가 시드로 확인 필요. 그래도 최소값(0.604)조차 이전 최고 기록(PMA-subtype 0.583)보다 높다는 점은 고무적.
 - **문제의 정확한 위치(다성분 pooling 자체)**: "ABMIL이냐 CLAM이냐"가 핵심이 아니었다 — CLAM(Lu et al. 2021)도 내부적으로 동일한 gated attention pooling을 쓰고 최종 표현은 여전히 압축 벡터 1개다. 레퍼런스가 쓰는 Morphology Burden Pooling처럼 **여러 통계적 관점을 압축 없이 병렬로 유지**하는 게 핵심이었다.
 - **노벨티**: ViT self-attention(Nystromformer) 공간 컨텍스트 블록(레퍼런스에는 없음) + RNA 개입 지점 체계적 비교(M4/M4A/M4B/PM4/PMA 사다리, 레퍼런스는 게이트 하나만 고정) + 멀티시드/internal-external/both 프로토콜 rigor — 레퍼런스와 겹치는 다성분 pooling·유전자 재선정 인프라 위에 이 세 축을 얹은 조합이 차별점.
-- **다음 액션**: (a) PMA_EX 추가 시드로 seed126이 이상치인지 확인, (b) 같은 유전자셋을 M4/M4A/PM4에도 적용해 "다성분+co-attention" 조합이 정말 필요한지 vs 유전자셋만으로도 되는지 분리, (c) external 프로토콜에서도 재현되는지 확인(지금은 both만 확인).
+- **(c) external 검증 결과 — 재현 안 됨**: PMA(subtype 유전자)를 `--external`(3시드×tcga/cptac)로 재검증한 결과:
+
+  | | Internal | External |
+  |---|---|---|
+  | M1 | 0.550 | 0.468 |
+  | M4 | 0.510 | 0.512 |
+  | M4A | 0.552 | 0.530 |
+  | M4B | 0.509 | 0.514 |
+  | **PMA** | 0.528 | **0.528** |
+  | M7(WSI 없음) | — | 0.575 |
+
+  PMA의 external(0.528)이 M4A(0.530)와 사실상 동률이고, M4/M4B와 같은 좁은 범위(0.51~0.53)에 몰림 — both에서 보인 우위(0.583, 최고 기록)가 **진짜 cross-institution 일반화에서는 사라짐**. M7(0.575)도 여전히 못 넘음. 다성분 pooling+co-attention *만으로는* 진짜 일반화가 개선되지 않는다는 뜻.
+
+- **(d) PMA_EX(literature_1500) external 검증 — 재현됨, 지금까지 최고 성적**: (c)에서 빠졌던 PMA_EX를 동일하게 `--external`(3시드×tcga/cptac)로 검증. (M7만 `train_light.py`가 time-dependent AUC를 아예 계산하지 않아 AUC 열이 없음.)
+
+  | | Internal C | Internal HR | Internal p | Internal AUC | External C | External HR | External p | External AUC |
+  |---|---|---|---|---|---|---|---|---|
+  | M1 | 0.550 | 1.106 | 0.629 | 0.518 | 0.468 | 0.803 | 0.387 | 0.464 |
+  | M4 | 0.510 | 1.398 | 0.425 | 0.510 | 0.512 | 1.031 | 0.252 | 0.535 |
+  | M4A | 0.552 | 1.422 | 0.368 | 0.531 | 0.529 | 1.117 | 0.483 | 0.545 |
+  | M4B | 0.509 | 1.481 | 0.402 | 0.509 | 0.514 | 1.089 | 0.187 | 0.538 |
+  | M7(WSI 없음) | 0.612 | 2.134 | 0.109 | — | 0.575 | 1.453 | 0.197 | — |
+  | PMA (subtype) | 0.528 | 1.355 | 0.422 | 0.567 | 0.528 | 1.148 | 0.341 | 0.563 |
+  | **PMA_EX (literature_1500)** | **0.613** | **1.615** | 0.407 | **0.608** | **0.603** | **1.781** | 0.150 | **0.610** |
+
+  PMA_EX는 internal(0.613)·external(0.603) 둘 다 이전 최고였던 M7(0.612/0.575)을 넘어섰고, external HR(1.781)·external AUC(0.610)도 전체 모델 중 최고(M4A 0.545, PMA 0.563 대비 뚜렷한 격차). external p 평균(0.150)은 유의하지 않지만, 시드별로 보면 6개 중 5개가 p<0.01(0.0, 0.0011, 0.0024, 0.0069, 0.0044)이고 단 하나(cptac seed84, c=0.512/AUC=0.508/p=0.883)가 평균을 끌어올림 — **아웃라이어 하나를 빼면 사실상 일관되게 유의미한 신호**.
+
+  **PMA_EX 시드별 상세**:
+
+  | 코호트 | seed | internal C | internal AUC | external C | external HR | external p | external AUC |
+  |---|---|---|---|---|---|---|---|
+  | tcga | 42 | 0.569 | 0.583 | 0.625 | 2.325 | 0.000 | 0.647 |
+  | tcga | 84 | 0.642 | 0.491 | 0.632 | 1.840 | 0.001 | 0.657 |
+  | tcga | 126 | 0.635 | 0.570 | 0.598 | 1.765 | 0.002 | 0.590 |
+  | cptac | 42 | 0.569 | 0.550 | 0.628 | 1.839 | 0.007 | 0.624 |
+  | cptac | 84 | 0.601 | 0.697 | 0.512 | 1.033 | 0.883 | 0.508 |
+  | cptac | 126 | 0.662 | 0.758 | 0.621 | 1.882 | 0.004 | 0.631 |
+  → PMA(subtype)와 PMA_EX(literature_1500)의 대비로, 1번 항목(다성분 pooling 아키텍처) 자체는 external 일반화에 크게 기여하지 않았고, **2번 항목(레퍼런스식 유전자 재선정)이 진짜 기여 요인이었다**는 게 명확해짐 — "both에서만 좋고 external엔 재현 안 되는 착시"라는 이전 결론은 PMA(subtype)에 한정된 얘기였다.
+- **남은 다음 액션**: (a) 같은 유전자셋(literature_1500)을 M4/M4A/PM4에도 적용해 "다성분+co-attention 아키텍처가 꼭 필요한지" vs "유전자셋 하나만으로도 M4/M4A가 비슷하게 좋아지는지" 분리 — 지금 유력 가설은 후자 쪽이지만 아직 미검증. (b) PMA_EX 추가 시드(both/external 둘 다)로 cptac seed84 아웃라이어가 노이즈인지 재현 가능한 약점인지 확인. (c) 1000/2000개 유전자 버전과 1500 비교(최적 개수 탐색).
 
 ### 2. RNA 브랜치 유전자 선정 기준 (레퍼런스 방법론 이식)
 **상태: 파이프라인 구축 + 검증 완료.** `data/select_rnaseq_genes.py` — 문헌 큐레이션 PDAC 유전자(8개 카테고리, 163개, `PDAC_LITERATURE_GENE_SETS`) + train split(both 기준) 내부 TCGA/CPTAC 각각 독립적인 univariate Cox score test + Stouffer meta-analysis(단순 결합, `meta_z = sum(z)/sqrt(2)`)로 순위 산정, 상위 1000/1500/2000개 저장. `data/dataset.py::literature_guided_gene_ids(top_n)`로 로드, `train.py --rna-genes literature_{1000,1500,2000}`로 사용(wandb에 `_EX` 접미사 자동 부착).
