@@ -32,12 +32,16 @@ class ViT_PM4(ViT_M1):
         rna_input_dim: int,
         precomputed: bool = True,
         backbone: str = "resnet50",
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
     ):
         super().__init__(cfg, precomputed, backbone)
         self.attn_pool = MultiComponentPooling(cfg.embed_dim)
         pooled_dim = MultiComponentPooling.NUM_COMPONENTS * cfg.embed_dim  # H_i flatten 차원 (4D)
 
-        self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
+        self.clinical_encoder = ClinicalEncoder(
+            cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+        )
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
         self.rna_gate = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim),
@@ -74,8 +78,14 @@ class ViT_PM4(ViT_M1):
         age_years: torch.Tensor,
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
+        stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
     ) -> torch.Tensor:
-        z_clinical = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+        stage_kwargs = {}
+        if stage_ord is not None:
+            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        z_clinical = self.clinical_encoder(
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+        ).squeeze(0)  # (D,)
         gate = self.rna_gate(z_rna)               # (4D,)
         h_i_gated = patient_embed * gate           # (4D,)
         return torch.cat([patient_embed, h_i_gated, z_clinical, z_rna], dim=-1)  # (10D,)

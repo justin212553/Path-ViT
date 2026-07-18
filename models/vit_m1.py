@@ -198,4 +198,6 @@ class ViT_M1(nn.Module):
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
         ctx_tokens   = self.vit(patch_tokens, coords)                          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
-        return {"embed": wsi_embed, "attn_weights": attn_weights}
+        # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
+        # (models/rna_predictor.py::RNAPredictionHead) 보조과제 입력으로만 쓰인다.
+        return {"embed": wsi_embed, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}

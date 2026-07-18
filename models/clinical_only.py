@@ -14,21 +14,36 @@ from config import ModelConfig
 
 
 class ClinicalOnly(nn.Module):
-    def __init__(self, cfg: ModelConfig, age_mean: float, age_std: float):
+    def __init__(
+        self, cfg: ModelConfig, age_mean: float, age_std: float,
+        use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None,
+    ):
         super().__init__()
-        self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
+        self.clinical_encoder = ClinicalEncoder(
+            cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+        )
         self.risk_head = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim),
             nn.Linear(cfg.embed_dim, 1),
         )
 
-    def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, age_years: torch.Tensor, sex_idx: torch.Tensor,
+        stage_ord: dict[str, torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         """
         Args:
             age_years: () — 환자 나이(연 단위) 스칼라 텐서
             sex_idx:   () — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
+            stage_ord: self.clinical_encoder.use_staging=True(--clinical-staging)일 때만 필요.
+                       {field: () 스칼라 long} — encode_stage_value() 규약.
         Returns:
             risk: (1,)
         """
-        z = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+        stage_kwargs = {}
+        if stage_ord is not None:
+            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        z = self.clinical_encoder(
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+        ).squeeze(0)  # (D,)
         return self.risk_head(z.unsqueeze(0)).view(1)

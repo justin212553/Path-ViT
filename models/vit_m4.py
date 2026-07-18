@@ -58,9 +58,13 @@ class ViT_M4(ViT_M1):
         rna_input_dim: int,
         precomputed: bool = True,
         backbone: str = "resnet50",
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
     ):
         super().__init__(cfg, precomputed, backbone)
-        self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
+        self.clinical_encoder = ClinicalEncoder(
+            cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+        )
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
 
         # ViT_M1이 만든 context 없는 attn_pool을, z_rna(D차원)를 attention 게이트에
@@ -91,6 +95,7 @@ class ViT_M4(ViT_M1):
         age_years: torch.Tensor,
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
+        stage_ord: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -99,8 +104,15 @@ class ViT_M4(ViT_M1):
             age_years:     ()   — 환자 나이(연 단위) 스칼라 텐서
             sex_idx:       ()   — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
             z_rna:         (D,) — encode_rna()로 미리 계산한 RNA 임베딩(슬라이드 루프와 공유)
+            stage_ord:     self.clinical_encoder.use_staging=True(--clinical-staging)일 때만
+                           필요. {field: () 스칼라 long} — encode_stage_value() 규약.
         Returns:
             fused: (3D,) — risk_head 입력
         """
-        z_clinical = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+        stage_kwargs = {}
+        if stage_ord is not None:
+            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        z_clinical = self.clinical_encoder(
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+        ).squeeze(0)  # (D,)
         return torch.cat([patient_embed, z_clinical, z_rna], dim=-1)  # (3D,)

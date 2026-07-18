@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
 
@@ -40,12 +41,17 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids
+from data.dataset import (
+    WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
+    pathway_category_gene_ids,
+)
 from models import (
     ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
-    ViT_PM4, ViT_PMA, ClinicalOnly, RNAOnly, RNAOnlyExtend,
+    ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
 )
-from models.clinical_encoder import age_stats_from_csv
+from models.rna_predictor import RNAPredictionHead
+from models.stage_predictor import StagePredictionHead
+from models.clinical_encoder import age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
@@ -83,8 +89,29 @@ def _identity_collate(batch: list) -> list:
     return batch[0]
 
 
-def _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size) -> torch.Tensor:
+def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] | None:
+    """patient_slides[0]에 STAGE_FIELDS(with_staging=True로 로드된 경우만)가 있으면 device로 옮겨
+    {field: () 스칼라 long} dict로 반환한다 - "미상"은 -1(data/dataset.py 규약). with_staging=False로
+    로드된 데이터셋(--clinical-staging/--stage-aux-weight 둘 다 미사용)이면 None."""
+    p = patient_slides[0]
+    if STAGE_FIELDS[0] not in p:
+        return None
+    return {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+
+
+def _patient_risk(
+    model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0
+):
     """환자 1명이 보유한 슬라이드 전부를 forward해 임베딩을 평균 풀링한 뒤 risk score(scalar)를 계산한다.
+    Returns: (risk, aux_loss, stage_aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서
+    (--rna-aux-weight, models/rna_predictor.py 참조), stage_aux_loss는 model.stage_aux_head가
+    있을 때만 텐서(--stage-aux-weight, models/stage_predictor.py 참조), 둘 다 없으면 None.
+
+    [patch_keep_frac, --patch-keep-frac(PatchDropout)] model.training(=True, train_one_epoch에서
+    호출될 때만)일 때만 슬라이드 패치를 이 비율만큼 랜덤 서브샘플한다 — val/test/external
+    평가(evaluate(), model.eval())에서는 항상 전체 패치를 그대로 쓴다(평가 지표 안정성 유지).
+    mean/std/attn-weighted/top-k pooling은 전부 N에 대해 이미 정규화돼 있어 별도 스케일
+    보정 없이 인덱스만 서브셋으로 잘라도 된다(findings_backlog.md 7번 항목).
 
     [--M2/--M4/--M4A/--M4B] model이 clinical_encoder(및 rna_encoder)를 보유하면, age/sex(/rna)는
     슬라이드가 아니라 환자 단위 메타데이터이므로 슬라이드 평균 풀링 이후
@@ -105,45 +132,93 @@ def _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
             p = patient_slides[0]
             if hasattr(model, "rna_encoder"):
                 rna = p["rna"].to(device, non_blocking=True)
-                return model(rna)
+                return model(rna), None, None
             age_years = p["age_years"].to(device, non_blocking=True)
             sex_idx   = p["sex_idx"].to(device, non_blocking=True)
-            return model(age_years, sex_idx)
+            stage_kwargs = {}
+            if getattr(model, "clinical_encoder", None) is not None and model.clinical_encoder.use_staging:
+                stage_kwargs["stage_ord"] = _stage_ord_from_patient(patient_slides, device)
+            return model(age_years, sex_idx, **stage_kwargs), None, None
 
     with amp_ctx:
         z_rna = None
+        rna_true = None
         if hasattr(model, "rna_encoder"):
             rna = patient_slides[0]["rna"].to(device, non_blocking=True)
             z_rna = model.encode_rna(rna)  # (D,)
+            rna_true = rna
 
         slide_embeds = []
+        slide_meanpool_embeds = []
         for slide in patient_slides:
-            coords = slide["coords"].to(device, non_blocking=True)
+            coords = slide["coords"]
+            features = slide.get("features")
+            patch_paths = slide.get("patch_paths")
+
+            if model.training and patch_keep_frac < 1.0:
+                n = coords.shape[0]
+                k = max(1, round(n * patch_keep_frac))
+                if k < n:
+                    idx = torch.randperm(n)[:k]
+                    coords = coords[idx]
+                    if features is not None:
+                        features = features[idx]
+                    if patch_paths is not None:
+                        patch_paths = [patch_paths[i] for i in idx.tolist()]
+
+            coords = coords.to(device, non_blocking=True)
             forward_kwargs = {"rna_context": z_rna} if z_rna is not None else {}
-            if "features" in slide:
-                out = model(coords, features=slide["features"], **forward_kwargs)
+            if features is not None:
+                out = model(coords, features=features, **forward_kwargs)
             else:
-                out = model(coords, patch_paths=slide["patch_paths"],
+                out = model(coords, patch_paths=patch_paths,
                              transform=transform, chunk_size=chunk_size, **forward_kwargs)
             slide_embeds.append(out["embed"])
+            if "meanpool_embed" in out:
+                slide_meanpool_embeds.append(out["meanpool_embed"])
 
         patient_embed = torch.stack(slide_embeds).mean(dim=0)      # (D,) — 슬라이드 평균 풀링
 
-        if hasattr(model, "rna_encoder"):
+        patient_meanpool = None
+        if slide_meanpool_embeds and (hasattr(model, "rna_aux_head") or hasattr(model, "stage_aux_head")):
+            patient_meanpool = torch.stack(slide_meanpool_embeds).mean(dim=0)  # (D,) — RNA/clinical-free
+
+        aux_loss = None
+        if hasattr(model, "rna_aux_head") and patient_meanpool is not None:
+            rna_pred = model.rna_aux_head(patient_meanpool)
+            aux_loss = F.mse_loss(rna_pred, rna_true)
+
+        stage_aux_loss = None
+        if hasattr(model, "stage_aux_head") and patient_meanpool is not None:
+            stage_ord = _stage_ord_from_patient(patient_slides, device)
+            stage_aux_loss = model.stage_aux_head.loss(
+                patient_meanpool, stage_ord["ajcc_t"], stage_ord["tumor_grade"]
+            )
+
+        if hasattr(model, "combine_with_clinical_rna"):
             age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
-            patient_embed = model.combine_with_clinical_rna(patient_embed, age_years, sex_idx, z_rna)  # (3D,)
-        elif hasattr(model, "clinical_encoder"):
+            stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
+            patient_embed = model.combine_with_clinical_rna(
+                patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord
+            )  # (3D,)
+        elif hasattr(model, "combine_with_clinical"):
+            # --M2_FF: rna_encoder는 있지만(FFN 직전 FiLM용) 최종 결합엔 RNA를 직접 노출하지 않는
+            # 모델이라, encoder 존재 여부가 아니라 결합 메서드 존재 여부로 분기해야 한다.
             age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
-            patient_embed = model.combine_with_clinical(patient_embed, age_years, sex_idx)  # (2D,)
+            stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
+            patient_embed = model.combine_with_clinical(
+                patient_embed, age_years, sex_idx, stage_ord=stage_ord
+            )  # (2D,)
 
         risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)  # (1,)
-    return risk
+    return risk, aux_loss, stage_aux_loss
 
 
 def train_one_epoch(
-    model, loader, optimizer, cfg, device, amp_ctx, transform
+    model, loader, optimizer, cfg, device, amp_ctx, transform,
+    patch_keep_frac: float = 1.0, rna_aux_weight: float = 0.0, stage_aux_weight: float = 0.0,
 ) -> float:
     model.train()
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
@@ -153,10 +228,10 @@ def train_one_epoch(
     chunk_size    = cfg.train.cnn_chunk_size
     batch_size    = cfg.train.cox_batch_size
 
-    risks, times, events = [], [], []
+    risks, times, events, aux_losses, stage_aux_losses = [], [], [], [], []
 
     def _flush():
-        nonlocal risks, times, events, total_loss, total_batches
+        nonlocal risks, times, events, aux_losses, stage_aux_losses, total_loss, total_batches
         if not risks:
             return
         risk_t  = torch.cat(risks)
@@ -164,6 +239,15 @@ def train_one_epoch(
         event_t = torch.cat(events).to(device)
 
         loss = cox_ph_loss(risk_t, time_t, event_t)
+        if rna_aux_weight > 0 and aux_losses:
+            # --rna-aux-weight(models/rna_predictor.py): WSI 표현이 RNA 발현도 예측하도록
+            # 보조 loss를 더한다 — 생존 라벨(환자당 1개, censoring으로 더 약함)만으로
+            # 62만 파라미터짜리 WSI 브랜치를 학습시키는 게 병목이라는 진단(model_zoo.md)에 대한
+            # 대응. 결합 방식이 아니라 학습 신호 자체를 보강한다.
+            loss = loss + rna_aux_weight * torch.stack(aux_losses).mean()
+        if stage_aux_weight > 0 and stage_aux_losses:
+            # --stage-aux-weight(models/stage_predictor.py): 위와 동일 원리, 타깃만 T-stage/grade.
+            loss = loss + stage_aux_weight * torch.stack(stage_aux_losses).mean()
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -171,16 +255,22 @@ def train_one_epoch(
 
         total_loss    += loss.item()
         total_batches += 1
-        risks, times, events = [], [], []
+        risks, times, events, aux_losses, stage_aux_losses = [], [], [], [], []
 
     for patient_slides in loader:                # 환자 1명 분량의 슬라이드 리스트
         if len(patient_slides) == 0:
             continue
-        risk = _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
+        risk, aux_loss, stage_aux_loss = _patient_risk(
+            model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac
+        )
 
         risks.append(risk)
         times.append(patient_slides[0]["OS_time"])
         events.append(patient_slides[0]["OS_event"])
+        if aux_loss is not None:
+            aux_losses.append(aux_loss)
+        if stage_aux_loss is not None:
+            stage_aux_losses.append(stage_aux_loss)
 
         if len(risks) >= batch_size:
             _flush()
@@ -199,7 +289,7 @@ def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
     for patient_slides in loader:
         if len(patient_slides) == 0:
             continue
-        risk = _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
+        risk, _, _ = _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
 
         all_risks.append(risk.float().item())
         all_times.append(float(patient_slides[0]["OS_time"].item()))
@@ -236,13 +326,51 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rna-genes", type=str, default="subtype",
-        choices=["subtype", "literature_1000", "literature_1500", "literature_2000"],
+        choices=["subtype", "literature_1000", "literature_1500", "literature_2000", "pathway8"],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
              "literature_{1000,1500,2000}: data/select_rnaseq_genes.py 산출물 — 문헌 큐레이션 "
              "PDAC 유전자를 train split 내부 Cox score test 순위로 우선 배치하고 나머지를 "
              "Cox 순위로 채운, 생존 예측에 직접 최적화된 유전자셋(레퍼런스 방법론 이식). "
-             "미리 `python -m data.select_rnaseq_genes`로 뽑아둬야 한다.",
+             "pathway8: 개별 유전자 대신 문헌 큐레이션 8개 생물학적 카테고리의 평균 z-score "
+             "(카테고리당 1개, 총 8차원) - SurvPath의 pathway token 방식. 표본 대비 차원을 "
+             "크게 줄인다. 미리 `python -m data.select_rnaseq_genes`로 뽑아둬야 한다.",
+    )
+    parser.add_argument(
+        "--patch-keep-frac", type=float, default=1.0,
+        help="PatchDropout(패치 단위 서브샘플링, findings_backlog.md 7번 항목). 1.0(기본)이면 "
+             "비활성 - 매 학습 epoch마다 슬라이드 패치를 이 비율만큼 랜덤 서브셋만 사용한다 "
+             "(val/test/external 평가는 항상 전체 패치 사용, 지표 안정성 유지). WSI 모델(--M1 "
+             "등 WSI를 쓰는 모든 --M*)에 적용 가능. 1.0 미만이면 wandb/checkpoint에 _SS 접미사가 "
+             "자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--rna-aux-weight", type=float, default=0.0,
+        help="WSI 표현이 RNA 발현도 예측하도록 하는 보조과제(auxiliary task) 가중치, "
+             "models/rna_predictor.py::RNAPredictionHead. 0.0(기본)이면 비활성. RNA를 쓰는 "
+             "모델(--M4/--M4A/--M4B/--PM4/--PMA)에서만 적용되며(rna_encoder 필요), attn_pool의 "
+             "RNA 개입과 무관하게 ViT 직후 mean-pooled 표현(RNA-free)에서 예측한다 - HE2RNA류 "
+             "설계. cox loss에 이 가중치를 곱해 더한다. 0.0 초과면 wandb/checkpoint에 _AUX "
+             "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--clinical-staging", action="store_true",
+        help="ClinicalEncoder 입력에 age/sex 뿐 아니라 AJCC 병기(T/N/M)+grade도 추가한다 "
+             "(models/clinical_encoder.py::ClinicalEncoder(use_staging=True)). data/clinical_"
+             "{tcga,cptac}.csv를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/--PMA/--M4A_FF/--M2_FF/--M5)"
+             "에서만 사용 가능. 기본은 미사용(age/sex만) - 'age/sex만 쓰라'는 기존 지시가 있어 "
+             "두 버전(있음/없음)을 다 비교할 수 있게 별도 플래그로 뒀다. 켜면 wandb/checkpoint에 "
+             "_STG 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--stage-aux-weight", type=float, default=0.0,
+        help="WSI 표현이 T-stage/grade도 예측하도록 하는 보조과제(auxiliary task) 가중치, "
+             "models/stage_predictor.py::StagePredictionHead. --rna-aux-weight와 동일한 설계 "
+             "(RNA-free/clinical-free mean-pooled 표현에서 예측, 예측값은 버리고 그래디언트만 "
+             "WSI 인코더 정규화에 쓴다). N/M-stage는 원발암 WSI만으로 판단 근거가 없어 T-stage/"
+             "grade만 타깃으로 한다. WSI를 쓰는 모델(--M1 등, hasattr(model,'cnn'))에서만 적용 "
+             "가능. 0.0(기본)이면 비활성, 0.0 초과면 wandb/checkpoint에 _AUX2 접미사가 자동으로 "
+             "붙는다(--rna-aux-weight의 _AUX와 구분).",
     )
     parser.add_argument(
         "--external", action="store_true",
@@ -263,6 +391,16 @@ def _parse_args() -> argparse.Namespace:
              "resnet50_norm은 Macenko stain-normalized 후 같은 ResNet50/Lunit SwAV로 재추출한 "
              "feature(features_norm.pt, utils/extract_features_stain_norm.py) — 인코더 자체는 "
              "resnet50과 동일(2048-dim), 캐싱 파일만 다르다.",
+    )
+    parser.add_argument(
+        "--patches-root-tcga", type=str, default=None,
+        help="cfg.data.patches_root_tcga 덮어쓰기(기본: config.py 값 그대로, data/patches_tcga). "
+             "재타일링된 패치(예: data/patches_tcga_512)로 학습/평가할 때 사용.",
+    )
+    parser.add_argument(
+        "--patches-root-cptac", type=str, default=None,
+        help="cfg.data.patches_root_cptac 덮어쓰기(기본: config.py 값 그대로, data/patches_cptac). "
+             "재타일링된 패치(예: data/patches_cptac_512)로 학습/평가할 때 사용.",
     )
     # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
     # 미지정 시 기존 ViT_M1(ViT+ABMIL)로 동작 — ablation baseline 유지
@@ -340,6 +478,20 @@ def _parse_args() -> argparse.Namespace:
              "data/rna_{tcga,cptac}.csv 필요. --fusion과 동시 사용 불가.",
     )
     model_group.add_argument(
+        "--M4A_FF", action="store_true",
+        help="ViT_M4A_FF 사용 (M4A와 동일, Nystromformer FFN 서브레이어만 제거한 맛보기 "
+             "ablation, attention이 만드는 공간 컨텍스트는 유지하고 그 이후 비선형 다듬기만 "
+             "없앤다). data/clinical_{tcga,cptac}.csv, data/rna_{tcga,cptac}.csv 필요. "
+             "--fusion과 동시 사용 불가.",
+    )
+    model_group.add_argument(
+        "--M2_FF", action="store_true",
+        help="ViT_M2_FF 사용 (M2에 RNA를 ViTEncoder FFN 직전 FiLM으로만 개입시키는 맛보기 "
+             "ablation, 최종 결합(risk_head 직전 concat)엔 RNA가 직접 노출되지 않고 ABMIL "
+             "대신 mean pooling을 쓴다). data/clinical_{tcga,cptac}.csv, "
+             "data/rna_{tcga,cptac}.csv 필요. --fusion과 동시 사용 불가.",
+    )
+    model_group.add_argument(
         "--M5", action="store_true",
         help="ClinicalOnly 사용 (Clinical(age/sex) MLP만, WSI/RNA 없음). "
              "data/clinical_{tcga,cptac}.csv 필요. WSI를 전혀 안 쓰므로 --backbone/--image/"
@@ -380,20 +532,32 @@ def main():
     if args.seed is not None:
         cfg.data.seed  = args.seed
         cfg.train.seed = args.seed
+    if args.patches_root_tcga is not None:
+        cfg.data.patches_root_tcga = args.patches_root_tcga
+    if args.patches_root_cptac is not None:
+        cfg.data.patches_root_cptac = args.patches_root_cptac
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
         raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
     if args.M2 and args.fusion:
         raise ValueError("--M2(Clinical fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
-    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA) and args.fusion:
+    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF) and args.fusion:
         raise ValueError("--M4/--M4A/--M4B/--PM4/--PMA(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if (args.M5 or args.M6 or args.M6X) and args.fusion:
         raise ValueError("--M5/--M6/--M6X(WSI-free)와 --fusion(Cluster fusion, WSI 전제)은 동시에 지원되지 않습니다.")
-    if args.avgpool and (args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M5 or args.M6 or args.M6X or args.fusion):
+    if args.avgpool and (args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5 or args.M6 or args.M6X or args.fusion):
         raise ValueError(
             "--avgpool은 --M1(기본)에서만 지원됩니다 — "
             "--M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion과 동시 사용 불가."
+        )
+    if args.clinical_staging and not (
+        args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
+        or args.M4A_FF or args.M2_FF or args.M5
+    ):
+        raise ValueError(
+            "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
+            "--PMA/--M4A_FF/--M2_FF/--M5)에서만 사용 가능합니다."
         )
     if args.fusion and args.backbone != "resnet50":
         raise ValueError(
@@ -423,7 +587,7 @@ def main():
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
     # 정규화" 관례와 동일). dataset="both"면 두 코호트 clinical.csv를 합쳐 통계를 계산한다.
-    if args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M5:
+    if args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5:
         if args.dataset == "both":
             import pandas as pd
             ages = pd.concat([
@@ -436,17 +600,40 @@ def main():
     else:
         age_mean, age_std = None, None
 
+    # [Staging] --clinical-staging(ClinicalEncoder 입력) 또는 --stage-aux-weight(WSI 보조과제,
+    # models/stage_predictor.py::StagePredictionHead) 중 하나라도 켜져 있으면 T/N/M/grade 순서형
+    # 정규화 통계가 필요하다 - age_mean/age_std와 동일한 관례로 학습 코호트에서 계산해 고정한다.
+    with_staging = args.clinical_staging or args.stage_aux_weight > 0
+    if with_staging:
+        import pandas as pd
+        if args.dataset == "both":
+            stage_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"]),
+                pd.read_csv(CLINICAL_PATHS["cptac"]),
+            ])
+        else:
+            stage_df = pd.read_csv(CLINICAL_PATHS[args.dataset])
+        stage_stats = stage_stats_from_df(stage_df)
+    else:
+        stage_stats = None
+
     # [RNA] --M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X 시 RNAEncoder 입력 유전자셋을 --rna-genes로
     # 고른다 — 기본(subtype)은 Bailey/Moffitt subtype 분류용 ~340개, literature_{1000,1500,2000}은
     # data/select_rnaseq_genes.py 산출물(생존 예측에 직접 최적화된 유전자셋). WSISurvivalDataset에
     # 그대로 넘겨 실제 로드되는 컬럼과 rna_input_dim이 항상 일치하게 한다.
-    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M6 or args.M6X
+    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M6 or args.M6X
+    rna_pathway_categories = None
     if uses_rna:
-        rna_gene_ids = (
-            pdac_subtype_gene_ids() if args.rna_genes == "subtype"
-            else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
-        )
-        rna_input_dim = len(rna_gene_ids)
+        if args.rna_genes == "pathway8":
+            rna_pathway_categories = pathway_category_gene_ids()
+            rna_gene_ids  = None
+            rna_input_dim = len(rna_pathway_categories)
+        else:
+            rna_gene_ids = (
+                pdac_subtype_gene_ids() if args.rna_genes == "subtype"
+                else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
+            )
+            rna_input_dim = len(rna_gene_ids)
     else:
         rna_gene_ids = None
         rna_input_dim = None
@@ -469,6 +656,10 @@ def main():
         model_prefix = "PM4"
     elif args.PMA:
         model_prefix = "PMA"
+    elif args.M4A_FF:
+        model_prefix = "M4A_FF"
+    elif args.M2_FF:
+        model_prefix = "M2_FF"
     elif args.M5:
         model_prefix = "M5"
     elif args.M6:
@@ -485,10 +676,28 @@ def main():
         model_prefix = "M1"
     if args.backbone != "resnet50":
         model_prefix += f"_{args.backbone}"
-    if args.rna_genes != "subtype":
+    if args.rna_genes == "pathway8":
+        # _PW8 = 카테고리 평균 pathway 집계(8차원) 사용 표시 — literature_1500(_EX)과는
+        # 다른 압축 방식이라 섞이지 않게 별도 접미사를 쓴다.
+        model_prefix += "_PW8"
+    elif args.rna_genes != "subtype":
         # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
         # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
         model_prefix += "_EX"
+    if args.patch_keep_frac < 1.0:
+        # _SS = PatchDropout(패치 서브샘플링) 사용 표시 - 위 _EX와 같은 관례.
+        model_prefix += "_SS"
+    if args.rna_aux_weight > 0:
+        # _AUX = RNA 예측 보조과제(RNAPredictionHead) 사용 표시.
+        model_prefix += "_AUX"
+    if args.stage_aux_weight > 0:
+        # _AUX2 = T-stage/grade 예측 보조과제(StagePredictionHead) 사용 표시 — RNA 보조과제(_AUX)와
+        # 구분되는 별도 태그.
+        model_prefix += "_AUX2"
+    if args.clinical_staging:
+        # _STG = ClinicalEncoder 입력에 병기(T/N/M)+grade 추가 사용 표시 — 있음/없음 버전을
+        # 둘 다 비교할 수 있게 독립 접미사로 뒀다.
+        model_prefix += "_STG"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -522,6 +731,8 @@ def main():
                                            else "ViT_M4B" if args.M4B
                                            else "ViT_PM4" if args.PM4
                                            else "ViT_PMA" if args.PMA
+                                           else "ViT_M4A_FF" if args.M4A_FF
+                                           else "ViT_M2_FF" if args.M2_FF
                                            else "ClinicalOnly" if args.M5
                                            else "RNAOnly" if args.M6
                                            else "RNAOnlyExtend" if args.M6X
@@ -533,16 +744,21 @@ def main():
                 "age_mean":              age_mean,
                 "age_std":               age_std,
                 "rna_input_dim":         rna_input_dim,
+                "patch_keep_frac":       args.patch_keep_frac,
+                "rna_aux_weight":        args.rna_aux_weight,
+                "stage_aux_weight":      args.stage_aux_weight,
+                "clinical_staging":      args.clinical_staging,
                 "dataset":               args.dataset,
                 "external_dataset":      external_dataset,
             },
         )
 
-    with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M5
-    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M6 or args.M6X
+    with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5
+    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M6 or args.M6X
     ds_kwargs = dict(
-        with_clinical=with_clinical, with_rna=with_rna, feature_backbone=args.backbone,
-        rna_gene_ids=rna_gene_ids,
+        with_clinical=with_clinical, with_staging=with_staging, with_rna=with_rna,
+        feature_backbone=args.backbone,
+        rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
     )
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
@@ -584,30 +800,37 @@ def main():
     # RNAOnly       : RNA-seq MLP만, WSI/Clinical 없음 (--M6, 구색용 하한선)
     # RNAOnlyExtend : RNAOnly와 동일 유전자 입력, 인코더 폭만 레퍼런스 사양(G->256->256)으로
     #                 확장 (--M6X)
+    stage_kwargs = dict(use_staging=args.clinical_staging, stage_stats=stage_stats)
     if args.M4:
         model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                        precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                        precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M4A:
         model = ViT_M4A(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.PM4:
         model = ViT_PM4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.PMA:
         model = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+    elif args.M4A_FF:
+        model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                            precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+    elif args.M2_FF:
+        model = ViT_M2_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                           precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M5:
-        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std).to(device)
+        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std, **stage_kwargs).to(device)
     elif args.M6:
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
-                        precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+                        precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     elif args.avgpool:
@@ -616,6 +839,19 @@ def main():
         model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
+
+    if args.rna_aux_weight > 0:
+        if not hasattr(model, "rna_encoder"):
+            raise ValueError("--rna-aux-weight는 RNA를 쓰는 모델(--M4/--M4A/--M4B/--PM4/--PMA)에서만 사용 가능합니다.")
+        # nn.Module 속성으로 붙이면 PyTorch가 자동으로 서브모듈 등록 -> model.parameters()에
+        # 포함됨. optimizer 생성 *이전에* 붙여야 이 헤드의 파라미터도 학습된다.
+        model.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, rna_input_dim).to(device)
+
+    if args.stage_aux_weight > 0:
+        if not hasattr(model, "cnn"):
+            raise ValueError("--stage-aux-weight는 WSI를 쓰는 모델에서만 사용 가능합니다 (--M5/--M6/--M6X 불가).")
+        # rna_aux_head와 동일한 이유로 optimizer 생성 이전에 붙인다.
+        model.stage_aux_head = StagePredictionHead(cfg.model.embed_dim, stage_stats).to(device)
 
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
@@ -641,6 +877,12 @@ def main():
     elif args.PMA:
         print(f"Model: ViT_PMA (ViT+다성분 pooling + CoAttention(RNA query, 4개 관점) + "
               f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
+    elif args.M4A_FF:
+        print(f"Model: ViT_M4A_FF (M4A에서 Nystromformer FFN 서브레이어 제거, CoAttentionPooling(RNA query) + "
+              f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
+    elif args.M2_FF:
+        print(f"Model: ViT_M2_FF (M2 + RNA를 ViTEncoder FFN 직전 FiLM으로만 개입, mean pooling, "
+              f"최종 결합엔 RNA 미노출, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M5:
         print(f"Model: ClinicalOnly (Clinical age/sex MLP만, WSI/RNA 없음, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")
@@ -677,10 +919,20 @@ def main():
     # backbone을 태그에 안 넣으면 --backbone uni/resnet50을 오가며 돌릴 때 같은 파일을 덮어써서
     # 서로 다른 feature 차원의 checkpoint가 섞여버린다.
     tag = args.dataset if args.backbone == "resnet50" else f"{args.dataset}_{args.backbone}"
-    if args.rna_genes != "subtype":
+    if args.rna_genes == "pathway8":
+        tag += "_PW8"
+    elif args.rna_genes != "subtype":
         # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
         # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.
         tag += "_EX"
+    if args.patch_keep_frac < 1.0:
+        tag += "_SS"
+    if args.rna_aux_weight > 0:
+        tag += "_AUX"
+    if args.stage_aux_weight > 0:
+        tag += "_AUX2"
+    if args.clinical_staging:
+        tag += "_STG"
     if args.M4:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna.pt"
     elif args.M4A:
@@ -691,6 +943,10 @@ def main():
         ckpt_path = ckpt_dir / f"survival_{tag}_best_pm4.pt"
     elif args.PMA:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_pma.pt"
+    elif args.M4A_FF:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_m4a_ff.pt"
+    elif args.M2_FF:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_m2_ff.pt"
     elif args.M5:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_only.pt"
     elif args.M6:
@@ -710,7 +966,9 @@ def main():
     best_metrics = {}
     for epoch in range(cfg.train.epochs):
         lr_now        = optimizer.param_groups[0]["lr"]
-        loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform)
+        loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform,
+                                         patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
+                                         stage_aux_weight=args.stage_aux_weight)
         train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
         metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         val_td_auc    = compute_time_dependent_auc(
@@ -818,6 +1076,8 @@ def main():
                                           else "ViT_M4B" if args.M4B
                                           else "ViT_PM4" if args.PM4
                                           else "ViT_PMA" if args.PMA
+                                          else "ViT_M4A_FF" if args.M4A_FF
+                                          else "ViT_M2_FF" if args.M2_FF
                                           else "ClinicalOnly" if args.M5
                                           else "RNAOnly" if args.M6
                                           else "RNAOnlyExtend" if args.M6X

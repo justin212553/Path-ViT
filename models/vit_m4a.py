@@ -81,6 +81,9 @@ class ViT_M4A(ViT_M4):
         precomputed: bool = True,
         backbone: str = "resnet50",
         num_heads: int = 4,
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
     ):
-        super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone)
+        super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
+                          use_staging=use_staging, stage_stats=stage_stats)
         self.attn_pool = CoAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
