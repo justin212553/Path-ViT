@@ -61,7 +61,7 @@ FEATURES_FILENAME_BY_BACKBONE = {
     "uni":           FEATURES_UNI_FILENAME,
     "resnet50_norm": FEATURES_NORM_FILENAME,  # Macenko stain-normalized (utils/extract_features_stain_norm.py)
 }
-from models.clinical_encoder import SEX_TO_IDX
+from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value
 
 OS_LABEL_PATHS = {
     "tcga":  Path("data/os_labels_tcga.csv"),
@@ -132,6 +132,23 @@ def literature_guided_gene_ids(top_n: int = 1500) -> list[str]:
             f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes --n-genes {top_n}"
         )
     return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
+def pathway_category_gene_ids() -> dict[str, list[str]]:
+    """
+    literature_guided_gene_ids()의 대안 — 개별 유전자 1500개 대신, 문헌 큐레이션 PDAC 유전자
+    8개 카테고리(PDAC_LITERATURE_GENE_SETS, data/select_rnaseq_genes.py)를 카테고리 -> ENSG id
+    목록으로 반환한다. --rna-genes pathway8에서 사용 — WSISurvivalDataset이 카테고리별 유전자
+    z-score의 평균(카테고리당 1개, 총 8차원)을 RNA 입력으로 구성한다(SurvPath의 pathway token
+    방식과 같은 방향). literature_1500이 "순수 통계적 순위(Cox test)"로 차원을 줄였다면, 이건
+    "생물학적 도메인 지식(레퍼런스가 미리 정의한 8개 범주)"으로 줄이는 대안 축이다.
+    """
+    path = Path("data/rna_gene_selection/literature_curated_genes.csv")
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes")
+    df = pd.read_csv(path)
+    df = df[df["available"]]
+    return {cat: sorted(g["gene_id"].tolist()) for cat, g in df.groupby("category")}
 PATCHES_ROOT_ATTRS = {
     "tcga":  "patches_root_tcga",
     "cptac": "patches_root_cptac",
@@ -200,6 +217,12 @@ class WSISurvivalDataset(Dataset):
                        inner-join한다 — clinical 정보가 없는 case의 슬라이드는 제외되고,
                        각 아이템 dict에 age_years/sex_idx가 추가된다(models/vit_m2.py::ViT_M2,
                        train.py --M2 용).
+        with_staging:  with_clinical=True와 함께만 쓸 수 있다. True면 같은 clinical CSV에서
+                       AJCC 병기(T/N/M)+grade도 함께 join해, 각 아이템 dict에 STAGE_FIELDS
+                       (ajcc_t/ajcc_n/ajcc_m/tumor_grade) 각각을 순서형 정수 텐서로 추가한다
+                       (encode_stage_value() 규약 - "미상"은 -1). train.py --clinical-staging
+                       (ClinicalEncoder 입력에 병기 추가)과 --stage-aux-weight
+                       (models/stage_predictor.py, WSI 인코더 보조과제) 둘 다 이 플래그가 필요.
         with_rna:      True면 data/rna_{tcga,cptac}.csv(유전자 발현)를 case_id로 inner-join한다 —
                        RNA 정보가 없는 case의 슬라이드는 제외되고, 각 아이템 dict에 rna가
                        추가된다. 컬럼은 전체 protein-coding 유전자(~2만 개)가 아니라
@@ -229,9 +252,11 @@ class WSISurvivalDataset(Dataset):
         split: str = "train",
         transform=None,
         with_clinical: bool = False,
+        with_staging: bool = False,
         with_rna: bool = False,
         feature_backbone: str = "resnet50",
         rna_gene_ids: list[str] | None = None,
+        rna_pathway_categories: dict[str, list[str]] | None = None,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -242,13 +267,17 @@ class WSISurvivalDataset(Dataset):
                 f"feature_backbone must be one of {list(FEATURES_FILENAME_BY_BACKBONE)}, "
                 f"got {feature_backbone!r}"
             )
+        if with_staging and not with_clinical:
+            raise ValueError("with_staging=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
 
         self.transform        = transform or PATCH_TRANSFORM
         self.precomputed      = cfg.precomputed
         self.with_clinical    = with_clinical
+        self.with_staging     = with_staging
         self.with_rna         = with_rna
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
         self.rna_gene_ids     = rna_gene_ids
+        self.rna_pathway_categories = rna_pathway_categories
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -267,12 +296,20 @@ class WSISurvivalDataset(Dataset):
             merged = slide_df.merge(os_df[["case_id", "OS_time", "OS_event"]], on="case_id", how="inner")
 
             if with_clinical:
-                clinical_df = pd.read_csv(CLINICAL_PATHS[name])[["case_id", "age_years", "sex"]]
+                clinical_cols = ["case_id", "age_years", "sex"]
+                if with_staging:
+                    clinical_cols += list(STAGE_FIELDS)
+                clinical_df = pd.read_csv(CLINICAL_PATHS[name])[clinical_cols]
                 merged = merged.merge(clinical_df, on="case_id", how="inner")
 
             if with_rna:
-                rna_df       = pd.read_csv(RNA_PATHS[name])
-                target_ids   = set(self.rna_gene_ids) if self.rna_gene_ids is not None else set(pdac_subtype_gene_ids())
+                rna_df = pd.read_csv(RNA_PATHS[name])
+                if self.rna_pathway_categories is not None:
+                    # --rna-genes pathway8: 개별 유전자가 아니라 카테고리 평균 z-score를 쓴다 —
+                    # target_ids는 8개 카테고리에 속한 전체 유전자의 합집합.
+                    target_ids = set(g for genes in self.rna_pathway_categories.values() for g in genes)
+                else:
+                    target_ids = set(self.rna_gene_ids) if self.rna_gene_ids is not None else set(pdac_subtype_gene_ids())
                 gene_cols    = [c for c in rna_df.columns if c in target_ids]
                 if self.rna_gene_cols is None:
                     self.rna_gene_cols = gene_cols
@@ -281,11 +318,24 @@ class WSISurvivalDataset(Dataset):
                         f"[{name}] {RNA_PATHS[name]}의 유전자 컬럼이 다른 코호트와 다릅니다 — "
                         "data.extract_rna_clinical을 다시 실행해 공통 유전자셋을 맞추세요."
                     )
-                # 유전자 벡터는 case당 1번만 lookup에 저장하고(슬라이드 수만큼 중복 저장 방지),
-                # merged 테이블에는 필터링용 case_id만 inner-join한다.
-                self.rna_lookup.update(
-                    zip(rna_df["case_id"], rna_df[gene_cols].to_numpy(dtype="float32"))
-                )
+                rna_matrix = rna_df[gene_cols].to_numpy(dtype="float32")  # (num_cases, G)
+
+                if self.rna_pathway_categories is not None:
+                    # (num_cases, G) -> (num_cases, 8) : 카테고리별 유전자 z-score 평균으로 집계
+                    # (SurvPath의 pathway token 방식과 같은 방향 — 개별 유전자 대신 생물학적으로
+                    # 함께 작동하는 유전자 그룹의 평균 신호를 입력으로 써서 표본 대비 차원을 줄인다).
+                    col_index = {c: i for i, c in enumerate(gene_cols)}
+                    cat_names = sorted(self.rna_pathway_categories.keys())
+                    agg = np.zeros((rna_matrix.shape[0], len(cat_names)), dtype="float32")
+                    for ci, cat in enumerate(cat_names):
+                        idxs = [col_index[g] for g in self.rna_pathway_categories[cat] if g in col_index]
+                        agg[:, ci] = rna_matrix[:, idxs].mean(axis=1)
+                    rna_matrix = agg
+                    self.rna_category_names = cat_names
+
+                # 유전자(또는 카테고리) 벡터는 case당 1번만 lookup에 저장하고(슬라이드 수만큼
+                # 중복 저장 방지), merged 테이블에는 필터링용 case_id만 inner-join한다.
+                self.rna_lookup.update(zip(rna_df["case_id"], rna_matrix))
                 merged = merged.merge(rna_df[["case_id"]], on="case_id", how="inner")
 
             def _has_patches(slide_id: str, root=root) -> bool:
@@ -353,6 +403,10 @@ class WSISurvivalDataset(Dataset):
         if self.with_clinical:
             item["age_years"] = torch.tensor(row["age_years"], dtype=torch.float32)
             item["sex_idx"]   = torch.tensor(SEX_TO_IDX[row["sex"]], dtype=torch.long)
+            if self.with_staging:
+                for field in STAGE_FIELDS:
+                    ord_val = encode_stage_value(field, row[field])
+                    item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
 
         if self.with_rna:
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])

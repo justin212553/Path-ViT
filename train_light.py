@@ -37,7 +37,7 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids
+from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
 from models.clinical_encoder import age_stats_from_csv
 from utils import load_env, send_slack
@@ -161,6 +161,19 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--group-ts", type=str, default=None,
                          help="wandb Group 타임스탬프. train.py --group-ts와 동일한 관례.")
+    parser.add_argument(
+        "--rna-genes", type=str, default="subtype",
+        choices=["subtype", "literature_1000", "literature_1500", "literature_2000"],
+        help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. train.py --rna-genes와 동일한 관례 "
+             "(subtype 외 선택 시 wandb/checkpoint에 _EX 접미사 자동 부착).",
+    )
+    parser.add_argument(
+        "--lr", type=float, default=None,
+        help="cfg.light.lr(기본 1e-3) 덮어쓰기. findings_backlog.md 3번 항목 - lr=1e-3이 M6를 "
+             "train_c_index 0.99까지 과적합시키는 게 스모크 테스트로 확인된 바 있어, M7_EX 등 "
+             "baseline 수치를 lr=1e-5(WSI 모델과 동일)로 재검증할 때 사용. 기본값(None)과 다르면 "
+             "wandb/checkpoint에 _LR{lr} 접미사가 자동으로 붙는다.",
+    )
     model_group = parser.add_mutually_exclusive_group(required=True)
     model_group.add_argument("--M5", action="store_true", help="ClinicalOnly (age/sex만).")
     model_group.add_argument("--M6", action="store_true", help="RNAOnly (RNA-seq만).")
@@ -176,6 +189,8 @@ def main():
     if args.seed is not None:
         cfg.data.seed  = args.seed
         cfg.light.seed = args.seed
+    if args.lr is not None:
+        cfg.light.lr = args.lr
     set_seed(cfg.light.seed)
     device = torch.device(cfg.light.device)
     start_time = datetime.now()
@@ -202,9 +217,21 @@ def main():
     else:
         age_mean, age_std = None, None
 
-    rna_input_dim = len(pdac_subtype_gene_ids()) if with_rna else None
+    if with_rna:
+        rna_gene_ids = (
+            pdac_subtype_gene_ids() if args.rna_genes == "subtype"
+            else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
+        )
+        rna_input_dim = len(rna_gene_ids)
+    else:
+        rna_gene_ids, rna_input_dim = None, None
 
     model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7"
+    if args.rna_genes != "subtype":
+        model_prefix += "_EX"
+    if args.lr is not None and args.lr != 1e-3:
+        # _LR{lr} = cfg.light.lr(기본 1e-3) 이외 값 사용 표시 - train.py의 _EX/_SS/_AUX와 같은 관례.
+        model_prefix += f"_LR{args.lr:.0e}"
 
     if args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std).to(device)
@@ -229,12 +256,12 @@ def main():
                 "seed": cfg.light.seed, "warmup_epochs": cfg.light.warmup_epochs,
                 "cox_batch_size": cfg.light.cox_batch_size,
                 "embed_dim": cfg.model.embed_dim, "dropout": cfg.model.dropout,
-                "model": model_prefix, "rna_input_dim": rna_input_dim,
+                "model": model_prefix, "rna_input_dim": rna_input_dim, "rna_genes": args.rna_genes,
                 "dataset": args.dataset, "external_dataset": external_dataset,
             },
         )
 
-    ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna)
+    ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
     test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)

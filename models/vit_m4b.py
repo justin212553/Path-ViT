@@ -70,8 +70,11 @@ class ViT_M4B(ViT_M4):
         rna_input_dim: int,
         precomputed: bool = True,
         backbone: str = "resnet50",
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
     ):
-        super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone)
+        super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
+                          use_staging=use_staging, stage_stats=stage_stats)
         self.film = FiLMTokenConditioning(cfg.embed_dim, cfg.embed_dim)
         self.attn_pool = AttentionPooling(cfg.embed_dim)  # context 없는 일반 ABMIL로 복귀
 

@@ -28,12 +28,16 @@ class ViT_PMA(ViT_M1):
         precomputed: bool = True,
         backbone: str = "resnet50",
         num_heads: int = 2,
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
     ):
         super().__init__(cfg, precomputed, backbone)
         self.attn_pool = MultiComponentPooling(cfg.embed_dim)
         self.component_coattn = CoAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
 
-        self.clinical_encoder = ClinicalEncoder(cfg.embed_dim, age_mean, age_std)
+        self.clinical_encoder = ClinicalEncoder(
+            cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+        )
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
         # risk_head 입력: [z_wsi(D), z_clinical(D), z_rna(D)] = 3D
         self.risk_head = nn.Sequential(
@@ -53,7 +57,8 @@ class ViT_PMA(ViT_M1):
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
         ctx_tokens = self.vit(patch_tokens, coords)
         components, attn_weights = self.attn_pool(ctx_tokens)  # (4, D), (N,)
-        return {"embed": components, "attn_weights": attn_weights}
+        # meanpool_embed: --rna-aux-weight(models/rna_predictor.py) 보조과제 입력 전용.
+        return {"embed": components, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}
 
     def encode_rna(self, rna: torch.Tensor) -> torch.Tensor:
         return self.rna_encoder(rna.unsqueeze(0)).squeeze(0)
@@ -64,7 +69,13 @@ class ViT_PMA(ViT_M1):
         age_years: torch.Tensor,
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
+        stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
     ) -> torch.Tensor:
-        z_clinical = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+        stage_kwargs = {}
+        if stage_ord is not None:
+            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        z_clinical = self.clinical_encoder(
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+        ).squeeze(0)  # (D,)
         z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
         return torch.cat([z_wsi, z_clinical, z_rna], dim=-1)    # (3D,)

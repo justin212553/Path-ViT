@@ -182,6 +182,14 @@ def _extract_slide(slide_path: Path):
     """
     slide = openslide.OpenSlide(str(slide_path))
     native_mpp = _get_native_mpp(slide)
+    # 실제 WSI scanner의 native MPP는 항상 대략 0.05~5.0 micron/pixel 범위다. 메타데이터가
+    # 깨진 파일(예: mpp-x가 수백만 단위로 찍힌 라벨/매크로 이미지 오분류) 은 이 범위를 크게
+    # 벗어나는데, 그런 값을 그대로 쓰면 downsample_target이 사실상 0에 가까워져
+    # read_size_level0이 1픽셀로 붕괴하고 그리드 셀이 수백만 개로 폭증해 사실상 멈춘 것처럼
+    # 보인다(2026-07-17 CPTAC 재타일링에서 실제로 겪은 hang의 원인) — 조기에 명확한 에러로
+    # 걸러 _process_slide()의 기존 except 처리로 "failed"에 기록되게 한다.
+    if not (0.05 <= native_mpp <= 5.0):
+        raise ValueError(f"nonstandard native_mpp={native_mpp} (expected 0.05-5.0) - likely corrupted/mislabeled image, skipping")
     downsample_target = TARGET_MPP / native_mpp
 
     level = slide.get_best_level_for_downsample(downsample_target)
@@ -289,6 +297,21 @@ def _build_slide_list() -> list:
     return slides
 
 
+def _init_worker(root, out_dir, dataset, target_mpp, tile_size, num_io_threads):
+    """mp.Pool worker 초기화 콜백.
+
+    Windows(spawn)에서는 자식 프로세스가 모듈을 처음부터 다시 import하므로, main()이
+    실행 시점에 재할당한 전역값(ROOT/OUT_DIR/DATASET/TARGET_MPP/TILE_SIZE 등)을 상속받지
+    못하고 파일 상단에 적힌 기본값(cptac, 1.0 MPP, 1024px)으로 되돌아간다 — CLI로 다른 값을
+    줘도 워커에서는 조용히 무시되는 버그. Linux(fork)에서는 fork 시점에 부모의 메모리를
+    그대로 복사해 문제가 없었지만(SLURM/HPC에서 이 스크립트가 그동안 정상 동작한 이유),
+    두 플랫폼 모두에서 안전하도록 Pool(initializer=...)로 각 워커 프로세스 시작 시
+    명시적으로 전역값을 다시 설정한다."""
+    global ROOT, OUT_DIR, DATASET, TARGET_MPP, TILE_SIZE, NUM_IO_THREADS
+    ROOT, OUT_DIR, DATASET = root, out_dir, dataset
+    TARGET_MPP, TILE_SIZE, NUM_IO_THREADS = target_mpp, tile_size, num_io_threads
+
+
 def _process_slide(info):
     """
     단일 슬라이드를 처리하는 워커 함수.
@@ -366,7 +389,7 @@ def sample_tile_paths(tile_paths: list, split: str, max_tiles: int = MAX_TILES_P
 
 
 def main():
-    global NUM_WORKERS, NUM_IO_THREADS, ROOT, OUT_DIR, DATASET
+    global NUM_WORKERS, NUM_IO_THREADS, ROOT, OUT_DIR, DATASET, TARGET_MPP, TILE_SIZE
 
     cfg = DataConfig()
     wsi_roots     = {"cptac": cfg.wsi_root_cptac,     "tcga": cfg.wsi_root_tcga}
@@ -384,6 +407,12 @@ def main():
     parser.add_argument("--workers",    type=int, default=NUM_WORKERS,    help="mp.Pool process count")
     parser.add_argument("--io-threads", type=int, default=NUM_IO_THREADS, help="JPEG save threads per worker")
     parser.add_argument("--tiles-only", action="store_true", help="타일링만 하고 CNN feature 추출은 생략")
+    parser.add_argument("--target-mpp", type=float, default=TARGET_MPP,
+                         help=f"목표 해상도(micron/pixel). 기본값 {TARGET_MPP}(기존 파이프라인과 동일). "
+                              "재타일링 시 Lunit SwAV 사전학습 해상도(0.5 MPP)에 맞추려면 0.5로 지정.")
+    parser.add_argument("--tile-size", type=int, default=TILE_SIZE,
+                         help=f"타일 한 변 픽셀 크기. 기본값 {TILE_SIZE}. Lunit SwAV 사전학습 스펙에 "
+                              "맞추려면 512로 지정(--target-mpp 0.5와 함께 사용).")
     args = parser.parse_args()
 
     DATASET        = args.dataset
@@ -391,6 +420,8 @@ def main():
     OUT_DIR        = Path(args.output_dir or patches_roots[DATASET])
     NUM_WORKERS    = args.workers
     NUM_IO_THREADS = args.io_threads
+    TARGET_MPP     = args.target_mpp
+    TILE_SIZE      = args.tile_size
 
     job_id = os.environ.get("SLURM_JOB_ID", "local")
     tag    = f"job `{job_id}` task `{args.task_id}/{args.num_tasks}` [{DATASET}]"
@@ -413,7 +444,11 @@ def main():
         use_tqdm = False
 
     try:
-        with mp.Pool(processes=NUM_WORKERS) as pool:
+        with mp.Pool(
+            processes=NUM_WORKERS,
+            initializer=_init_worker,
+            initargs=(ROOT, OUT_DIR, DATASET, TARGET_MPP, TILE_SIZE, NUM_IO_THREADS),
+        ) as pool:
             results = pool.imap_unordered(_process_slide, slides)
             if use_tqdm:
                 results = tqdm(results, total=len(slides), desc=f"task {args.task_id}", unit="slide")
