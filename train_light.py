@@ -174,6 +174,28 @@ def _parse_args() -> argparse.Namespace:
              "baseline 수치를 lr=1e-5(WSI 모델과 동일)로 재검증할 때 사용. 기본값(None)과 다르면 "
              "wandb/checkpoint에 _LR{lr} 접미사가 자동으로 붙는다.",
     )
+    parser.add_argument(
+        "--weight-decay", type=float, default=None,
+        help="cfg.light.weight_decay(기본 1e-2) 덮어쓰기. 레퍼런스(Leeyoungsup/"
+             "pancreatic_cancer_pathology) M7 학습 레시피(weight_decay=1e-3)를 맞출 때 사용. "
+             "기본값(None)과 다르면 wandb/checkpoint에 _WD{wd} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=None,
+        help="cfg.light.epochs(기본 30) 덮어쓰기. 레퍼런스 M7 레시피(epochs=100)를 맞출 때 사용.",
+    )
+    parser.add_argument(
+        "--patience", type=int, default=None,
+        help="Early stopping patience(epoch 수) - val_c_index가 이 횟수만큼 연속으로 최고 기록을 "
+             "못 넘으면 조기 종료한다. 기본값(None)이면 비활성(--epochs 끝까지 고정 학습, 기존 동작). "
+             "레퍼런스 M7 레시피는 patience=20.",
+    )
+    parser.add_argument(
+        "--match-reference-cohort", action="store_true",
+        help="레퍼런스(Leeyoungsup/pancreatic_cancer_pathology) M4/M7의 케이스 포함 기준"
+             "(24개월 시점 생존 여부 확정 + WSI 보유, data/reference_cohort.py 참조)으로 "
+             "case를 제한한다. 기본은 미사용(우리 기존 cohort 그대로).",
+    )
     model_group = parser.add_mutually_exclusive_group(required=True)
     model_group.add_argument("--M5", action="store_true", help="ClinicalOnly (age/sex만).")
     model_group.add_argument("--M6", action="store_true", help="RNAOnly (RNA-seq만).")
@@ -191,6 +213,10 @@ def main():
         cfg.light.seed = args.seed
     if args.lr is not None:
         cfg.light.lr = args.lr
+    if args.weight_decay is not None:
+        cfg.light.weight_decay = args.weight_decay
+    if args.epochs is not None:
+        cfg.light.epochs = args.epochs
     set_seed(cfg.light.seed)
     device = torch.device(cfg.light.device)
     start_time = datetime.now()
@@ -232,6 +258,10 @@ def main():
     if args.lr is not None and args.lr != 1e-3:
         # _LR{lr} = cfg.light.lr(기본 1e-3) 이외 값 사용 표시 - train.py의 _EX/_SS/_AUX와 같은 관례.
         model_prefix += f"_LR{args.lr:.0e}"
+    if args.weight_decay is not None and args.weight_decay != 1e-2:
+        model_prefix += f"_WD{args.weight_decay:.0e}"
+    if args.match_reference_cohort:
+        model_prefix += "_REFCOHORT"
 
     if args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std).to(device)
@@ -261,7 +291,17 @@ def main():
             },
         )
 
-    ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids)
+    restrict_case_ids = None
+    if args.match_reference_cohort:
+        from data.reference_cohort import reference_eligible_case_ids
+        target_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+        if external_dataset:
+            target_datasets = list(set(target_datasets) | {external_dataset})
+        restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
+        print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
+
+    ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids,
+                      restrict_case_ids=restrict_case_ids)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
     test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
@@ -291,6 +331,7 @@ def main():
     ckpt_path = ckpt_dir / f"survival_{args.dataset}_best_{model_prefix.lower()}_light.pt"
 
     best_score, best_metrics = -1.0, {}
+    epochs_since_improvement = 0
     for epoch in range(cfg.light.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
         loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size)
@@ -317,11 +358,18 @@ def main():
         if score > best_score:
             best_score = score
             best_metrics = {**metrics, "epoch": epoch + 1}
+            epochs_since_improvement = 0
             torch.save({"model_state_dict": model.state_dict(), "epoch": epoch + 1, "val_c_index": best_score}, ckpt_path)
             print(f"  -> checkpoint saved (c_index={best_score:.4f})")
             if WANDB_AVAILABLE:
                 wandb.run.summary["best_val_c_index"] = best_score
                 wandb.run.summary["best_epoch"] = epoch + 1
+        else:
+            epochs_since_improvement += 1
+            if args.patience is not None and epochs_since_improvement >= args.patience:
+                print(f"  -> early stopping (patience={args.patience}, "
+                      f"best epoch {best_metrics.get('epoch', '-')} c_index={best_score:.4f})")
+                break
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])

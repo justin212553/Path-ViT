@@ -15,3 +15,5 @@ patches_*
 utils/data
 
 checkpoint
+reference_repo
+scripts/_rna_fpkm_uq_cache

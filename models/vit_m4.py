@@ -73,6 +73,11 @@ class ViT_M4(ViT_M1):
 
         # Late Fusion risk head: [z_wsi ‖ z_clinical ‖ z_rna] (3D,) → risk_score (1,)
         # ViT_M1이 만든 D 차원 risk_head를 3D 차원으로 교체한다.
+        # 2026-07-21: 레퍼런스 M4(m4_pathology_rnaseq_clinical_mil.py::classifier)와 동일하게
+        # LayerNorm 뒤 Dropout(0.4) 추가를 시도(은닉층 없이 Dropout만 넣는 최소 개입)했으나
+        # negative result(external C 0.614->0.494, findings_backlog.md 13번 항목)로 롤백함 — Cox
+        # loss는 배치 내 risk score의 상대적 순서로 손실을 계산해, 최종 스칼라 출력 직전 Dropout이
+        # 순서 자체를 크게 흔드는 것으로 추정.
         self.risk_head = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim * 3),
             nn.Linear(cfg.embed_dim * 3, 1),

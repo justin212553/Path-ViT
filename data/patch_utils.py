@@ -15,6 +15,22 @@ PATCH_TRANSFORM = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
+# 레퍼런스(Leeyoungsup/pancreatic_cancer_pathology) M4_Train.ipynb::get_train_cached_patch_
+# transform()과 동일한 학습용 타일 augmentation — 우리는 지금까지 feature를 한 번만 추출해
+# 캐싱해서(features.pt) 재사용해왔기 때문에 이 augmentation이 구조적으로 아예 없었다
+# (findings_backlog.md). train.py --tile-augment(--image와 함께 사용, precomputed=False로
+# 매 forward마다 backbone을 직접 태우는 기존 경로 재사용)에서 train_ds.transform으로 쓴다 —
+# val/test/external은 기본 PATCH_TRANSFORM(증강 없음)을 그대로 쓴다(레퍼런스도 eval엔 미적용).
+PATCH_TRANSFORM_AUGMENTED = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomVerticalFlip(p=0.5),
+    transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02)], p=0.5),
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
 # UNI(ViT-L/16, models/uni_encoder.py)용 transform. 패치는 1024x1024 @ 1.0MPP로 저장돼
 # 있는데, UNI 학습 해상도(224, ~0.5MPP)로 그대로 리사이즈하면 실효 해상도가 4.57MPP까지
 # 뭉개져 UNI 학습 분포와 크게 어긋난다(실측상 ResNet50/Lunit SwAV보다 성능이 낮았음).

@@ -17,6 +17,11 @@ from .clinical_encoder import ClinicalEncoder
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
+# 2026-07-21: 레퍼런스 인코더 폭 비율(RNA=256, Clinical=16, WSI엔 안 맞춤)을 RNA 전처리
+# 버그 수정 이후 PMA_EX_SS_AUX로 검증했으나 negative(external C 0.611->0.601, tile-fusion
+# 단독보다도 하락 — findings_backlog.md 최상위 발견 항목) — 원래의 균일 cfg.embed_dim
+# 형태로 되돌림. CoAttentionPooling의 context_dim 파라미터(vit_m4a.py)는 인프라로 남겨둔다.
+
 
 class ViT_PMA(ViT_M1):
     def __init__(
