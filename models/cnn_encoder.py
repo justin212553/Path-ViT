@@ -40,6 +40,9 @@ class CNNEncoder(nn.Module):
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
         )
+        # 2026-07-21: 레퍼런스(m4_pathology_rnaseq_clinical_mil.py::tile_fusion)와 동일하게
+        # GELU+Dropout(0.4) 추가를 PMA_EX_SS_AUX로 검증했으나 null result(external C 0.610->0.611,
+        # findings_backlog.md 최상위 발견 항목 참조) — 개선 없어 원래 형태로 되돌림.
         self.proj = nn.Sequential(
             nn.Linear(BACKBONE_DIM, embed_dim),
             nn.LayerNorm(embed_dim),

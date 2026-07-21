@@ -7,6 +7,12 @@ class ModelConfig:
     # embed_dim=256, num_heads=4 → head_dim=64 (Transformer/BERT/ViT 전반의 표준 관례).
     # WSI-MIL 레퍼런스(CLAM/TransMIL)는 보통 512를 쓰지만, 이 프로젝트 코호트(TCGA-PAAD/
     # CPTAC-PDA)는 그 논문들보다 표본이 훨씬 적어 과적합 위험이 커 절반 크기로 절충한다.
+    #
+    # 2026-07-19: "압축이 너무 심해 신호가 노이즈로 뭉개졌을 수도 있다"는 반대 가설을 실제로
+    # embed_dim=256/num_heads=4/num_transformer_layers=2로 검증해봤다 — PMA_EX_SS_AUX
+    # (tcga->cptac, seed42) train_c_index 0.87까지 과적합되면서 val 0.53대 정체, external
+    # C=0.47(기존 작은 모델 0.625~0.632 대비 붕괴)로 명확한 negative result. "표본 대비
+    # 과적합"이 병목이라는 기존 진단이 재확인됐다 — 원래 값(절반 크기)으로 되돌린다.
     embed_dim:              int   = 64
     num_heads:              int   = 2
     num_transformer_layers: int   = 1      # TransMIL도 동일하게 2-layer Nystromformer를 사용

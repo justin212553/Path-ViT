@@ -36,9 +36,17 @@ class CoAttentionPooling(nn.Module):
     ViT_M4의 forward()/시각화 코드(save_heatmap)와 그대로 호환된다.
     """
 
-    def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.0):
+    def __init__(self, embed_dim: int, num_heads: int = 4, dropout: float = 0.0, context_dim: int | None = None):
+        """
+        Args:
+            context_dim: z_rna(context)의 차원. None(기본)이면 embed_dim과 같다고 가정
+                (ViT_M4A처럼 RNA를 WSI와 같은 폭으로 압축해 쓰는 경우). PMA_EX_SS_AUX처럼
+                RNA를 레퍼런스 사양(256dim)으로 넓게 유지하고 WSI 쪽만 embed_dim일 때는
+                다르게 넘긴다 — query_proj가 context_dim -> embed_dim으로 투영해준다
+                (2026-07-21 추가).
+        """
         super().__init__()
-        self.query_proj = nn.Linear(embed_dim, embed_dim)  # z_rna → query 공간 투영
+        self.query_proj = nn.Linear(context_dim or embed_dim, embed_dim)  # z_rna → query 공간 투영
         self.mha = nn.MultiheadAttention(
             embed_dim, num_heads, dropout=dropout, batch_first=True
         )

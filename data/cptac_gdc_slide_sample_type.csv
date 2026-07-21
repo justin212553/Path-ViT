@@ -1,0 +1,322 @@
+slide_id,sample_type,tissue_type,percent_tumor_nuclei,percent_necrosis,section_location
+C3L-00017-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-00017-24,Solid Tissue Normal,Normal,,,Head
+C3L-00102-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-00102-26,Solid Tissue Normal,Normal,,,Head
+C3L-00189-21,Primary Tumor,Tumor,50.0,0.0,Head
+C3L-00189-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-00189-23,Primary Tumor,Tumor,25.0,20.0,Head
+C3L-00277-23,Primary Tumor,Tumor,70.0,0.0,Tail
+C3L-00277-25,Solid Tissue Normal,Normal,,,Tail
+C3L-00401-22,Primary Tumor,Tumor,40.0,0.0,Body
+C3L-00401-24,Primary Tumor,Tumor,15.0,2.0,Body
+C3L-00401-25,Primary Tumor,Tumor,25.0,2.0,Body
+C3L-00589-21,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-00589-22,Primary Tumor,Tumor,50.0,0.0,Head
+C3L-00589-26,Solid Tissue Normal,Normal,,,Head
+C3L-00598-22,Primary Tumor,Tumor,50.0,5.0,Head
+C3L-00598-23,Primary Tumor,Tumor,50.0,0.0,Head
+C3L-00599-21,Primary Tumor,Tumor,10.0,0.0,Mass centered in the uncinate process
+C3L-00599-22,Primary Tumor,Tumor,25.0,0.0,Mass centered in the uncinate process
+C3L-00599-23,Primary Tumor,Tumor,25.0,0.0,Mass centered in the uncinate process
+C3L-00622-21,Primary Tumor,Tumor,40.0,0.0,Head
+C3L-00622-23,Primary Tumor,Tumor,40.0,0.0,Head
+C3L-00622-24,Solid Tissue Normal,Normal,,,Head
+C3L-00625-21,Solid Tissue Normal,Normal,,,Head
+C3L-00625-22,Solid Tissue Normal,Normal,,,Head
+C3L-00625-23,Primary Tumor,Tumor,80.0,0.0,Head
+C3L-00625-25,Primary Tumor,Tumor,80.0,0.0,Head
+C3L-00640-21,Primary Tumor,Tumor,40.0,0.0,Body
+C3L-00640-23,Primary Tumor,Tumor,30.0,0.0,Body
+C3L-00640-26,Solid Tissue Normal,Normal,,,Body
+C3L-00819-21,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-00819-26,Solid Tissue Normal,Normal,,,Head
+C3L-00881-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-00881-23,Primary Tumor,Tumor,25.0,0.0,Head
+C3L-00881-25,Solid Tissue Normal,Normal,,,Head
+C3L-00928-23,Primary Tumor,Tumor,30.0,0.0,Distal pancreas
+C3L-00928-26,Solid Tissue Normal,Normal,,,Distal pancreas
+C3L-01031-21,Primary Tumor,Tumor,80.0,5.0,"Body, Tail"
+C3L-01031-25,Solid Tissue Normal,Normal,,,"Body, Tail"
+C3L-01032-21,Primary Tumor,Tumor,80.0,10.0,Head
+C3L-01032-25,Solid Tissue Normal,Normal,,,Head
+C3L-01036-21,Primary Tumor,Tumor,50.0,5.0,Head
+C3L-01036-25,Solid Tissue Normal,Normal,,,Head
+C3L-01037-21,Primary Tumor,Tumor,60.0,5.0,Head
+C3L-01037-25,Solid Tissue Normal,Normal,,,Head
+C3L-01039-23,Primary Tumor,Tumor,40.0,0.0,Head
+C3L-01039-25,Solid Tissue Normal,Normal,,,Head
+C3L-01051-22,Primary Tumor,Tumor,60.0,2.0,Head
+C3L-01051-24,Solid Tissue Normal,Normal,,,Head
+C3L-01052-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-01052-24,Solid Tissue Normal,Normal,,,Head
+C3L-01053-27,Solid Tissue Normal,Normal,,,Head
+C3L-01053-28,Primary Tumor,Tumor,25.0,5.0,Head
+C3L-01054-24,Primary Tumor,Tumor,40.0,2.0,Head
+C3L-01054-25,Solid Tissue Normal,Normal,,,Head
+C3L-01124-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-01124-24,Solid Tissue Normal,Normal,,,Head
+C3L-01158-21,Primary Tumor,Tumor,5.0,5.0,Head
+C3L-01158-25,Solid Tissue Normal,Normal,,,Head
+C3L-01160-21,Primary Tumor,Tumor,20.0,10.0,Head
+C3L-01160-25,Solid Tissue Normal,Normal,,,Head
+C3L-01328-21,Primary Tumor,Tumor,80.0,0.0,Head
+C3L-01328-23,Solid Tissue Normal,Normal,,,Head
+C3L-01453-23,Primary Tumor,Tumor,50.0,0.0,Tail
+C3L-01453-24,Solid Tissue Normal,Normal,,,Tail
+C3L-01598-22,Primary Tumor,Tumor,20.0,2.0,Distal pancreas
+C3L-01598-26,Solid Tissue Normal,Normal,,,Distal pancreas
+C3L-01637-22,Primary Tumor,Tumor,50.0,10.0,Body
+C3L-01637-23,Primary Tumor,Tumor,40.0,10.0,Body
+C3L-01637-26,Solid Tissue Normal,Normal,,,Body
+C3L-01662-23,Primary Tumor,Tumor,70.0,0.0,Head
+C3L-01687-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-01687-22,Primary Tumor,Tumor,15.0,0.0,Head
+C3L-01687-23,Primary Tumor,Tumor,15.0,0.0,Head
+C3L-01689-22,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-01689-23,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-01689-24,Solid Tissue Normal,Normal,,,Head
+C3L-01703-27,Primary Tumor,Tumor,5.0,0.0,Body & tail
+C3L-01703-28,Primary Tumor,Tumor,25.0,0.0,Body & tail
+C3L-01703-29,Solid Tissue Normal,Normal,,,Body & tail
+C3L-01971-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-02109-22,Primary Tumor,Tumor,30.0,0.0,Body
+C3L-02109-23,Primary Tumor,Tumor,20.0,0.0,Body
+C3L-02112-22,Primary Tumor,Tumor,15.0,0.0,Head
+C3L-02112-23,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-02112-24,Solid Tissue Normal,Normal,,,Head
+C3L-02115-27,Primary Tumor,Tumor,5.0,0.0,Head
+C3L-02115-28,Primary Tumor,Tumor,5.0,0.0,Head
+C3L-02115-29,Solid Tissue Normal,Normal,,,Head
+C3L-02116-21,Primary Tumor,Tumor,25.0,0.0,Body
+C3L-02116-23,Primary Tumor,Tumor,50.0,0.0,Body
+C3L-02116-24,Solid Tissue Normal,Normal,,,Body
+C3L-02118-21,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-02118-22,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-02463-21,Primary Tumor,Tumor,70.0,0.0,Head
+C3L-02463-22,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-02463-25,Solid Tissue Normal,Normal,,,Head
+C3L-02604-21,Primary Tumor,Tumor,75.0,10.0,Tail
+C3L-02606-21,Primary Tumor,Tumor,50.0,1.0,Head
+C3L-02606-22,Primary Tumor,Tumor,40.0,2.0,Head
+C3L-02606-24,Solid Tissue Normal,Normal,,,Head
+C3L-02610-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-02610-23,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-02610-24,Solid Tissue Normal,Normal,,,Head
+C3L-02613-22,Primary Tumor,Tumor,90.0,15.0,Head
+C3L-02613-23,Primary Tumor,Tumor,80.0,15.0,Head
+C3L-02613-24,Solid Tissue Normal,Normal,,,Head
+C3L-02701-22,Primary Tumor,Tumor,20.0,0.0,Body and Tail
+C3L-02809-24,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-02809-26,Solid Tissue Normal,Normal,,,Head
+C3L-02888-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-02888-24,Solid Tissue Normal,Normal,,,Head
+C3L-02890-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-02890-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-02897-21,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-02899-21,Primary Tumor,Tumor,60.0,10.0,Head
+C3L-02899-26,Solid Tissue Normal,Normal,,,Head
+C3L-02956-21,Primary Tumor,Tumor,30.0,0.0,Body
+C3L-02956-26,Solid Tissue Normal,Normal,,,Body
+C3L-03123-22,Primary Tumor,Tumor,60.0,0.0,Head
+C3L-03123-24,Solid Tissue Normal,Normal,,,Head
+C3L-03348-23,Primary Tumor,Tumor,25.0,0.0,Head
+C3L-03348-24,Solid Tissue Normal,Normal,,,Head
+C3L-03356-27,Primary Tumor,Tumor,40.0,0.0,Head
+C3L-03388-22,Primary Tumor,Tumor,80.0,2.0,Head
+C3L-03388-26,Solid Tissue Normal,Normal,,,Head
+C3L-03394-23,Primary Tumor,Tumor,10.0,0.0,Body
+C3L-03394-24,Solid Tissue Normal,Normal,,,Body
+C3L-03395-22,Primary Tumor,Tumor,10.0,0.0,Tail
+C3L-03395-25,Solid Tissue Normal,Normal,,,Tail
+C3L-03624-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3L-03628-26,Primary Tumor,Tumor,30.0,0.0,Uncinate process
+C3L-03628-27,Primary Tumor,Tumor,30.0,0.0,Uncinate process
+C3L-03629-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-03630-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-03630-23,Primary Tumor,Tumor,40.0,5.0,Head
+C3L-03632-27,Primary Tumor,Tumor,20.0,0.0,Uncinate process
+C3L-03632-28,Primary Tumor,Tumor,30.0,0.0,Uncinate process
+C3L-03635-21,Primary Tumor,Tumor,20.0,0.0,Tail
+C3L-03635-22,Primary Tumor,Tumor,20.0,0.0,Tail
+C3L-03639-21,Primary Tumor,Tumor,50.0,0.0,Head
+C3L-03639-22,Primary Tumor,Tumor,50.0,10.0,Head
+C3L-03639-23,Primary Tumor,Tumor,50.0,20.0,Head
+C3L-03743-21,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-03743-24,Solid Tissue Normal,Normal,,,Head
+C3L-04027-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-04027-27,Solid Tissue Normal,Normal,,,Head
+C3L-04072-21,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-04072-22,Solid Tissue Normal,Normal,,,Head
+C3L-04080-22,Solid Tissue Normal,Normal,,,Head
+C3L-04080-23,Primary Tumor,Tumor,50.0,0.0,Head
+C3L-04080-24,Primary Tumor,Tumor,70.0,5.0,Head
+C3L-04473-21,Primary Tumor,Tumor,30.0,0.0,Head and body
+C3L-04475-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-04475-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-04475-24,Solid Tissue Normal,Normal,,,Head
+C3L-04479-21,Primary Tumor,Tumor,1.0,0.0,Head
+C3L-04479-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3L-04479-23,Solid Tissue Normal,Normal,,,Head
+C3L-04495-26,Solid Tissue Normal,Normal,,,Body and tail
+C3L-04495-28,Primary Tumor,Tumor,10.0,0.0,Body and tail
+C3L-04495-29,Primary Tumor,Tumor,10.0,0.0,Body and tail
+C3L-04495-30,Primary Tumor,Tumor,40.0,0.0,Body and tail
+C3L-04848-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-04848-23,Primary Tumor,Tumor,20.0,0.0,Head
+C3L-04853-21,Primary Tumor,Tumor,1.0,0.0,Head
+C3L-04853-22,Primary Tumor,Tumor,5.0,0.0,Head
+C3N-00198-22,Primary Tumor,Tumor,30.0,0.0,Body
+C3N-00198-26,Solid Tissue Normal,Normal,,,Body
+C3N-00249-23,Primary Tumor,Tumor,20.0,1.0,Body
+C3N-00249-26,Solid Tissue Normal,Normal,,,Body
+C3N-00302-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-00303-21,Primary Tumor,Tumor,50.0,0.0,Head
+C3N-00436-21,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-00436-25,Solid Tissue Normal,Normal,,,Head
+C3N-00511-23,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-00512-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-00512-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-00512-25,Solid Tissue Normal,Normal,,,Head
+C3N-00513-23,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-00513-24,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-00513-25,Solid Tissue Normal,Normal,,,Head
+C3N-00514-21,Primary Tumor,Tumor,25.0,0.0,Head
+C3N-00514-22,Primary Tumor,Tumor,40.0,0.0,Head
+C3N-00514-25,Solid Tissue Normal,Normal,,,Head
+C3N-00516-21,Primary Tumor,Tumor,40.0,2.0,Head
+C3N-00516-22,Primary Tumor,Tumor,25.0,2.0,Head
+C3N-00517-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-00517-25,Solid Tissue Normal,Normal,,,Head
+C3N-00518-21,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-00518-25,Solid Tissue Normal,Normal,,,Head
+C3N-00709-21,Primary Tumor,Tumor,70.0,0.0,Head
+C3N-00957-21,Primary Tumor,Tumor,10.0,2.0,Tail
+C3N-00957-26,Solid Tissue Normal,Normal,,,Tail
+C3N-00957-27,Solid Tissue Normal,Normal,,,Tail
+C3N-01011-22,Primary Tumor,Tumor,10.0,1.0,Head
+C3N-01011-26,Solid Tissue Normal,Normal,,,Head
+C3N-01012-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-01012-22,Primary Tumor,Tumor,60.0,0.0,Head
+C3N-01165-22,Primary Tumor,Tumor,40.0,5.0,Head
+C3N-01165-23,Primary Tumor,Tumor,20.0,3.0,Head
+C3N-01166-21,Primary Tumor,Tumor,10.0,3.0,Head
+C3N-01166-22,Primary Tumor,Tumor,20.0,2.0,Head
+C3N-01167-21,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-01167-22,Primary Tumor,Tumor,25.0,2.0,Head
+C3N-01168-22,Primary Tumor,Tumor,40.0,2.0,Head
+C3N-01375-22,Primary Tumor,Tumor,20.0,2.0,Head
+C3N-01375-23,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-01380-21,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-01380-23,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-01381-21,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-01381-22,Primary Tumor,Tumor,20.0,1.0,Head
+C3N-01382-21,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-01383-21,Primary Tumor,Tumor,40.0,1.0,Head
+C3N-01383-23,Primary Tumor,Tumor,40.0,2.0,Head
+C3N-01385-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-01385-25,Solid Tissue Normal,Normal,,,Head
+C3N-01388-23,Primary Tumor,Tumor,25.0,0.0,Head
+C3N-01502-21,Primary Tumor,Tumor,10.0,0.0,Body and Tail
+C3N-01714-22,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-01715-22,Primary Tumor,Tumor,50.0,20.0,Head
+C3N-01716-23,Primary Tumor,Tumor,80.0,5.0,Head
+C3N-01719-21,Solid Tissue Normal,Normal,,,Head
+C3N-01719-24,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-01897-21,Primary Tumor,Tumor,30.0,1.0,Head
+C3N-01898-24,Primary Tumor,Tumor,25.0,2.0,Head
+C3N-01898-25,Solid Tissue Normal,Normal,,,Head
+C3N-01899-22,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-01899-23,Solid Tissue Normal,Normal,,,Head
+C3N-01997-21,Solid Tissue Normal,Normal,,,Tail
+C3N-01997-22,Primary Tumor,Tumor,8.0,0.0,Tail
+C3N-01997-23,Primary Tumor,Tumor,5.0,0.0,Tail
+C3N-01998-21,Solid Tissue Normal,Normal,,,Head
+C3N-01998-22,Primary Tumor,Tumor,10.0,0.0,Head
+C3N-01998-23,Primary Tumor,Tumor,60.0,0.0,Head
+C3N-02010-23,Primary Tumor,Tumor,80.0,0.0,Head
+C3N-02010-26,Solid Tissue Normal,Normal,,,Head
+C3N-02295-21,Solid Tissue Normal,Normal,,,Head
+C3N-02295-24,Primary Tumor,Tumor,20.0,2.0,Head
+C3N-02573-21,Primary Tumor,Tumor,30.0,0.0,pancreatic body and tail
+C3N-02573-22,Primary Tumor,Tumor,30.0,0.0,pancreatic body and tail
+C3N-02579-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-02585-21,Primary Tumor,Tumor,60.0,2.0,pancreatic body and tail
+C3N-02585-22,Primary Tumor,Tumor,70.0,2.0,pancreatic body and tail
+C3N-02585-23,Solid Tissue Normal,Normal,,,pancreatic body and tail
+C3N-02589-21,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-02589-23,Solid Tissue Normal,Normal,,,Head
+C3N-02590-21,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-02591-21,Primary Tumor,Tumor,25.0,2.0,Head
+C3N-02592-21,Primary Tumor,Tumor,20.0,2.0,Head
+C3N-02594-24,Solid Tissue Normal,Normal,,,Head
+C3N-02696-22,Primary Tumor,Tumor,40.0,0.0,Head
+C3N-02696-25,Solid Tissue Normal,Normal,,,Head
+C3N-02754-21,Primary Tumor,Tumor,30.0,0.0,Body
+C3N-02754-23,Solid Tissue Normal,Normal,,,Body
+C3N-02765-22,Primary Tumor,Tumor,40.0,2.0,Head
+C3N-02765-23,Solid Tissue Normal,Normal,,,Head
+C3N-02768-21,Primary Tumor,Tumor,40.0,10.0,pancreatic body and tail
+C3N-02768-22,Primary Tumor,Tumor,40.0,20.0,pancreatic body and tail
+C3N-02768-23,Solid Tissue Normal,Normal,,,pancreatic body and tail
+C3N-02930-21,Primary Tumor,Tumor,60.0,0.0,Head
+C3N-02930-23,Solid Tissue Normal,Normal,,,Head
+C3N-02940-21,Primary Tumor,Tumor,60.0,5.0,Head
+C3N-02940-22,Primary Tumor,Tumor,80.0,5.0,Head
+C3N-02944-21,Primary Tumor,Tumor,40.0,5.0,Pancreatic body and tail
+C3N-02944-23,Solid Tissue Normal,Normal,,,Pancreatic body and tail
+C3N-02971-21,Primary Tumor,Tumor,80.0,5.0,Tail
+C3N-02996-22,Primary Tumor,Tumor,20.0,2.0,Head
+C3N-02996-24,Solid Tissue Normal,Normal,,,Head
+C3N-02997-21,Primary Tumor,Tumor,30.0,5.0,Head
+C3N-02998-23,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03000-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03006-22,Primary Tumor,Tumor,15.0,0.0,Head
+C3N-03007-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03039-21,Primary Tumor,Tumor,60.0,5.0,Head
+C3N-03039-24,Solid Tissue Normal,Normal,,,Head
+C3N-03061-21,Primary Tumor,Tumor,80.0,5.0,Body
+C3N-03061-22,Primary Tumor,Tumor,60.0,0.0,Body
+C3N-03069-21,Primary Tumor,Tumor,60.0,10.0,Body
+C3N-03069-23,Solid Tissue Normal,Normal,,,Body
+C3N-03086-22,Primary Tumor,Tumor,30.0,0.0,Body
+C3N-03086-23,Solid Tissue Normal,Normal,,,Body
+C3N-03173-21,Primary Tumor,Tumor,40.0,0.0,Head
+C3N-03173-26,Solid Tissue Normal,Normal,,,Head
+C3N-03190-21,Primary Tumor,Tumor,20.0,0.0,Body
+C3N-03190-22,Primary Tumor,Tumor,10.0,0.0,Body
+C3N-03211-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03211-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03211-23,Solid Tissue Normal,Normal,,,Head
+C3N-03426-21,Primary Tumor,Tumor,40.0,20.0,Head
+C3N-03428-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03428-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03430-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03439-22,Primary Tumor,Tumor,10.0,2.0,Head
+C3N-03440-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03440-24,Solid Tissue Normal,Normal,,,Head
+C3N-03665-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03666-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03670-21,Primary Tumor,Tumor,10.0,3.0,Head
+C3N-03670-22,Solid Tissue Normal,Normal,,,Head
+C3N-03754-21,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03780-21,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03780-24,Solid Tissue Normal,Normal,,,Head
+C3N-03839-21,Primary Tumor,Tumor,50.0,0.0,Head
+C3N-03839-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03839-25,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03840-21,Primary Tumor,Tumor,20.0,0.0,Body
+C3N-03840-22,Primary Tumor,Tumor,10.0,0.0,Body
+C3N-03840-23,Solid Tissue Normal,Normal,,,Body
+C3N-03853-21,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03853-22,Primary Tumor,Tumor,30.0,0.0,Head
+C3N-03884-22,Primary Tumor,Tumor,20.0,0.0,Head
+C3N-03884-23,Solid Tissue Normal,Normal,,,Head
+C3N-04119-22,Primary Tumor,Tumor,40.0,5.0,Tail
+C3N-04119-23,Solid Tissue Normal,Normal,,,Tail
+C3N-04126-21,Primary Tumor,Tumor,75.0,5.0,Head
+C3N-04126-22,Primary Tumor,Tumor,50.0,0.0,Head
+C3N-04282-21,Primary Tumor,Tumor,50.0,0.0,Head
+C3N-04283-23,Primary Tumor,Tumor,30.0,2.0,Head
+C3N-04283-24,Solid Tissue Normal,Normal,,,Head
+C3N-04284-21,Primary Tumor,Tumor,50.0,0.0,Head

@@ -45,9 +45,10 @@ from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     pathway_category_gene_ids,
 )
+from data.patch_utils import PATCH_TRANSFORM_AUGMENTED
 from models import (
     ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
-    ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
+    ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
 )
 from models.rna_predictor import RNAPredictionHead
 from models.stage_predictor import StagePredictionHead
@@ -405,6 +406,44 @@ def _parse_args() -> argparse.Namespace:
     # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
     # 미지정 시 기존 ViT_M1(ViT+ABMIL)로 동작 — ablation baseline 유지
     parser.add_argument(
+        "--dropout", type=float, default=None,
+        help="cfg.model.dropout(기본 0.3) 덮어쓰기 — ViT/Nystromformer, ABMIL, RNA/Clinical "
+             "인코더 전체가 공유하는 dropout rate 스윕용(findings_backlog.md 13번 항목 후속, "
+             "risk head 자체 dropout과는 별개 실험). 기본값(None)과 다르면 wandb/checkpoint에 "
+             "_DROP{dropout} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--one-slide-per-case", action="store_true",
+        help="케이스당 슬라이드를 대표 1장으로 줄인다(data/dataset.py::_select_representative_slide, "
+             "findings_backlog.md 14번 항목). 기본은 미사용(케이스가 가진 슬라이드를 전부 사용하는 "
+             "기존 동작) — 레퍼런스(Leeyoungsup/pancreatic_cancer_pathology)는 TCGA는 diagnostic(DX) "
+             "WSI 1개/환자, CPTAC는 tumor series 중 최대 용량 1개/case만 쓰는데 우리는 지금까지 "
+             "case당 평균 2.5~3.2장을 전부 써왔다 — 그 격차를 좁히는 실험. 켜면 wandb/checkpoint에 "
+             "_1SLIDE 접미사가 자동으로 붙는다. (2026-07-21: --external 3시드 검증 결과 M4A/PMA "
+             "둘 다 negative result, findings_backlog.md 14번 항목 참조 — --exclude-normal-slides "
+             "쪽이 더 유망한 절충안.)",
+    )
+    parser.add_argument(
+        "--tile-augment", action="store_true",
+        help="레퍼런스 M4_Train.ipynb::get_train_cached_patch_transform()과 동일하게 학습 시 "
+             "타일에 RandomHorizontalFlip/VerticalFlip/ColorJitter/GaussianBlur를 실시간으로 "
+             "적용한다(data/patch_utils.py::PATCH_TRANSFORM_AUGMENTED) — 매 epoch 매 forward마다 "
+             "raw 이미지를 다시 backbone에 태우므로 --image(비-precomputed 모드)와 함께만 "
+             "쓸 수 있다(features.pt 캐시를 쓰는 기본 모드에서는 애초에 backbone을 다시 안 태우니 "
+             "augmentation이 적용될 지점이 없다). val/test/external은 항상 증강 없는 기본 "
+             "PATCH_TRANSFORM을 쓴다(레퍼런스도 eval엔 미적용). --image 없이 켜면 에러. "
+             "주의: 학습이 극도로 느려진다(로컬 GPU 기준 ResNet50 1024px ~24 img/s — findings_"
+             "backlog.md 참조). 켜면 wandb/checkpoint에 _AUG 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--exclude-normal-slides", action="store_true",
+        help="확인된 정상 조직 슬라이드만 제외하고 케이스당 나머지는 전부 그대로 둔다"
+             "(data/dataset.py::_exclude_normal_slides, findings_backlog.md 14번 항목) — "
+             "--one-slide-per-case보다 훨씬 덜 급진적인 절충안(TCGA 평균 슬라이드/case "
+             "2.52→2.28, CPTAC 3.22→2.76). 기본은 미사용. 켜면 wandb/checkpoint에 _NONORMAL "
+             "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--fusion", action="store_true",
         help="LateFusionViT 사용 (ViT+ABMIL + Cluster Histogram). "
              "data/fit_clusters.py 실행으로 cluster_centroids.pt 사전 생성 필요.",
@@ -492,6 +531,13 @@ def _parse_args() -> argparse.Namespace:
              "data/rna_{tcga,cptac}.csv 필요. --fusion과 동시 사용 불가.",
     )
     model_group.add_argument(
+        "--PMA_FF", action="store_true",
+        help="ViT_PMA_FF 사용 (PMA와 동일, Nystromformer FFN 서브레이어만 제거한 맛보기 "
+             "ablation - M4A_FF와 같은 논리를 다성분 pooling(PMA) 기준에서 마지막으로 확인). "
+             "data/clinical_{tcga,cptac}.csv, data/rna_{tcga,cptac}.csv 필요. "
+             "--fusion과 동시 사용 불가.",
+    )
+    model_group.add_argument(
         "--M5", action="store_true",
         help="ClinicalOnly 사용 (Clinical(age/sex) MLP만, WSI/RNA 없음). "
              "data/clinical_{tcga,cptac}.csv 필요. WSI를 전혀 안 쓰므로 --backbone/--image/"
@@ -536,24 +582,26 @@ def main():
         cfg.data.patches_root_tcga = args.patches_root_tcga
     if args.patches_root_cptac is not None:
         cfg.data.patches_root_cptac = args.patches_root_cptac
+    if args.dropout is not None:
+        cfg.model.dropout = args.dropout
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
         raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
     if args.M2 and args.fusion:
         raise ValueError("--M2(Clinical fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
-    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF) and args.fusion:
+    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF) and args.fusion:
         raise ValueError("--M4/--M4A/--M4B/--PM4/--PMA(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if (args.M5 or args.M6 or args.M6X) and args.fusion:
         raise ValueError("--M5/--M6/--M6X(WSI-free)와 --fusion(Cluster fusion, WSI 전제)은 동시에 지원되지 않습니다.")
-    if args.avgpool and (args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5 or args.M6 or args.M6X or args.fusion):
+    if args.avgpool and (args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X or args.fusion):
         raise ValueError(
             "--avgpool은 --M1(기본)에서만 지원됩니다 — "
             "--M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion과 동시 사용 불가."
         )
     if args.clinical_staging and not (
         args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
-        or args.M4A_FF or args.M2_FF or args.M5
+        or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
     ):
         raise ValueError(
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
@@ -587,7 +635,7 @@ def main():
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
     # 정규화" 관례와 동일). dataset="both"면 두 코호트 clinical.csv를 합쳐 통계를 계산한다.
-    if args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5:
+    if args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5:
         if args.dataset == "both":
             import pandas as pd
             ages = pd.concat([
@@ -621,7 +669,7 @@ def main():
     # 고른다 — 기본(subtype)은 Bailey/Moffitt subtype 분류용 ~340개, literature_{1000,1500,2000}은
     # data/select_rnaseq_genes.py 산출물(생존 예측에 직접 최적화된 유전자셋). WSISurvivalDataset에
     # 그대로 넘겨 실제 로드되는 컬럼과 rna_input_dim이 항상 일치하게 한다.
-    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M6 or args.M6X
+    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
     rna_pathway_categories = None
     if uses_rna:
         if args.rna_genes == "pathway8":
@@ -660,6 +708,8 @@ def main():
         model_prefix = "M4A_FF"
     elif args.M2_FF:
         model_prefix = "M2_FF"
+    elif args.PMA_FF:
+        model_prefix = "PMA_FF"
     elif args.M5:
         model_prefix = "M5"
     elif args.M6:
@@ -698,6 +748,20 @@ def main():
         # _STG = ClinicalEncoder 입력에 병기(T/N/M)+grade 추가 사용 표시 — 있음/없음 버전을
         # 둘 다 비교할 수 있게 독립 접미사로 뒀다.
         model_prefix += "_STG"
+    if args.exclude_normal_slides:
+        # _NONORMAL = 확인된 정상 조직 슬라이드만 제외(케이스당 나머지는 전부 유지) 표시.
+        model_prefix += "_NONORMAL"
+    if args.one_slide_per_case:
+        # _1SLIDE = 케이스당 대표 슬라이드 1장만 사용 표시(findings_backlog.md 14번 항목).
+        model_prefix += "_1SLIDE"
+    if args.tile_augment:
+        if not args.image:
+            raise ValueError("--tile-augment는 --image(비-precomputed 모드)와 함께만 쓸 수 있습니다.")
+        # _AUG = 학습 시 실시간 타일 augmentation 사용 표시.
+        model_prefix += "_AUG"
+    if args.dropout is not None and args.dropout != 0.3:
+        # _DROP{dropout} = cfg.model.dropout(기본 0.3) 스윕 표시.
+        model_prefix += f"_DROP{args.dropout:g}"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -733,6 +797,7 @@ def main():
                                            else "ViT_PMA" if args.PMA
                                            else "ViT_M4A_FF" if args.M4A_FF
                                            else "ViT_M2_FF" if args.M2_FF
+                                           else "ViT_PMA_FF" if args.PMA_FF
                                            else "ClinicalOnly" if args.M5
                                            else "RNAOnly" if args.M6
                                            else "RNAOnlyExtend" if args.M6X
@@ -748,19 +813,29 @@ def main():
                 "rna_aux_weight":        args.rna_aux_weight,
                 "stage_aux_weight":      args.stage_aux_weight,
                 "clinical_staging":      args.clinical_staging,
+                "one_slide_per_case":    args.one_slide_per_case,
+                "exclude_normal_slides": args.exclude_normal_slides,
+                "tile_augment":          args.tile_augment,
                 "dataset":               args.dataset,
                 "external_dataset":      external_dataset,
             },
         )
 
-    with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M5
-    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.M6 or args.M6X
+    with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
+    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
     ds_kwargs = dict(
         with_clinical=with_clinical, with_staging=with_staging, with_rna=with_rna,
         feature_backbone=args.backbone,
         rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
+        one_slide_per_case=args.one_slide_per_case,
+        exclude_normal_slides=args.exclude_normal_slides,
     )
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
+    # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 기본 transform).
+    train_ds = WSISurvivalDataset(
+        cfg.data, dataset=args.dataset, split="train",
+        transform=PATCH_TRANSFORM_AUGMENTED if args.tile_augment else None,
+        **ds_kwargs,
+    )
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
     test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
     # [ExternalTest] 학습에 전혀 쓰이지 않은 코호트 전체(split="all") — 없으면 None
@@ -822,6 +897,9 @@ def main():
     elif args.M2_FF:
         model = ViT_M2_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                            precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+    elif args.PMA_FF:
+        model = ViT_PMA_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                            precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std, **stage_kwargs).to(device)
     elif args.M6:
@@ -883,6 +961,10 @@ def main():
     elif args.M2_FF:
         print(f"Model: ViT_M2_FF (M2 + RNA를 ViTEncoder FFN 직전 FiLM으로만 개입, mean pooling, "
               f"최종 결합엔 RNA 미노출, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
+    elif args.PMA_FF:
+        print(f"Model: ViT_PMA_FF (PMA에서 Nystromformer FFN 서브레이어 제거, 다성분 pooling + "
+              f"CoAttention(RNA query, 4개 관점) + Clinical age/sex MLP, age_mean={age_mean:.1f}, "
+              f"age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M5:
         print(f"Model: ClinicalOnly (Clinical age/sex MLP만, WSI/RNA 없음, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")
@@ -947,6 +1029,8 @@ def main():
         ckpt_path = ckpt_dir / f"survival_{tag}_best_m4a_ff.pt"
     elif args.M2_FF:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_m2_ff.pt"
+    elif args.PMA_FF:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_pma_ff.pt"
     elif args.M5:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_only.pt"
     elif args.M6:
@@ -1078,6 +1162,7 @@ def main():
                                           else "ViT_PMA" if args.PMA
                                           else "ViT_M4A_FF" if args.M4A_FF
                                           else "ViT_M2_FF" if args.M2_FF
+                                          else "ViT_PMA_FF" if args.PMA_FF
                                           else "ClinicalOnly" if args.M5
                                           else "RNAOnly" if args.M6
                                           else "RNAOnlyExtend" if args.M6X

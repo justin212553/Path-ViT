@@ -170,6 +170,96 @@ def _load_slide_index(patches_root: Path) -> pd.DataFrame:
     return pd.concat([pd.read_csv(p) for p in paths], ignore_index=True)
 
 
+def _tcga_barcode_field(slide_id: str, idx: int) -> str:
+    """TCGA slide_id(예: "TCGA-2J-AAB1-01Z-00-DX1.<UUID>")의 바코드 필드 앞 2글자.
+    idx=3 -> sample type("01"=Primary Tumor, "11"=Solid Tissue Normal 등),
+    idx=5 -> portion/analyte("DX"=diagnostic/영구절편, "TS"/"BS"=냉동절편 등)."""
+    parts = slide_id.split(".")[0].split("-")
+    return parts[idx][:2] if len(parts) > idx else ""
+
+
+CPTAC_GDC_SLIDE_TYPES_PATH = Path("data/cptac_gdc_slide_sample_type.csv")
+
+
+def _load_cptac_gdc_slide_types() -> dict:
+    """GDC(Genomic Data Commons) API의 CPTAC-3 프로젝트 biospecimen 계층(cases -> samples ->
+    portions -> slides)에서 직접 조회한 slide_id -> sample_type("Primary Tumor"/"Solid Tissue
+    Normal") 매핑(2026-07-21, api.gdc.cancer.gov/cases?expand=samples.portions.slides로 CPTAC-3/
+    Pancreas 170개 case 전체 조회, data/cptac_gdc_slide_sample_type.csv에 저장). 우리가 다운로드한
+    CPTAC svs 567장 중 295장(52%)이 이 GDC biospecimen 기록과 매칭되고, 그중 80장(27%)이
+    "Solid Tissue Normal"(정상 조직) — tumor/normal 구분 없이 case당 슬라이드를 전부 써온 기존
+    방식이 정상 조직 슬라이드까지 섞어 썼다는 걸 실측으로 확인한 근거(findings_backlog.md 14번
+    항목). 나머지 272장은 GDC biospecimen에 slide 단위로 등록되지 않은 슬라이드(TCIA CPTAC
+    Pathology Portal에는 있지만 GDC에는 formal biospecimen entity로 안 올라간 경우로 추정) —
+    tumor 여부를 알 수 없는 미상으로 남긴다."""
+    if not CPTAC_GDC_SLIDE_TYPES_PATH.exists():
+        return {}
+    df = pd.read_csv(CPTAC_GDC_SLIDE_TYPES_PATH)
+    return dict(zip(df["slide_id"], df["sample_type"]))
+
+
+def _select_representative_slide(all_items: pd.DataFrame) -> pd.DataFrame:
+    """케이스당 슬라이드를 1장으로 줄인다(findings_backlog.md 14번 항목 — 레퍼런스(Leeyoungsup/
+    pancreatic_cancer_pathology)는 TCGA는 diagnostic(DX) WSI 1개/환자, CPTAC는 SeriesDescription에
+    "tumor"가 포함된 series 중 용량이 가장 큰 것 1개/case만 쓰는데, 우리는 지금까지 case당 존재하는
+    슬라이드를 전부 써왔다(TCGA 평균 2.52장/case, CPTAC 평균 3.22장/case) — 그 격차를 좁히는 실험용
+    옵션).
+
+    TCGA: 바코드에서 sample type(idx=3)이 "01"(Primary Tumor)인 슬라이드만 후보로 삼는다(01이
+    하나도 없는 소수 케이스는 통째로 잃지 않기 위해 전체 슬라이드로 폴백). 그중 portion(idx=5)이
+    "DX"(진단용/영구절편)인 슬라이드를 TS/BS(냉동절편)보다 우선한다. 동률/유일 후보 안에서는
+    n_tiles_kept(조직량)가 가장 큰 슬라이드를 고른다.
+    CPTAC: SeriesDescription 같은 tumor/normal 태그는 우리가 가진 데이터(TCIA Aperio SVS)에
+    직접 없지만(레퍼런스가 쓴 IDC DICOM 버전에만 있는 필드), GDC biospecimen API에서 같은 정보를
+    별도로 확보했다(_load_cptac_gdc_slide_types() 참조) — "Solid Tissue Normal"로 확인된 슬라이드는
+    후보에서 제외하고, "Primary Tumor"로 확인된 슬라이드가 있으면 그중에서만 고른다. GDC에 없는
+    (tumor 여부 미상인) 슬라이드는 "정상이 아님"으로 간주해 후보에 남긴다. 최종적으로 남은 후보
+    중 n_tiles_kept(조직량)가 가장 큰 슬라이드를 대표로 쓴다.
+    """
+    cptac_slide_types = _load_cptac_gdc_slide_types()
+    rows = []
+    for _, group in all_items.groupby("case_id"):
+        if group["dataset"].iloc[0] == "tcga":
+            sample_type = group["slide_id"].map(lambda s: _tcga_barcode_field(s, 3))
+            pool = group[sample_type == "01"]
+            if pool.empty:
+                pool = group
+            portion = pool["slide_id"].map(lambda s: _tcga_barcode_field(s, 5))
+            dx_pool = pool[portion == "DX"]
+            if not dx_pool.empty:
+                pool = dx_pool
+        else:
+            slide_type = group["slide_id"].map(cptac_slide_types.get)
+            not_normal = group[slide_type != "Solid Tissue Normal"]
+            pool = not_normal if not not_normal.empty else group
+            pool_slide_type = pool["slide_id"].map(cptac_slide_types.get)
+            tumor_pool = pool[pool_slide_type == "Primary Tumor"]
+            if not tumor_pool.empty:
+                pool = tumor_pool
+        rows.append(pool.loc[pool["n_tiles_kept"].idxmax()])
+    return pd.DataFrame(rows).reset_index(drop=True)
+
+
+def _exclude_normal_slides(all_items: pd.DataFrame) -> pd.DataFrame:
+    """확인된 정상 조직 슬라이드만 제외하고, 케이스당 나머지 슬라이드는 전부 그대로 둔다
+    (findings_backlog.md 14번 항목 절충안 — _select_representative_slide()의 "대표 1장으로 축소"
+    보다 훨씬 덜 급진적인 개입: TCGA 평균 슬라이드/case 2.52→2.28, CPTAC 3.22→2.76, 두 코호트 다
+    슬라이드가 0장이 되는 케이스는 없음).
+
+    TCGA: 바코드 sample type(idx=3)이 "01"(Primary Tumor)이 아닌 슬라이드(예: "11"=Solid Tissue
+    Normal) 제외.
+    CPTAC: GDC biospecimen에서 "Solid Tissue Normal"로 확인된 슬라이드 제외(_load_cptac_gdc_
+    slide_types() 참조) — GDC에 없는(tumor 여부 미상인) 슬라이드는 유지한다.
+    """
+    cptac_slide_types = _load_cptac_gdc_slide_types()
+    is_tcga = (all_items["dataset"] == "tcga").to_numpy()
+
+    tcga_keep = all_items["slide_id"].map(lambda s: _tcga_barcode_field(s, 3) == "01").to_numpy()
+    cptac_keep = all_items["slide_id"].map(lambda s: cptac_slide_types.get(s) != "Solid Tissue Normal").to_numpy()
+    keep = np.where(is_tcga, tcga_keep, cptac_keep)
+    return all_items[keep].reset_index(drop=True)
+
+
 def _stratified_case_split(case_df: pd.DataFrame, seed: int) -> dict:
     """
     (dataset, OS_event) 조합별로 case를 6:2:2(train/val/test)로 나눈다.
@@ -241,6 +331,21 @@ class WSISurvivalDataset(Dataset):
                        pdac_subtype_gene_ids()(Bailey/Moffitt subtype 분류용, ~340개)를
                        쓴다. literature_guided_gene_ids(top_n)(data/select_rnaseq_genes.py
                        산출물, 생존 예측에 직접 최적화된 유전자셋)를 넘기면 그걸 대신 쓴다.
+        restrict_case_ids: 주어지면 이 case_id 집합에 없는 환자는 전부 제외한다(다른 필터를
+                       전부 통과한 뒤 마지막에 적용). 레퍼런스(Leeyoungsup/pancreatic_cancer_
+                       pathology) 코호트 포함 기준(24개월 시점 생존 여부 확정 + WSI 보유)에
+                       맞춰 재검증할 때 사용 — reference_cohort.py::reference_eligible_case_ids()
+                       참조.
+        one_slide_per_case: True면 케이스당 슬라이드를 대표 1장으로 줄인다(기본 False — 케이스가
+                       가진 슬라이드를 전부 사용하는 기존 동작 유지). _select_representative_slide()
+                       참조 — 레퍼런스의 "환자당 diagnostic WSI 1개(TCGA)/tumor series 중 최대
+                       용량 1개(CPTAC)" 큐레이션에 맞춘 실험용 옵션(findings_backlog.md 14번 항목).
+                       exclude_normal_slides와 동시에 켜면 exclude_normal_slides가 먼저 적용된
+                       뒤(정상 조직 제외) 대표 1장을 고른다.
+        exclude_normal_slides: True면 확인된 정상 조직 슬라이드만 제외하고 케이스당 나머지는
+                       전부 그대로 둔다(기본 False). _exclude_normal_slides() 참조 —
+                       one_slide_per_case보다 훨씬 덜 급진적인 절충안(findings_backlog.md 14번
+                       항목, TCGA 평균 슬라이드/case 2.52→2.28, CPTAC 3.22→2.76).
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -257,6 +362,9 @@ class WSISurvivalDataset(Dataset):
         feature_backbone: str = "resnet50",
         rna_gene_ids: list[str] | None = None,
         rna_pathway_categories: dict[str, list[str]] | None = None,
+        restrict_case_ids: set[str] | None = None,
+        one_slide_per_case: bool = False,
+        exclude_normal_slides: bool = False,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -348,6 +456,12 @@ class WSISurvivalDataset(Dataset):
             parts.append(merged[has_patches].reset_index(drop=True))
 
         all_items = pd.concat(parts, ignore_index=True)
+        if exclude_normal_slides:
+            all_items = _exclude_normal_slides(all_items)
+        if one_slide_per_case:
+            all_items = _select_representative_slide(all_items)
+        if restrict_case_ids is not None:
+            all_items = all_items[all_items["case_id"].isin(restrict_case_ids)].reset_index(drop=True)
         if all_items.empty:
             joined = ["os_labels"]
             if with_clinical:
