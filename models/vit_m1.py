@@ -129,7 +129,9 @@ class ViT_M1(nn.Module):
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
                               cfg.num_transformer_layers, cfg.dropout,
                               use_grad_checkpoint=cfg.grad_checkpoint,
-                              num_landmarks=cfg.num_landmarks)
+                              num_landmarks=cfg.num_landmarks,
+                              use_nystrom=cfg.use_nystrom,
+                              use_spatial_embed=cfg.use_spatial_embed)
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         self.risk_head = nn.Sequential(

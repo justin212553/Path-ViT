@@ -42,11 +42,31 @@ class SpatialPositionEmbedding(nn.Module):
         )                                               # (N, D)
 
 
+class _FullSelfAttention(nn.Module):
+    """NystromAttention과 같은 (x)->x 시그니처의 표준(O(N^2)) self-attention 래퍼.
+
+    2026-07-22: 슬라이드당 패치 수가 실측상 num_landmarks(128)보다 작은 경우가 절반 이상이라
+    (findings_backlog.md), Nystrom 근사가 오히려 패딩 토큰을 landmark에 섞어 넣는 역효과를
+    냈을 수 있다는 의심으로 추가한 대안 — 이 프로젝트 규모(N<=544)에서는 O(N^2)이 GPU에
+    전혀 부담이 없어(544^2≈30만) 근사 없이 정확한 attention을 그대로 쓸 수 있다.
+    """
+
+    def __init__(self, dim: int, heads: int, dropout: float):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.mha(x, x, x, need_weights=False)
+        return out
+
+
 class NystromEncoderLayer(nn.Module):
     """
-    Pre-LN Transformer 블록, self-attention만 Nystrom 근사로 교체.
-    전체 softmax attention(O(N^2)) 대신 landmark 기반 근사(O(N))를 사용해
-    패치 수가 매우 큰 WSI(수만 패치)에서도 attention 연산이 가능하게 한다.
+    Pre-LN Transformer 블록, self-attention을 Nystrom 근사(기본) 또는 표준 O(N^2)
+    attention(use_nystrom=False)으로 구성한다. 전체 softmax attention(O(N^2)) 대신 landmark
+    기반 근사(O(N))를 쓰면 패치 수가 매우 큰 WSI(수만 패치)에서도 attention 연산이 가능해지지만,
+    이 프로젝트의 실제 패치 수 규모(수십~수백)에서는 O(N^2)도 부담 없어 use_nystrom=False로
+    근사 없는 정확한 attention을 시험해볼 수 있다.
 
     [use_ffn=False, --M4A_FF 맛보기 ablation] FFN 서브레이어를 통째로 제거한다.
     attention은 패치 간 정보를 "섞는" 역할, FFN은 그렇게 섞인 결과를 패치 하나 단위로
@@ -69,18 +89,22 @@ class NystromEncoderLayer(nn.Module):
         num_landmarks: int,
         use_ffn: bool = True,
         context_dim: int | None = None,
+        use_nystrom: bool = True,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
-        self.attn = NystromAttention(
-            dim=embed_dim,
-            dim_head=embed_dim // num_heads,
-            heads=num_heads,
-            num_landmarks=num_landmarks,
-            pinv_iterations=6,
-            residual=True,
-            dropout=dropout,
-        )
+        if use_nystrom:
+            self.attn = NystromAttention(
+                dim=embed_dim,
+                dim_head=embed_dim // num_heads,
+                heads=num_heads,
+                num_landmarks=num_landmarks,
+                pinv_iterations=6,
+                residual=True,
+                dropout=dropout,
+            )
+        else:
+            self.attn = _FullSelfAttention(embed_dim, num_heads, dropout)
         self.dropout1 = nn.Dropout(dropout)
 
         self.use_ffn = use_ffn
@@ -122,10 +146,17 @@ class ViTEncoder(nn.Module):
         num_landmarks: int = 128,
         use_ffn: bool = True,
         context_dim: int | None = None,
+        use_nystrom: bool = True,
+        use_spatial_embed: bool = True,
     ):
         super().__init__()
         self.pos_embedding = SpatialPositionEmbedding(embed_dim)
         self.use_grad_checkpoint = use_grad_checkpoint
+        # 2026-07-22: attention이 이미 uniform으로 붕괴해 있고(diagnose_wsi_reliance.py) 나이스트롬
+        # 근사가 landmark를 뭉뚱그리는 상황에서, 좌표 임베딩이 실제로 최종 예측에 기여하는지
+        # 직접 확인하는 ablation(findings_backlog.md, --no-spatial-embed) — False면
+        # pos_embedding을 아예 계산에서 제외한다(patch_tokens를 그대로 사용).
+        self.use_spatial_embed = use_spatial_embed
 
         self.layers = nn.ModuleList([
             NystromEncoderLayer(
@@ -136,6 +167,7 @@ class ViTEncoder(nn.Module):
                 num_landmarks=num_landmarks,
                 use_ffn=use_ffn,
                 context_dim=context_dim,
+                use_nystrom=use_nystrom,
             )
             for _ in range(num_layers)
         ])
@@ -154,8 +186,11 @@ class ViTEncoder(nn.Module):
         Returns:
             out_tokens: (N_patches, embed_dim) - 공간 문맥이 반영된 패치 토큰
         """
-        pos = self.pos_embedding(coords)       # (N, D)
-        x = (patch_tokens + pos).unsqueeze(0)  # (1, N, D)
+        if self.use_spatial_embed:
+            pos = self.pos_embedding(coords)       # (N, D)
+            x = (patch_tokens + pos).unsqueeze(0)  # (1, N, D)
+        else:
+            x = patch_tokens.unsqueeze(0)          # (1, N, D)
 
         if context is None and self.use_grad_checkpoint and self.training:
             out = checkpoint_sequential(self.layers, len(self.layers), x, use_reentrant=False)

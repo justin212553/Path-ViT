@@ -21,6 +21,15 @@ class ModelConfig:
     # 대형 WSI(N 수만 패치) backward 메모리 절감용. 끄면 메모리↑ 속도↑
     # (precomputed feature 모드처럼 메모리 여유가 있을 때 끄면 학습 시간 단축 가능)
     grad_checkpoint:        bool  = False
+    # 2026-07-22: 슬라이드당 패치 수 실측(TCGA train, 평균 131/중앙값 67/최대 544)이
+    # num_landmarks=128보다도 작은 경우가 절반 이상 — Nystrom이 "N개를 landmark개로 근사"가
+    # 아니라 오히려 패딩(zero) 토큰을 landmark에 섞어 넣는 역효과를 냈을 수 있다는 의심으로
+    # (findings_backlog.md), 이 규모에서는 O(N^2)이 전혀 부담 없다는 점(N<=544)까지 확인하고
+    # 일반 self-attention(nn.MultiheadAttention)으로 교체하는 옵션을 추가한다.
+    use_nystrom:             bool  = True
+    # 2026-07-22: attention이 이미 uniform으로 붕괴한 상태에서 좌표 임베딩이 실제로 기여하는지
+    # 직접 검증(findings_backlog.md, train.py --no-spatial-embed).
+    use_spatial_embed:       bool  = True
 
 
 @dataclass
