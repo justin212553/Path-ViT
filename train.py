@@ -934,13 +934,29 @@ def main():
         ),
         **ds_kwargs,
     )
+    # val/test/external은 항상 증강 없는 eval transform을 쓰므로(레퍼런스도 eval엔 미적용),
+    # --tile-augment --image 조합이어도 실시간 라이브 인코딩이 필요 없다 — 이미 캐싱된
+    # features.pt(비-증강)를 그대로 읽는 precomputed 모드로 강제해 매 epoch 불필요한 이미지
+    # 디코딩을 피한다(2026-07-22, real-time augmentation 파일럿이 예상보다 훨씬 느렸던 원인 중
+    # 하나 — eval 단계도 라이브 인코딩을 태우고 있었음).
+    eval_force_precomputed = args.tile_augment and not cfg.data.precomputed
+    if eval_force_precomputed:
+        cfg.data.precomputed = True
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
     test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
+    # train_c_index 리포팅도 항상 증강 없는 eval transform이므로, 캐싱된 features.pt로 읽는
+    # 별도 인스턴스를 둔다(train_ds 자체는 학습용으로 계속 patch_paths+라이브 augmentation 유지).
+    train_eval_ds = (
+        WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
+        if eval_force_precomputed else train_ds
+    )
     # [ExternalTest] 학습에 전혀 쓰이지 않은 코호트 전체(split="all") — 없으면 None
     external_ds = (
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
     )
+    if eval_force_precomputed:
+        cfg.data.precomputed = False
 
     dl_kwargs = dict(
         batch_size=1,
@@ -951,7 +967,7 @@ def main():
         prefetch_factor=2 if cfg.data.num_workers > 0 else None,
     )
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
-    train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
+    train_eval_loader = DataLoader(train_eval_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
     test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
