@@ -22,6 +22,7 @@ from sklearn.model_selection import train_test_split
 
 from config import Config
 from data.dataset import WSISurvivalDataset
+from data.patch_utils import FEATURES_AUG_FILENAME
 
 BACKBONE_DIM = 2048  # CNNEncoder의 backbone 출력 차원 (models/cnn_encoder.py 참조)
 
@@ -43,7 +44,9 @@ class DomainClassifier(nn.Module):
         return self.net(x).squeeze(-1)
 
 
-def _load_patch_features(cfg, dataset: str, feature_backbone: str = "resnet50") -> np.ndarray:
+def _load_patch_features(
+    cfg, dataset: str, feature_backbone: str = "resnet50", feature_filename_override: str | None = None,
+) -> np.ndarray:
     """
     dataset("tcga"|"cptac") 코호트 전체의 patch-level raw CNN feature (N, 2048)를 모은다.
 
@@ -53,10 +56,19 @@ def _load_patch_features(cfg, dataset: str, feature_backbone: str = "resnet50") 
     feature_backbone="resnet50_norm"이면 원본 features.pt 대신 Macenko stain-normalized
     features_norm.pt(utils/extract_features_stain_norm.py 산출물)를 읽는다 — 둘 다 2048-dim이라
     같은 DomainClassifier로 바로 비교 가능하다.
+
+    feature_filename_override="features_aug.pt"(FEATURES_AUG_FILENAME)면 실시간 augmentation
+    실험의 단일 실현(utils/extract_features_augmented.py 산출물)을 읽는다 — "augmentation을 거친
+    feature 공간이 원본보다 도메인 분리가 덜 되는가"를 검증하기 위한 용도(2026-07-22). 해당
+    슬라이드에 파일이 없으면 WSISurvivalDataset이 조용히 원본 features.pt로 폴백하므로, 두 코호트
+    모두 features_aug.pt를 미리 추출해둬야 결과가 유효하다.
     """
     feats = []
     for split in ("train", "val", "test"):
-        ds = WSISurvivalDataset(cfg.data, dataset=dataset, split=split, feature_backbone=feature_backbone)
+        ds = WSISurvivalDataset(
+            cfg.data, dataset=dataset, split=split, feature_backbone=feature_backbone,
+            feature_filename_override=feature_filename_override,
+        )
         feats.extend(
             slide["features"].numpy()
             for case_idx in range(len(ds))
@@ -77,6 +89,11 @@ def _parse_args() -> argparse.Namespace:
         choices=["resnet50", "resnet50_norm"],
         help="resnet50_norm이면 Macenko stain-normalized feature(features_norm.pt)로 검사한다.",
     )
+    parser.add_argument(
+        "--use-augmented", action="store_true",
+        help="features.pt 대신 features_aug.pt(utils/extract_features_augmented.py, 실시간 "
+             "augmentation의 단일 실현)로 검사한다 — 두 코호트 모두 미리 추출돼 있어야 한다.",
+    )
     return parser.parse_args()
 
 
@@ -86,12 +103,16 @@ def main():
     cfg.data.precomputed = True
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Loading TCGA patch features... (feature_backbone={args.feature_backbone})")
-    tcga_feats = _load_patch_features(cfg, "tcga", args.feature_backbone)
+    fname_override = FEATURES_AUG_FILENAME if args.use_augmented else None
+
+    print(f"Loading TCGA patch features... (feature_backbone={args.feature_backbone}, "
+          f"use_augmented={args.use_augmented})")
+    tcga_feats = _load_patch_features(cfg, "tcga", args.feature_backbone, fname_override)
     print(f"  {tcga_feats.shape[0]:,} patches")
 
-    print(f"Loading CPTAC patch features... (feature_backbone={args.feature_backbone})")
-    cptac_feats = _load_patch_features(cfg, "cptac", args.feature_backbone)
+    print(f"Loading CPTAC patch features... (feature_backbone={args.feature_backbone}, "
+          f"use_augmented={args.use_augmented})")
+    cptac_feats = _load_patch_features(cfg, "cptac", args.feature_backbone, fname_override)
     print(f"  {cptac_feats.shape[0]:,} patches")
 
     X = np.concatenate([tcga_feats, cptac_feats], axis=0).astype(np.float32)

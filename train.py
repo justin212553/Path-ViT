@@ -45,7 +45,7 @@ from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     pathway_category_gene_ids,
 )
-from data.patch_utils import PATCH_TRANSFORM_AUGMENTED
+from data.patch_utils import FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED
 from models import (
     ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
     ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
@@ -101,7 +101,8 @@ def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] |
 
 
 def _patient_risk(
-    model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0
+    model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0,
+    shuffle_patches: bool = False,
 ):
     """환자 1명이 보유한 슬라이드 전부를 forward해 임베딩을 평균 풀링한 뒤 risk score(scalar)를 계산한다.
     Returns: (risk, aux_loss, stage_aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서
@@ -156,16 +157,22 @@ def _patient_risk(
             features = slide.get("features")
             patch_paths = slide.get("patch_paths")
 
-            if model.training and patch_keep_frac < 1.0:
+            # [--shuffle-patches] list_patch_paths()가 항상 좌표순 정렬된 고정 순서를 반환하므로,
+            # NystromAttention의 landmark(순서대로 연속 그룹을 평균낸 근사, nystrom_attention
+            # 패키지 참조)가 매 epoch 똑같은 그룹핑을 반복해왔다 — patch_keep_frac<1.0(랜덤
+            # 서브샘플)일 땐 torch.randperm이 부수효과로 이미 순서도 섞어왔지만, frac=1.0이면
+            # 이 효과가 전혀 없었다. shuffle_patches=True면 frac=1.0이어도(k=n) 순서만 순수하게
+            # 매 epoch 다시 섞는다(findings_backlog.md 참조 — 정규화 효과 vs 나이스트롬 근사 품질
+            # 저하 트레이드오프를 직접 검증하는 실험).
+            if model.training and (patch_keep_frac < 1.0 or shuffle_patches):
                 n = coords.shape[0]
                 k = max(1, round(n * patch_keep_frac))
-                if k < n:
-                    idx = torch.randperm(n)[:k]
-                    coords = coords[idx]
-                    if features is not None:
-                        features = features[idx]
-                    if patch_paths is not None:
-                        patch_paths = [patch_paths[i] for i in idx.tolist()]
+                idx = torch.randperm(n)[:k]
+                coords = coords[idx]
+                if features is not None:
+                    features = features[idx]
+                if patch_paths is not None:
+                    patch_paths = [patch_paths[i] for i in idx.tolist()]
 
             coords = coords.to(device, non_blocking=True)
             forward_kwargs = {"rna_context": z_rna} if z_rna is not None else {}
@@ -220,6 +227,7 @@ def _patient_risk(
 def train_one_epoch(
     model, loader, optimizer, cfg, device, amp_ctx, transform,
     patch_keep_frac: float = 1.0, rna_aux_weight: float = 0.0, stage_aux_weight: float = 0.0,
+    shuffle_patches: bool = False,
 ) -> float:
     model.train()
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
@@ -262,7 +270,8 @@ def train_one_epoch(
         if len(patient_slides) == 0:
             continue
         risk, aux_loss, stage_aux_loss = _patient_risk(
-            model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac
+            model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
+            shuffle_patches=shuffle_patches,
         )
 
         risks.append(risk)
@@ -406,6 +415,29 @@ def _parse_args() -> argparse.Namespace:
     # [LateFusion] --fusion 플래그로 LateFusionViT 사용 여부 선택
     # 미지정 시 기존 ViT_M1(ViT+ABMIL)로 동작 — ablation baseline 유지
     parser.add_argument(
+        "--full-attention", action="store_true",
+        help="ViT/Nystromformer 블록의 self-attention을 Nystrom 근사 대신 표준 O(N^2) "
+             "attention(nn.MultiheadAttention)으로 교체한다(cfg.model.use_nystrom=False). "
+             "슬라이드당 패치 수 실측(평균 131/중앙값 67/최대 544)이 num_landmarks(128)보다도 "
+             "작은 경우가 절반 이상이라, Nystrom 근사가 오히려 패딩 토큰을 landmark에 섞어 "
+             "역효과를 냈을 수 있다는 의심 검증용(findings_backlog.md). 이 규모면 O(N^2)도 "
+             "GPU에 부담 없다. 켜면 wandb/checkpoint에 _FULLATTN 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--no-spatial-embed", action="store_true",
+        help="ViT/Nystromformer 입력에서 좌표 기반 SpatialPositionEmbedding을 아예 뺀다"
+             "(patch_tokens를 그대로 사용, cfg.model.use_spatial_embed=False). attention이 이미 "
+             "uniform으로 붕괴해 있고(diagnose_wsi_reliance.py) 나이스트롬/full-attention 둘 다 "
+             "landmark·정밀도 실험에서 뚜렷한 신호가 없었던 상황에서, 좌표 임베딩 자체가 최종 "
+             "예측에 기여하는지 직접 확인하는 ablation(findings_backlog.md). 켜면 wandb/"
+             "checkpoint에 _NOSPATIAL 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--epochs", type=int, default=None,
+        help="cfg.train.epochs(기본 30) 덮어쓰기 — 짧은 파일럿 실험용(예: 실시간 augmentation "
+             "시간 확인, --epochs 10).",
+    )
+    parser.add_argument(
         "--dropout", type=float, default=None,
         help="cfg.model.dropout(기본 0.3) 덮어쓰기 — ViT/Nystromformer, ABMIL, RNA/Clinical "
              "인코더 전체가 공유하는 dropout rate 스윕용(findings_backlog.md 13번 항목 후속, "
@@ -425,15 +457,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--tile-augment", action="store_true",
-        help="레퍼런스 M4_Train.ipynb::get_train_cached_patch_transform()과 동일하게 학습 시 "
-             "타일에 RandomHorizontalFlip/VerticalFlip/ColorJitter/GaussianBlur를 실시간으로 "
-             "적용한다(data/patch_utils.py::PATCH_TRANSFORM_AUGMENTED) — 매 epoch 매 forward마다 "
-             "raw 이미지를 다시 backbone에 태우므로 --image(비-precomputed 모드)와 함께만 "
-             "쓸 수 있다(features.pt 캐시를 쓰는 기본 모드에서는 애초에 backbone을 다시 안 태우니 "
-             "augmentation이 적용될 지점이 없다). val/test/external은 항상 증강 없는 기본 "
-             "PATCH_TRANSFORM을 쓴다(레퍼런스도 eval엔 미적용). --image 없이 켜면 에러. "
-             "주의: 학습이 극도로 느려진다(로컬 GPU 기준 ResNet50 1024px ~24 img/s — findings_"
-             "backlog.md 참조). 켜면 wandb/checkpoint에 _AUG 접미사가 자동으로 붙는다.",
+        help="레퍼런스 M4_Train.ipynb::get_train_cached_patch_transform()의 학습 시 타일 "
+             "augmentation(RandomHorizontalFlip/VerticalFlip/ColorJitter/GaussianBlur)을 흉내낸다. "
+             "--image와 함께 쓰면(권장) 매 epoch 실시간으로 다시 augment+encode하는 진짜 버전 "
+             "(train_ds.transform=PATCH_TRANSFORM_AUGMENTED, val/test/external은 항상 증강 없는 "
+             "PATCH_TRANSFORM) — scripts/reference_repro_m4.py --tile-augment로 pooled/seed126에서 "
+             "검증(0.674->0.711, findings_backlog.md 참조). --image 없이 쓰면(구버전 절충안) "
+             "--seed로 고정된 augmentation을 슬라이드당 1벌만 미리 추출해둔 features_aug.pt"
+             "(utils/extract_features_augmented.py)를 학습 split에서만 읽는다 — 매 epoch 다른 view가 "
+             "아니라 고정된 1벌이라 정규화 효과가 약했던 절충안(null result 확인됨). 켜면 wandb/"
+             "checkpoint에 _AUG 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--exclude-normal-slides", action="store_true",
@@ -442,6 +475,38 @@ def _parse_args() -> argparse.Namespace:
              "--one-slide-per-case보다 훨씬 덜 급진적인 절충안(TCGA 평균 슬라이드/case "
              "2.52→2.28, CPTAC 3.22→2.76). 기본은 미사용. 켜면 wandb/checkpoint에 _NONORMAL "
              "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--rna-dim", type=int, default=None,
+        help="--PMA 전용: RNA 인코더 출력 차원(기본 None=cfg.model.embed_dim과 동일, 기존 동작). "
+             "레퍼런스처럼 RNA를 WSI(embed_dim)보다 넓게 쓰는 조합(예: RNA=128, WSI=64)을 "
+             "시도할 때 --clinical-dim과 함께 사용. 기본값과 다르면 wandb/checkpoint에 "
+             "_RNADIM{rna-dim} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--clinical-dim", type=int, default=None,
+        help="--PMA 전용: Clinical 인코더 출력 차원(기본 None=cfg.model.embed_dim과 동일). "
+             "레퍼런스처럼 Clinical을 좁게 쓰는 조합(예: Clinical=16)을 시도할 때 --rna-dim과 "
+             "함께 사용. 기본값과 다르면 wandb/checkpoint에 _CLINDIM{clinical-dim} 접미사가 "
+             "자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--shuffle-patches", action="store_true",
+        help="list_patch_paths()가 항상 반환하는 좌표순 고정 순서 대신, 학습 forward마다 패치 "
+             "순서를 무작위로 섞는다(coords/features/patch_paths를 같은 permutation으로 함께 "
+             "재정렬 — 패치별 좌표 자체는 안 바뀜). NystromAttention의 landmark가 순서대로 연속된 "
+             "패치를 그룹핑해 평균내는 방식이라(nystrom_attention 패키지), 고정 순서면 매 epoch "
+             "같은 landmark 그룹핑이 반복된다 — 이게 과적합에 기여하는지 검증하는 실험. "
+             "--patch-keep-frac<1.0과 별개로 독립 동작(frac=1.0이어도 순서만 섞을 수 있음). "
+             "켜면 wandb/checkpoint에 _SHUF 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--rna-gate-only", action="store_true",
+        help="--PMA 전용: z_rna를 component_coattn의 query(WSI 4관점 중 고르는 용도)로만 쓰고, "
+             "risk_head 직결 concat에서는 뺀다(risk_head 입력이 [z_wsi, z_clinical] 2D로 축소, "
+             "findings_backlog.md 최상위 발견 2차) — RNA 정보는 co-attention을 통해 z_wsi에 "
+             "여전히 녹아들지만, risk_head가 z_rna로 곧장 우회하는 지름길은 막는다. 켜면 "
+             "wandb/checkpoint에 _RNAGATE 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--fusion", action="store_true",
@@ -584,6 +649,12 @@ def main():
         cfg.data.patches_root_cptac = args.patches_root_cptac
     if args.dropout is not None:
         cfg.model.dropout = args.dropout
+    if args.epochs is not None:
+        cfg.train.epochs = args.epochs
+    if args.full_attention:
+        cfg.model.use_nystrom = False
+    if args.no_spatial_embed:
+        cfg.model.use_spatial_embed = False
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
@@ -607,6 +678,10 @@ def main():
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
             "--PMA/--M4A_FF/--M2_FF/--M5)에서만 사용 가능합니다."
         )
+    if (args.rna_dim is not None or args.clinical_dim is not None) and not args.PMA:
+        raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
+    if args.rna_gate_only and not args.PMA:
+        raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
     if args.fusion and args.backbone != "resnet50":
         raise ValueError(
             "--fusion(LateFusionViT)의 cluster_centroids.pt는 ResNet50 raw feature(2048-dim) "
@@ -755,13 +830,23 @@ def main():
         # _1SLIDE = 케이스당 대표 슬라이드 1장만 사용 표시(findings_backlog.md 14번 항목).
         model_prefix += "_1SLIDE"
     if args.tile_augment:
-        if not args.image:
-            raise ValueError("--tile-augment는 --image(비-precomputed 모드)와 함께만 쓸 수 있습니다.")
-        # _AUG = 학습 시 실시간 타일 augmentation 사용 표시.
+        # _AUG = 학습 시 타일 augmentation(seed 고정, 1회성 features_aug.pt) 사용 표시.
         model_prefix += "_AUG"
     if args.dropout is not None and args.dropout != 0.3:
         # _DROP{dropout} = cfg.model.dropout(기본 0.3) 스윕 표시.
         model_prefix += f"_DROP{args.dropout:g}"
+    if args.rna_dim is not None:
+        model_prefix += f"_RNADIM{args.rna_dim}"
+    if args.clinical_dim is not None:
+        model_prefix += f"_CLINDIM{args.clinical_dim}"
+    if args.rna_gate_only:
+        model_prefix += "_RNAGATE"
+    if args.shuffle_patches:
+        model_prefix += "_SHUF"
+    if args.full_attention:
+        model_prefix += "_FULLATTN"
+    if args.no_spatial_embed:
+        model_prefix += "_NOSPATIAL"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -816,6 +901,12 @@ def main():
                 "one_slide_per_case":    args.one_slide_per_case,
                 "exclude_normal_slides": args.exclude_normal_slides,
                 "tile_augment":          args.tile_augment,
+                "rna_dim":               args.rna_dim,
+                "clinical_dim":          args.clinical_dim,
+                "rna_gate_only":         args.rna_gate_only,
+                "shuffle_patches":       args.shuffle_patches,
+                "full_attention":        args.full_attention,
+                "no_spatial_embed":      args.no_spatial_embed,
                 "dataset":               args.dataset,
                 "external_dataset":      external_dataset,
             },
@@ -830,10 +921,17 @@ def main():
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
     )
-    # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 기본 transform).
+    # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 features.pt/
+    # PATCH_TRANSFORM). --image와 함께 쓰면 매 epoch 실시간 augmentation(transform 교체),
+    # --image 없이 쓰면(precomputed 모드) 기존 1회성 features_aug.pt 폴백.
     train_ds = WSISurvivalDataset(
         cfg.data, dataset=args.dataset, split="train",
-        transform=PATCH_TRANSFORM_AUGMENTED if args.tile_augment else None,
+        feature_filename_override=(
+            FEATURES_AUG_FILENAME if (args.tile_augment and cfg.data.precomputed) else None
+        ),
+        transform=(
+            PATCH_TRANSFORM_AUGMENTED if (args.tile_augment and not cfg.data.precomputed) else None
+        ),
         **ds_kwargs,
     )
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
@@ -890,7 +988,9 @@ def main():
                          precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.PMA:
         model = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone,
+                         rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
+                         rna_gate_only=args.rna_gate_only, **stage_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                             precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -1052,8 +1152,13 @@ def main():
         lr_now        = optimizer.param_groups[0]["lr"]
         loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform,
                                          patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
-                                         stage_aux_weight=args.stage_aux_weight)
-        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
+                                         stage_aux_weight=args.stage_aux_weight,
+                                         shuffle_patches=args.shuffle_patches)
+        # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
+        # 항상 증강 없는 PATCH_TRANSFORM으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
+        # --image일 때 매 epoch 학습 91명을 두 번(학습+리포팅) 실시간 augment하게 돼 시간이
+        # 배로 든다(2026-07-22 발견, 실측 epoch당 소요가 예상의 2배 가까이 나온 원인).
+        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, PATCH_TRANSFORM)
         metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         val_td_auc    = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"],
@@ -1116,7 +1221,7 @@ def main():
     # 학습 종료 후, best checkpoint로 held-out test set을 "딱 한 번" 평가한다.
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
-    train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, train_ds.transform)
+    train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, PATCH_TRANSFORM)
     test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
     test_td_auc  = compute_time_dependent_auc(
         train_metrics_final["times"], train_metrics_final["events"],

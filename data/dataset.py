@@ -346,6 +346,11 @@ class WSISurvivalDataset(Dataset):
                        전부 그대로 둔다(기본 False). _exclude_normal_slides() 참조 —
                        one_slide_per_case보다 훨씬 덜 급진적인 절충안(findings_backlog.md 14번
                        항목, TCGA 평균 슬라이드/case 2.52→2.28, CPTAC 3.22→2.76).
+        feature_filename_override: 주어지면 feature_backbone 대신 이 파일명을 읽는다(예:
+                       "features_aug.pt", utils/extract_features_augmented.py 산출물). 해당
+                       슬라이드에 이 파일이 없으면 원래 feature_backbone 파일명으로 조용히
+                       폴백한다(train.py --tile-augment가 train split에서만 이걸 쓴다 — val/
+                       test/external은 항상 기본 feature_backbone).
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -365,6 +370,7 @@ class WSISurvivalDataset(Dataset):
         restrict_case_ids: set[str] | None = None,
         one_slide_per_case: bool = False,
         exclude_normal_slides: bool = False,
+        feature_filename_override: str | None = None,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -384,6 +390,7 @@ class WSISurvivalDataset(Dataset):
         self.with_staging     = with_staging
         self.with_rna         = with_rna
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
+        self.feature_filename_override = feature_filename_override
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
 
@@ -526,10 +533,13 @@ class WSISurvivalDataset(Dataset):
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])
 
         if self.precomputed:
-            features = torch.load(slide_dir / self.features_filename, weights_only=True)
+            features_filename = self.features_filename
+            if self.feature_filename_override is not None and (slide_dir / self.feature_filename_override).exists():
+                features_filename = self.feature_filename_override
+            features = torch.load(slide_dir / features_filename, weights_only=True)
             if len(features) != len(patch_paths):
                 raise RuntimeError(
-                    f"{slide_dir}: {self.features_filename} 행 수({len(features)})가 패치 수"
+                    f"{slide_dir}: {features_filename} 행 수({len(features)})가 패치 수"
                     f"({len(patch_paths)})와 다릅니다 — utils.extract_features를 다시 실행하세요."
                 )
             item["features"] = features

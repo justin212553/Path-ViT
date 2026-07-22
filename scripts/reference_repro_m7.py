@@ -8,6 +8,10 @@
 --protocol external(기본): 우리 세션 표준 관례대로 TCGA train -> CPTAC test 단일 방향 진짜 external.
     train/val case 목록은 WSISurvivalDataset(--dataset tcga)의 기존 6:2:2 split과 동일하게 맞춰서
     지금까지 우리가 돌린 모든 M7_EX/PMA_EX 실험과 같은 환자 집합으로 비교 가능하게 한다.
+    val은 early stopping 전용(모델 선택에 쓰임)이라 그 자체로는 held-out test가 아니다 —
+    2026-07-21(3차): tcga "test" split(학습에 전혀 관여하지 않은 순수 held-out)을 추가로 평가해
+    internal_test_c_index(tcga)로 함께 보고한다. 우리 자체 모델들이 보고해온 "Internal C"와
+    동일한 정의라 나란히 비교 가능하다.
 --protocol pooled: 레퍼런스가 실제로 헤드라인 성적을 낸 방식 그대로 재현 — TCGA+CPTAC를 하나로 합친
     뒤 sklearn train_test_split(stratify=dataset+event, test_size=0.2/0.25, random_state=42)로
     무작위 분할(M4_Train.ipynb 코드 그대로). age_mean/std도 레퍼런스와 동일하게 pooled train만으로
@@ -107,15 +111,39 @@ def _case_ids_for_split(cfg, dataset: str, split: str, rna_gene_ids: list[str]) 
     return list(ds.cases)
 
 
-def _pooled_case_pool(cfg, rna_gene_ids: list[str]) -> pd.DataFrame:
+# 2026-07-21(4차): M4_Train.ipynb 실제 split 생성 셀(reference_repo/M4_Train.ipynb)을 직접
+# 읽어보니 REQUIRE_COMPLETE_24M_HORIZONS=True가 후보 pool 단계에서 적용되고 있었다 — 4개
+# horizon(6/12/18/24개월) 전부에 대해 "그 시점까지 죽었는지 살았는지"가 확정된 case만 남긴다.
+# 수식을 풀어보면 단일 조건으로 요약된다: 24개월(730.5일) 이전에 censoring된(event=0이면서
+# OS_time<24개월) case만 제외 — 즉 "24개월 넘게 추적됐거나, 24개월 안에 사망이 확인된" case만
+# 남긴다. 우리 pooled 재현(0.664)이 레퍼런스 헤드라인(0.701)에 못 미치는 잔여 격차의 유력한
+# 원인 후보로 뒤늦게 발견됨(TCGA 185명 중 58명(31%), CPTAC 159명 중 20명(13%)이 이 조건으로
+# 추가 제외됨 — 무시할 수 없는 규모). M4 자체는 --dataset both의 external/pooled 재현에 이
+# 필터를 아직 안 씀 — pooled 프로토콜에만 --require-complete-horizon으로 재현 대상 추가.
+HORIZON_24M_DAYS = 24 * 30.4375
+
+
+def _complete_horizon_mask(os_time: pd.Series, os_event: pd.Series) -> pd.Series:
+    """REQUIRE_COMPLETE_24M_HORIZONS와 동일한 결과를 내는 단순화된 단일 조건.
+    제외 대상(False): event=0(censored)이면서 OS_time이 24개월(730.5일) 미만인 case."""
+    return ~((os_event == 0) & (os_time < HORIZON_24M_DAYS))
+
+
+def _pooled_case_pool(cfg, rna_gene_ids: list[str], require_complete_horizon: bool = False) -> pd.DataFrame:
     """RNA+Clinical+OS+WSI를 전부 갖춘 TCGA+CPTAC 전체 후보 case pool을
     (dataset, case_id, OS_event) 테이블로 반환한다(레퍼런스 pooled split의 대상 모집단)."""
     ds = WSISurvivalDataset(
         cfg, dataset="both", split="all",
         with_clinical=True, with_rna=True, rna_gene_ids=rna_gene_ids,
     )
-    case_df = ds.items.groupby("case_id").agg(dataset=("dataset", "first"), OS_event=("OS_event", "first"))
-    return case_df.reset_index()
+    case_df = ds.items.groupby("case_id").agg(
+        dataset=("dataset", "first"), OS_event=("OS_event", "first"), OS_time=("OS_time", "first"),
+    ).reset_index()
+    if require_complete_horizon:
+        before = len(case_df)
+        case_df = case_df[_complete_horizon_mask(case_df["OS_time"], case_df["OS_event"])].copy()
+        print(f"[require-complete-horizon] {before} -> {len(case_df)} case (24개월 미만 censored {before - len(case_df)}명 제외)")
+    return case_df
 
 
 def _build_tensors(rows: pd.DataFrame, rna_gene_ids: list[str], age_mean: float, age_std: float,
@@ -161,7 +189,7 @@ def _evaluate(model, batch: dict, device) -> float:
     return harrell_c_index(batch["os_time"].numpy(), batch["os_event"].numpy().astype(int), risks)
 
 
-def _train_and_eval(train, val, test, rna_dim, args, device) -> tuple[float, float]:
+def _train_and_eval(train, val, test, rna_dim, args, device, internal_test=None) -> tuple:
     config = TabularSurvivalConfig(
         rnaseq_dim=rna_dim, clinical_dim=3,
         rnaseq_hidden_dim=256, rnaseq_embed_dim=256, clinical_embed_dim=16,
@@ -216,6 +244,9 @@ def _train_and_eval(train, val, test, rna_dim, args, device) -> tuple[float, flo
 
     model.load_state_dict(best_state)
     test_c = _evaluate(model, test, device)
+    if internal_test is not None:
+        internal_test_c = _evaluate(model, internal_test, device)
+        return best_val_c, test_c, internal_test_c
     return best_val_c, test_c
 
 
@@ -232,31 +263,38 @@ def main():
     parser.add_argument("--rna-source", type=str, default="tpm", choices=["tpm", "fpkm_uq_log2"],
                          help="tpm(기본): 원본 파이프라인(TPM 원본값 z-score). fpkm_uq_log2: "
                               "레퍼런스와 동일하게 log2(fpkm_uq_unstranded+1) z-score(검증용).")
+    parser.add_argument("--require-complete-horizon", action="store_true",
+                         help="--protocol pooled 전용: M4_Train.ipynb의 REQUIRE_COMPLETE_24M_HORIZONS와 "
+                              "동일하게, 24개월 미만 censored case를 후보 pool에서 제외한다.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     cfg = Config()
     rna_gene_ids = literature_guided_gene_ids(1500)
 
+    internal_test = None
     if args.protocol == "external":
         set_seed(args.seed)
         cfg.data.seed = args.seed
         train_ids = _case_ids_for_split(cfg.data, "tcga", "train", rna_gene_ids)
         val_ids   = _case_ids_for_split(cfg.data, "tcga", "val",   rna_gene_ids)
+        internal_test_ids = _case_ids_for_split(cfg.data, "tcga", "test", rna_gene_ids)
         test_ids  = _case_ids_for_split(cfg.data, "cptac", "all",  rna_gene_ids)
-        print(f"[external] train(tcga)={len(train_ids)}  val(tcga)={len(val_ids)}  test(cptac)={len(test_ids)}")
+        print(f"[external] train(tcga)={len(train_ids)}  val(tcga)={len(val_ids)}  "
+              f"internal_test(tcga)={len(internal_test_ids)}  test(cptac)={len(test_ids)}")
 
         age_mean = pd.read_csv(CLINICAL_PATHS["tcga"])["age_years"].astype(float).mean()
         age_std  = pd.read_csv(CLINICAL_PATHS["tcga"])["age_years"].astype(float).std(ddof=0)
 
         train = _build_tensors(pd.DataFrame({"dataset": "tcga", "case_id": train_ids}), rna_gene_ids, age_mean, age_std, args.rna_source)
         val   = _build_tensors(pd.DataFrame({"dataset": "tcga", "case_id": val_ids}),   rna_gene_ids, age_mean, age_std, args.rna_source)
+        internal_test = _build_tensors(pd.DataFrame({"dataset": "tcga", "case_id": internal_test_ids}), rna_gene_ids, age_mean, age_std, args.rna_source)
         test  = _build_tensors(pd.DataFrame({"dataset": "cptac", "case_id": test_ids}), rna_gene_ids, age_mean, age_std, args.rna_source)
         eval_label = "external_test_c_index(cptac)"
 
     else:  # pooled — 레퍼런스 M4_Train.ipynb의 split 로직 그대로 재현
         set_seed(args.seed)
-        pool = _pooled_case_pool(cfg.data, rna_gene_ids)
+        pool = _pooled_case_pool(cfg.data, rna_gene_ids, require_complete_horizon=args.require_complete_horizon)
         pool["stratify_group"] = pool["dataset"].astype(str) + "_event" + pool["OS_event"].astype(str)
         print(f"[pooled] candidate pool={len(pool)}  by dataset={pool['dataset'].value_counts().to_dict()}")
 
@@ -284,10 +322,12 @@ def main():
         test  = _build_tensors(test_df[["dataset", "case_id"]],  rna_gene_ids, age_mean, age_std, args.rna_source)
         eval_label = "pooled_test_c_index"
 
-    best_val_c, test_c = _train_and_eval(train, val, test, len(rna_gene_ids), args, device)
+    result = _train_and_eval(train, val, test, len(rna_gene_ids), args, device, internal_test=internal_test)
     print(f"\n=== RESULT (protocol={args.protocol}, seed={args.seed}, split_seed={args.split_seed}) ===")
-    print(f"best_val_c_index={best_val_c:.4f}")
-    print(f"{eval_label}={test_c:.4f}")
+    print(f"best_val_c_index={result[0]:.4f}")
+    print(f"{eval_label}={result[1]:.4f}")
+    if len(result) == 3:
+        print(f"internal_test_c_index(tcga)={result[2]:.4f}")
 
 
 if __name__ == "__main__":

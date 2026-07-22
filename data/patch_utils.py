@@ -18,9 +18,11 @@ PATCH_TRANSFORM = transforms.Compose([
 # 레퍼런스(Leeyoungsup/pancreatic_cancer_pathology) M4_Train.ipynb::get_train_cached_patch_
 # transform()과 동일한 학습용 타일 augmentation — 우리는 지금까지 feature를 한 번만 추출해
 # 캐싱해서(features.pt) 재사용해왔기 때문에 이 augmentation이 구조적으로 아예 없었다
-# (findings_backlog.md). train.py --tile-augment(--image와 함께 사용, precomputed=False로
-# 매 forward마다 backbone을 직접 태우는 기존 경로 재사용)에서 train_ds.transform으로 쓴다 —
-# val/test/external은 기본 PATCH_TRANSFORM(증강 없음)을 그대로 쓴다(레퍼런스도 eval엔 미적용).
+# (findings_backlog.md). 매 epoch 실시간으로 적용하면(backbone을 매번 다시 태움) 로컬/HPC
+# 할당량 기준 모두 비현실적으로 느려서, seed 하나로 결정되는 augmentation을 슬라이드당 딱
+# 1벌만 미리 적용해 feature를 뽑아두는 절충안을 쓴다(utils/extract_features_augmented.py,
+# train.py --tile-augment) — 매 epoch 다른 view는 아니지만, 최소한 "증강 없음"보다는 나은
+# 신호를 준다. val/test/external은 기본 PATCH_TRANSFORM(증강 없음)을 그대로 쓴다.
 PATCH_TRANSFORM_AUGMENTED = transforms.Compose([
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomVerticalFlip(p=0.5),
@@ -48,6 +50,8 @@ UNI_PATCH_TRANSFORM = transforms.Compose([
 FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
 FEATURES_UNI_FILENAME  = "features_uni.pt"   # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
 FEATURES_NORM_FILENAME = "features_norm.pt"  # Macenko stain-normalized + ResNet50 산출물 (utils/extract_features_stain_norm.py)
+FEATURES_AUG_FILENAME  = "features_aug.pt"   # 타일 augmentation(seed 고정, 1회성) + ResNet50 산출물
+                                              # (utils/extract_features_augmented.py, train.py --tile-augment)
 
 _COORD_RE = re.compile(r"r(\d+)_c(\d+)")
 
