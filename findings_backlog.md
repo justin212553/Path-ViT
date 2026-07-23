@@ -1,5 +1,99 @@
 # PATH-ViT 발견 사항 및 우선순위 백로그
 
+## 🔴 최상위 발견(2026-07-22) — TCGA-BRCA로 스케일 검증: 표본이 커지면 WSI가 순증분 기여를 한다
+
+**상태: 확인됨(seed 42 단일 결과) — 다른 시드/더 긴 학습으로 재현성 확인 필요.**
+
+지금까지(1차/2차 최상위 발견 포함) TCGA-PAAD(152 case)에서 WSI 브랜치가 ablation-neutral,
+attention uniform 붕괴, RNA 대비 gradient 1/4 등 온갖 진단으로도 "WSI가 기여를 못 한다"는 결론이
+계속 나왔다 — architecture를 바꿔도(Nystrom↔full-attention, spatial embed 유무, backbone
+ResNet50↔UNI 100배 확장) 전부 null. **표본 자체가 152명으로 너무 작아서 WSI 브랜치(수십만 파라미터)를
+학습시킬 신호가 부족했던 것 아니냐는 가설을 표본을 7배(TCGA-BRCA, 1058 case) 늘려 직접 검증했다.**
+
+- **데이터**: TCGA-BRCA, WSI(HuggingFace `Dearcat/CPathPatchFeature`의 UNI backbone 사전추출
+  feature) + RNA-seq(GDC STAR-Counts, PAAD와 동일하게 log2(FPKM-UQ+1) 후 코호트 내부 z-score,
+  `scripts/extract_brca_rna.py`) + clinical(age, GDC API 직접 조회, `scripts/extract_brca_labels.py`)
+  세 데이터 모두 존재하는 case 1058명(`scripts/brca_common.py`). RNA 유전자셋은 PDAC 전용
+  literature_1500(Bailey/Moffitt subtype 큐레이션)이 유방암엔 안 맞아 대신 **train split 내부
+  고분산 상위 1500개**로 대체(`scripts/select_brca_rna_genes.py`) — val/test 라벨은 유전자 선정에
+  전혀 안 씀(literature_1500과 동일 원칙).
+- **모델**: PMA_EX_SS_AUX(ViT_PMA, 지금까지 가장 나은 M4 레시피)를 아키텍처/하이퍼파라미터 그대로
+  재현 — Nystromformer 포함(embed_dim=64, num_heads=2, num_landmarks=128), patch_keep_frac=0.8,
+  rna_aux_weight=1.0, lr=1e-5/wd=1e-1/epochs=30. `train.py` 실제 코드(`_patient_risk`/
+  `train_one_epoch`/`evaluate`/`_build_scheduler`)와 `models/vit_pma.py::ViT_PMA`를 그대로 import해
+  재사용(`scripts/train_brca_m4.py`) — 로직 드리프트 방지. 대조군 M7(`models/clinical_rna_only.py`
+  ::ClinicalRNAOnly, WSI 없음)도 `train_light.py` 실제 코드를 그대로 import(`scripts/
+  train_brca_m7.py`)해 **같은 case/split/유전자셋**으로 비교.
+- **결과(BRCA internal, seed=42, 동일 환경)**:
+
+  | 모델 | test_c_index | test_HR | logrank_p | best val epoch |
+  |---|---|---|---|---|
+  | M7(Clinical+RNA, WSI 없음) | 0.6620 | 1.503 | 0.2751 | 4 (epoch 24 early stop, patience=20) |
+  | **M4(ViT_PMA, WSI+RNA+Clinical)** | **0.7155** | 1.885 | 0.0845 | 30 (끝까지 상승, plateau 안 됨) |
+
+  **M4가 M7보다 +0.0535(test c-index) 높다.** PAAD에서는 한 번도 못 봤던 방향의 결과 — 같은
+  아키텍처(PMA_EX_SS_AUX)를 표본만 7배 늘려 재현했더니 WSI가 확실한 순증분 기여를 한다. M7은
+  lr=1e-3 특유의 빠른 과적합으로 epoch 4에서 정점(train_c_index 0.97+로 치솟음)을 찍고 조기
+  종료된 반면, M4는 val_c_index가 30 epoch 끝까지 단조 상승 중이었고 아직 plateau에 도달하지
+  않았다 — "덜 학습된" 상태에서도 이겼다는 뜻이라, epoch을 늘리면 격차가 더 벌어질 가능성이 있다.
+- **해석**: 지금까지의 "WSI ablation-neutral" 계열 negative result들은 아키텍처 결함이 아니라
+  **TCGA-PAAD 152명이라는 표본 규모 자체가 병목이었다는 가설을 강하게 지지한다.** UNI backbone
+  100배 확장(파라미터 용량)으로도 못 풀렸던 문제가 표본 7배 확장(학습 신호량)으로는 풀렸다는 점이
+  대조적 — "이미 종료된 경로" 절의 "backbone 품질/용량보다 표본 규모·censored 라벨의 낮은 신호
+  대 잡음비 자체가 병목"이라는 기존 결론과 정확히 부합한다.
+- **주의(재현성 확인 전)**: 아직 **seed 42 단일 결과**다. 다음 확인 필요: (1) 다른 시드(84/126)로
+  같은 방향이 재현되는지, (2) M4 val이 plateau 안 된 채 30 epoch에서 끊겼으므로 epoch을 늘렸을 때
+  더 좋아지는지(혹은 오히려 과적합으로 꺾이는지). (3) `--patch-keep-frac 0.8`이 매 학습 step마다
+  `torch.randperm`으로 패치를 서브샘플하는데, 이게 Nystromformer의 순서-의존적 landmark 그룹핑과
+  결합해 공간 정보를 원치 않게 뒤섞었을 가능성 — 이 조합이 이번 긍정적 결과에 실제로 기여했는지,
+  아니면 오히려 그것과 무관하게(혹은 그것을 극복하고) 나온 결과인지는 별도 ablation으로 검증
+  필요(진행 예정, PAAD에서 이미 개별적으로는 `--shuffle-patches` 단독(null)·`--full-attention`
+  단독(3시드 재현 안 됨, 노이즈) 둘 다 null이었지만 **"patch_keep_frac<1.0으로 인한 매 epoch
+  암묵적 재셔플 + Nystrom"의 조합 자체**는 별도로 검증된 적이 없다).
+- **후속 검증(2026-07-22, 같은 날) — `patch_keep_frac<1.0`의 암묵적 셔플 우려는 기각**: 위 "주의"
+  항목 (3)을 직접 검증 — 같은 seed=42로 `--patch-keep-frac 1.0`(매 step 셔플 없음, 순수 baseline)
+  버전을 추가로 돌려 기존 0.8(암묵적 셔플) 버전과 비교했다.
+
+  | patch_keep_frac | test_c_index | best_val_c_index | best epoch |
+  |---|---|---|---|
+  | 0.8(기존 레시피, 암묵적 셔플) | 0.7155 | 0.6683 | 30(끝까지 상승, plateau 안 됨) |
+  | 1.0(셔플 없음) | 0.7175 | 0.6794 | 22(여기서 진짜로 꺾임, plateau 확인됨) |
+
+  차이는 +0.002로 노이즈 수준 — PAAD에서 나온 `--shuffle-patches` 단독 null, `--full-attention`
+  단독 null(3시드 재현 안 됨)과 같은 결론이다. **`patch_keep_frac<1.0`의 암묵적 셔플이 Nystrom
+  landmark 그룹핑을 망가뜨려 이번 BRCA 긍정 결과를 훼손했을 것이라는 우려는 기각된다** — 위 M4
+  결과는 이 조합의 부작용이 아니라 실재하는 신호다. 부수 관찰: 1.0(셔플 없음)은 val이 epoch 22에서
+  명확히 꺾여 진짜 최적점을 보여주는 반면, 0.8(패치 드롭아웃)은 30 epoch 끝까지 계속 상승만 했다 —
+  패치 드롭아웃이 의도대로 정규화 역할을 해 수렴을 늦추고 있다는 뜻으로 보인다. 성능 차이가
+  미미하므로 기존 레시피(patch_keep_frac=0.8)를 그대로 유지한다.
+- **후속 검증(2026-07-22, 같은 날) — `--no-spatial-embed`를 BRCA(진짜 WSI 신호가 있는 환경)에서
+  재검증, PAAD의 null이 재확인됨**: PAAD에서 `--no-spatial-embed`가 null이었던 건 WSI 브랜치
+  전체가 무의미했던 환경이라 "공간 임베딩만 특별히 무의미하다"는 증거로 보기 약했다(뭘 빼도 다
+  null이었을 수 있음) — BRCA는 WSI가 실제로 M7 대비 +0.0535 기여하는 것을 확인한 환경이라, 여기서
+  `--no-spatial-embed`가 null인지가 훨씬 신뢰도 높은 테스트다. `scripts/train_brca_m4.py`에
+  `--no-spatial-embed`(`cfg.model.use_spatial_embed=False`) 플래그를 추가해 같은 seed=42,
+  patch_keep_frac=0.8(표준 레시피)로 재검증:
+
+  | | test_c_index | best_val_c_index | best epoch |
+  |---|---|---|---|
+  | 공간 임베딩 있음(기존) | 0.7155 | 0.6683 | 30 |
+  | 공간 임베딩 없음 | 0.7093 | 0.6762 | 27 |
+
+  test는 -0.006, val은 +0.008로 방향이 엇갈리는 노이즈 수준 차이 — **WSI가 진짜 신호를 내는
+  환경에서도 좌표 기반 SpatialPositionEmbedding은 여전히 기여가 없다.** PAAD 때의 null이 "표본
+  부족으로 뭘 빼도 null"이 아니라 진짜 null이었다는 게 더 신뢰도 높게 확인된 셈 — MultiComponentPooling
+  (mean/std/attention/top-k 4관점) + co-attention 조합이 이미 필요한 정보를 통계적 관점만으로
+  충분히 뽑아내고 있고, 명시적 좌표 정보는 부가가치가 없다는 쪽으로 결론이 굳어진다.
+- **관련 파일**: `scripts/brca_common.py`(공유 case/split/RNA 로더), `scripts/select_brca_rna_genes.py`,
+  `scripts/train_brca_m4.py`, `scripts/train_brca_m7.py`, `scripts/extract_brca_labels.py`,
+  `scripts/extract_brca_rna.py`, `scripts/prepare_brca_data.py`, `scripts/_download_brca_hf.py`.
+  wandb: 그룹 `BRCA_PMA_TOP1500_SS_AUX_seed42_0722` / `BRCA_M7_TOP1500_seed42_0722` (프로젝트
+  `Path-ViT`). **주의**: 이 세션에서 `python`(base conda env)로 실행한 초기 시도는 wandb가
+  설치 안 돼 있어 기록 안 됨 — 반드시 `PathViT-ray` conda env로 실행해야 wandb가 기록된다(base
+  env엔 wandb 미설치, requirements.txt엔 있지만 base에 반영 안 됨).
+
+---
+
 ## 🔴 최상위 발견(2026-07-21) — RNA-seq 전처리 버그, 프로젝트 전체에 영향 가능성
 
 **상태: 확인됨(통제실험으로 검증), 메인 파이프라인 수정 및 전면 재검증 필요.**
