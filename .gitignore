@@ -8,7 +8,7 @@ __pycache__
 .env
 .wandb
 
-raw
+raw*
 PKG*
 *wsi
 patches_*
@@ -17,3 +17,7 @@ utils/data
 checkpoint
 reference_repo
 scripts/_rna_fpkm_uq_cache
+
+brca*
+data/rna_brca.csv
+data/rna_brca_raw_log2.csv
