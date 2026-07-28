@@ -7,7 +7,9 @@ data/dataset.py(WSISurvivalDataset)와 data/extract_features.py, data/fit_cluste
 import re
 from pathlib import Path
 
+from PIL import Image
 from torchvision import transforms
+from tqdm import tqdm
 
 PATCH_TRANSFORM = transforms.Compose([
     transforms.ToTensor(),
@@ -46,6 +48,91 @@ UNI_PATCH_TRANSFORM = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406],
                          std=[0.229, 0.224, 0.225]),
 ])
+
+# [진짜 real-time augmentation, 2026-07-22] PATCH_TRANSFORM_AUGMENTED(위)를 원본 1024x1024
+# 타일에 매 epoch 그대로 적용하면 디스크에서 매 epoch 다시 디코딩하느라 1 epoch도 못 끝낼 만큼
+# 느렸다(findings_backlog.md). 레퍼런스(tmp_m1_cell1.py::preload_resized_tile_images +
+# get_train_cached_patch_transform)를 그대로 이식 — 디코딩+리사이즈는 학습 시작 시 딱 한 번만
+# 하고(RAM에 PIL Image로 캐싱, build_tile_cache), 매 epoch은 이미 작아진 이미지 위에서
+# flip/ColorJitter/GaussianBlur/정규화 같은 값싼 연산만 다시 적용한다.
+#
+# [2026-07-23, 두 차례 시행착오]
+# (1) 원본(1024) 그대로 RAM에 전부 캐싱: 타일당 3MB * 28,987개 ≈ 87GB로 시스템 RAM(32GB)을
+#     한참 넘어 65% 지점에서 스와핑으로 시스템 전체가 응답 불능(VS Code까지 크래시)에 빠졌다.
+#     RAM 전체 캐싱은 512 리사이즈가 사실상 강제 조건이다(28,987 * 0.75MB ≈ 21.7GB, 그래도 빠듯).
+# (2) train만 512로 캐싱하고 eval(val/test/external)은 원본 1024 그대로 `PATCH_TRANSFORM`을
+#     쓰면 train/eval 유효 배율(magnification)이 달라져 val_c_index가 체계적으로 낮게 나옴을
+#     확인(구 원샷 augment 기록 대비 동일 epoch에서 -0.10~0.11). 레퍼런스도 train/eval 모두
+#     512로 통일해서 성능을 냈으므로, eval도 512로 맞춘다(PATCH_TRANSFORM_512, train.py) —
+#     다만 eval(val/train_eval 매 epoch, test/external 1회)은 RAM 캐싱 없이 그때그때
+#     디코딩+리사이즈한다(train 캐시만으로 이미 RAM이 빠듯해 val까지 얹으면 다시 위험해짐).
+TILE_CACHE_SIZE = 512  # 레퍼런스와 동일 — 1.0MPP 1024 타일 -> 512 입력, 실효 2.0MPP
+
+PATCH_TRANSFORM_AUGMENTED_CACHED = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomVerticalFlip(p=0.5),
+    transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02)], p=0.5),
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.15),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+# eval(val/test/external, train_c_index 리포팅)용 — augmentation 없이 train과 동일한 512
+# 해상도로 맞춘다. tile_cache 없이(RAM 캐싱 안 함) 그때그때 원본을 열어 리사이즈한다.
+PATCH_TRANSFORM_512 = transforms.Compose([
+    transforms.Resize((TILE_CACHE_SIZE, TILE_CACHE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
+
+# 디스크 타일 캐시 루트 — 512로 리사이즈한 JPEG을 슬라이드별로 미러링해 저장. 한 번 어떤
+# seed(TCGA train split)가 이 타일을 거치면 디스크에 남아, 다른 seed/실행이 같은 슬라이드를
+# 쓸 때 원본 디코딩+리사이즈를 건너뛰고 이미 작아진 JPEG만 읽는다(수 배 빠름).
+# 키는 "슬라이드_id/파일명"이라 tcga/cptac 어느 쪽에서 와도, split이 달라져도 충돌 없이 재사용된다.
+TILE_DISK_CACHE_DIR = Path("data/tile_cache_512")
+
+
+def _disk_cache_path(patch_path: Path, cache_dir: Path) -> Path:
+    return cache_dir / patch_path.parent.name / (patch_path.stem + ".jpg")
+
+
+def build_tile_cache(
+    patch_paths: list[Path],
+    size: int | None = TILE_CACHE_SIZE,
+    disk_cache_dir: Path | None = TILE_DISK_CACHE_DIR,
+) -> dict[Path, Image.Image]:
+    """patch_paths를 전부 디코딩해 RAM에 PIL Image로 캐싱한다(학습 시작 시 1회만 호출).
+
+    train split 전체(모든 환자의 모든 슬라이드 패치)를 한 번에 넘기면 학습 내내 재사용 가능 —
+    디코딩 비용을 매 epoch에서 학습 전체 기간 중 딱 1회로 줄인다(레퍼런스와 동일한 절충).
+    val/test/external은 이 함수로 캐싱하지 않는다 — train 캐시(~22GB)만으로 이미 RAM이
+    빠듯해 얹으면 위험하다. 대신 PATCH_TRANSFORM_512로 그때그때 디코딩+리사이즈한다.
+
+    disk_cache_dir가 주어지면(기본값 TILE_DISK_CACHE_DIR) 디코딩 결과를 JPEG으로 디스크에도
+    남긴다 — 이미 캐싱된 타일은 원본 PNG 대신 더 가벼운 JPEG만 읽어 로드한다. 다음 실행(다른
+    seed 등)이 같은 슬라이드를 다시 쓸 때 프리로드 단계를 단축한다.
+    """
+    cache: dict[Path, Image.Image] = {}
+    disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir is not None else None
+    for p in tqdm(patch_paths, desc="Preloading tiles", unit="tile"):
+        cached_path = _disk_cache_path(p, disk_cache_dir) if disk_cache_dir is not None else None
+        if cached_path is not None and cached_path.exists():
+            with Image.open(cached_path) as img:
+                cache[p] = img.convert("RGB")
+            continue
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            if size is not None:
+                img = img.resize((size, size), resample=Image.BILINEAR)
+        cache[p] = img
+        if cached_path is not None:
+            cached_path.parent.mkdir(parents=True, exist_ok=True)
+            img.save(cached_path, format="JPEG", quality=92)
+    return cache
+
 
 FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
 FEATURES_UNI_FILENAME  = "features_uni.pt"   # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)

@@ -101,6 +101,9 @@ class ViT_M4(ViT_M1):
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
+        spatial_feat: torch.Tensor | None = None,  # ViT_M4/M4A는 미지원(항상 None) — train.py
+                                                     # _patient_risk가 모든 combine_with_clinical_rna에
+                                                     # 공통으로 넘기는 시그니처만 맞춘다(models/spatial_features.py).
     ) -> torch.Tensor:
         """
         Args:

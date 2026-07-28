@@ -84,6 +84,79 @@ ResNet50↔UNI 100배 확장) 전부 null. **표본 자체가 152명으로 너�
   부족으로 뭘 빼도 null"이 아니라 진짜 null이었다는 게 더 신뢰도 높게 확인된 셈 — MultiComponentPooling
   (mean/std/attention/top-k 4관점) + co-attention 조합이 이미 필요한 정보를 통계적 관점만으로
   충분히 뽑아내고 있고, 명시적 좌표 정보는 부가가치가 없다는 쪽으로 결론이 굳어진다.
+- **후속 시도(2026-07-22, 같은 날) — BRCA WSI trunk pretrain → PAAD 전이, 3시드 평균 negative
+  result**: WSI trunk(proj+Nystromformer)만 BRCA 전체 1058명으로 RNA-예측 보조과제(HE2RNA류,
+  raw top1500 유전자 그대로, 뭉뚱그리지 않음 — `--rna-genes pathway8`의 부호 없는 평균 실패
+  전례를 피함)로 pretrain한 뒤(`scripts/pretrain_brca_wsi_trunk.py`), `train.py
+  --pretrained-wsi-trunk`로 PAAD(PMA_EX_SS_AUX, `--backbone uni`, literature_1500)에 이식해
+  from-scratch baseline과 3시드(42/84/126) 비교:
+
+  | seed | baseline internal | pretrained internal | baseline external | pretrained external |
+  |---|---|---|---|---|
+  | 42  | 0.6288 | 0.6524 (+0.024) | 0.5993 | 0.6011 (+0.002) |
+  | 84  | 0.6585 | 0.5976 (-0.061) | 0.6139 | 0.5952 (-0.019) |
+  | 126 | 0.6680 | 0.6598 (-0.008) | 0.6084 | 0.6203 (+0.012) |
+  | 평균 | **0.6518** | **0.6366 (-0.015)** | **0.6072** | **0.6055 (-0.002)** |
+
+  seed42 단독으로는 방향이 긍정적으로 보였으나(internal +0.024), 3시드 평균은 오히려 근소하게
+  더 나쁘고(internal -0.015, external -0.002) seed84는 명확히 악화(-0.061) — 이 프로젝트에서
+  반복돼온 "단일 시드 결과는 재현 안 됨" 패턴과 같다. **결론: BRCA(raw top1500, PDAC과 유전자
+  겹침 12.3%뿐) trunk pretrain은 PAAD에 재현 가능한 이득을 주지 못한다** — negative transfer
+  우려가 완전히 틀리진 않았을 가능성. `--pretrained-wsi-trunk` 인프라(train.py)는 남겨두되(다른
+  pretrain 소스로 재시도 가능성 대비), 지금 우선순위 갱신에는 반영 안 함. 후속으로 PDAC과 유전자
+  프로그램이 더 겹치는 암종(COAD/STAD/ESCA/CHOL 등 소화기 선암 계열)을 pretrain 소스로 스크리닝
+  중(`scripts/screen_gene_overlap.py`, WSI 없이 RNA만 가볍게 비교) — 결과 나옴, 아래 참조.
+  - **유전자 겹침 스크리닝 결과(2026-07-22) — BRCA를 이기는 후보 없음**: 소화기 선암 계열
+    (COAD/STAD/ESCA/CHOL, 각 최대 200 case RNA-seq만, WSI 없이)로 top1500 고분산 유전자를
+    뽑아 PAAD literature_1500과 겹침 비교.
+
+    | 암종 | n | overlap/1500 | Jaccard |
+    |---|---|---|---|
+    | BRCA(기존, 비교 기준) | 1058 | 185 (12.3%) | 0.0657 |
+    | STAD(위암) | 200 | 182 (12.1%) | 0.0646 |
+    | CHOL(담관암) | 35 | 178 (11.9%) | 0.0631 |
+    | COAD(대장암) | 196 | 162 (10.8%) | 0.0571 |
+    | ESCA(식도암) | 184 | 151 (10.1%) | 0.0530 |
+
+    "소화기 선암이 조직학적으로 PDAC과 더 가까우니 유전자 프로그램도 더 겹칠 것"이라는
+    가설이 이 지표로는 기각됨 — 전부 BRCA와 비슷하거나 낮다. top1500이 "고분산" 기준으로
+    뽑히는 이상 어느 암종에서든 증식/면역/기질 같은 범용 프로그램이 대부분을 차지하고,
+    PAAD의 literature_1500은 그와 별개로 Bailey/Moffitt subtype 유전자(GATA6/HNF1A/PDX1 등
+    췌장 발생학적 전사인자, 꼭 고분산은 아님)가 섞여 있어 조직학적 유사성이 이 비교 방식에는
+    잘 반영되지 않는 것으로 보인다. **결론: 위 negative result(BRCA pretrain 3시드 평균 무효)와
+    합쳐, WSI trunk를 다른 암종에서 RNA-aux로 pretrain해 PAAD로 전이하는 경로는 현재로선
+    닫는다.** WSI를 추가로 다운로드하지 않고 RNA만으로 먼저 스크리닝한 덕에 비용 손실 없이
+    빠르게 접을 수 있었음.
+  - **"다른 task"(pretrain 신호 강화) 재시도 — 3가지 변형 전부 negative, 경로 최종 종료
+    (2026-07-22)**: 유전자 겹침 스크리닝이 BRCA를 이길 대안을 못 찾은 뒤, "pretrain 신호 자체가
+    약해서(top1500 기준 분산 설명력 5.7%뿐) 전이가 안 된 것 아니냐"는 가설로 두 가지를 추가
+    시도했다 — (1) BRCA/PAAD 공유 185개 유전자만으로 타깃을 좁힘(범용 프로그램에 집중, 뭉뚱그리지
+    않고 개별 유전자 그대로 유지), (2) lr을 1e-5→1e-4로 올려 pretrain 자체의 수렴을 강화. 둘 다
+    실제로 pretrain 품질은 확연히 좋아졌다(val MSE 분산 설명력: top1500 5.7% → overlap185/lr1e-5
+    7.5% → overlap185/lr1e-4 **24.6%**, 약 3배). PAAD 3시드(42/84/126, `--backbone uni`,
+    PMA_EX_SS_AUX) 최종 비교:
+
+    | 구성 | internal 평균 | external 평균 |
+    |---|---|---|
+    | baseline(from-scratch) | 0.6518 | 0.6072 |
+    | top1500, lr=1e-5 | 0.6366 (-0.015) | 0.6055 (-0.002) |
+    | overlap185, lr=1e-5 | 0.6432 (-0.009) | 0.6115 (+0.004) |
+    | overlap185, lr=1e-4 | 0.6360 (-0.016) | 0.6119 (+0.005) |
+
+    pretrain 신호가 3배 이상 강해졌는데도 다운스트림 결과는 사실상 그대로다(오히려 internal은
+    가장 좋은 pretrain에서 가장 나쁨) — **pretrain 품질과 PAAD 전이 성능이 무관하다는 게 세
+    변형에 걸쳐 일관되게 확인됐다.** 병목이 "pretrain이 약해서"가 아니라는 뜻 — PAAD 자체의
+    fine-tune 표본(91명, --external 기준)이 너무 작아 어떤 초기화 차이도 그 학습 노이즈에
+    묻혀버리는 쪽이 훨씬 유력한 설명이다. **결론: WSI trunk를 다른 코호트에서 RNA-aux로
+    pretrain해 PAAD로 전이하는 경로는(유전자셋/lr 등 하이퍼파라미터를 어떻게 바꿔도) 재현 가능한
+    이득이 없다 — 이 접근 자체를 최종 종료한다.** 표본 자체를 늘리는 것(추가 코호트 확보,
+    실시간 augmentation 등) 외에는 이 병목을 우회할 방법을 못 찾았다.
+  - **부수 발견(코드 버그) — checkpoint 파일명에 seed/`--pretrained-wsi-trunk` 미반영**: 이 비교를
+    병렬(baseline+pretrained 동시 실행)로 처음 돌렸을 때 두 run이 같은 checkpoint 파일을 공유해
+    최종 test/external 지표가 완전히 동일하게 나오는 사고가 있었다(경합 상태로 서로 덮어씀) —
+    `tag`에 `_PRETRAINED`/`_seed{N}`를 추가해 수정(`train.py`). 기존 스윕 스크립트(`*.ps1`)는 전부
+    시드를 순차 실행해왔어서 과거 결과엔 영향 없음 — 이번에 병렬 실행을 처음 시도하면서 드러난
+    문제.
 - **관련 파일**: `scripts/brca_common.py`(공유 case/split/RNA 로더), `scripts/select_brca_rna_genes.py`,
   `scripts/train_brca_m4.py`, `scripts/train_brca_m7.py`, `scripts/extract_brca_labels.py`,
   `scripts/extract_brca_rna.py`, `scripts/prepare_brca_data.py`, `scripts/_download_brca_hf.py`.

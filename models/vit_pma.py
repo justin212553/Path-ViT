@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from .vit_m1 import ViT_M1
 from .vit_m4a import CoAttentionPooling
+from .spatial_features import spatial_autocorr, attention_dispersion
 from .multi_component_pooling import MultiComponentPooling
 from .clinical_encoder import ClinicalEncoder
 from .rna_encoder import RNAEncoder
@@ -65,10 +66,19 @@ class ViT_PMA(ViT_M1):
             clinical_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
         )
         self.rna_encoder = RNAEncoder(rna_input_dim, rna_dim, dropout=cfg.dropout)
+        # 2026-07-23: 학습형 spatial attention(kNN/hybrid) 전부가 pre-augment에서 baseline을
+        # 못 넘은 뒤(findings_backlog.md), "새 attention 파라미터 자체가 과적합 유인"이라는
+        # 가설을 검증하기 위한 대안 — 좌표/패치임베딩/attn_weights에서 결정론적으로 계산되는
+        # 스칼라(models/spatial_features.py, 학습 파라미터 없음)만 risk_head 5번째 관점으로
+        # 추가한다. 둘 다 독립적으로 켤 수 있다(순차 검증용).
+        self.use_spatial_autocorr = getattr(cfg, "use_spatial_autocorr", False)
+        self.use_attn_dispersion = getattr(cfg, "use_attn_dispersion", False)
+        spatial_feat_dim = (2 if self.use_spatial_autocorr else 0) + (1 if self.use_attn_dispersion else 0)
         # risk_head 입력: [z_wsi(WSI_D), z_clinical(clinical_dim)] (+ z_rna(rna_dim), rna_gate_only=False일 때만)
-        # (rna_dim/clinical_dim이 둘 다 기본값(None)이고 rna_gate_only=False면 3*cfg.embed_dim과
-        # 동일 — 기존 동작 보존)
-        risk_input_dim = cfg.embed_dim + clinical_dim + (0 if rna_gate_only else rna_dim)
+        # (+ spatial_feat(spatial_feat_dim), 위 두 플래그 중 하나라도 켜졌을 때만)
+        # (rna_dim/clinical_dim이 둘 다 기본값(None)이고 rna_gate_only=False, spatial_feat_dim=0이면
+        # 3*cfg.embed_dim과 동일 — 기존 동작 보존)
+        risk_input_dim = cfg.embed_dim + clinical_dim + (0 if rna_gate_only else rna_dim) + spatial_feat_dim
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
             nn.Linear(risk_input_dim, 1),
@@ -82,12 +92,29 @@ class ViT_PMA(ViT_M1):
         transform=None,
         chunk_size: int | None = None,
         rna_context: torch.Tensor | None = None,  # 사용 안 함(train.py 호출 시그니처 호환용)
+        tile_cache: dict | None = None,
     ) -> dict:
-        patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
+        patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         ctx_tokens = self.vit(patch_tokens, coords)
         components, attn_weights = self.attn_pool(ctx_tokens)  # (4, D), (N,)
         # meanpool_embed: --rna-aux-weight(models/rna_predictor.py) 보조과제 입력 전용.
-        return {"embed": components, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}
+        # patch_tokens: scripts/train_spatial_residual.py(공간정보 잔차 branch) 전용 — Nystrom
+        # *이전* raw CNN 출력을 그대로 노출해, 이미 근사/혼합된 ctx_tokens가 아니라 패치별
+        # 독립적인 표현 위에서 kNN 그래프를 새로 구성할 수 있게 한다.
+        out = {
+            "embed": components, "attn_weights": attn_weights,
+            "meanpool_embed": ctx_tokens.mean(dim=0), "patch_tokens": patch_tokens,
+        }
+        # 학습 파라미터 없는 공간 특징(models/spatial_features.py) — --spatial-autocorr/
+        # --attn-dispersion으로 독립적으로 켠다.
+        if self.use_spatial_autocorr or self.use_attn_dispersion:
+            feats = []
+            if self.use_spatial_autocorr:
+                feats.append(spatial_autocorr(patch_tokens, coords))
+            if self.use_attn_dispersion:
+                feats.append(attention_dispersion(coords, attn_weights))
+            out["spatial_feat"] = torch.cat(feats, dim=0)  # (spatial_feat_dim,)
+        return out
 
     def encode_rna(self, rna: torch.Tensor) -> torch.Tensor:
         return self.rna_encoder(rna.unsqueeze(0)).squeeze(0)
@@ -99,6 +126,7 @@ class ViT_PMA(ViT_M1):
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
+        spatial_feat: torch.Tensor | None = None,  # (spatial_feat_dim,) — 환자 단위 평균, models/spatial_features.py
     ) -> torch.Tensor:
         stage_kwargs = {}
         if stage_ord is not None:
@@ -111,5 +139,9 @@ class ViT_PMA(ViT_M1):
             # z_rna는 위 co-attention의 query로만 관여하고, risk_head에는 직결 concat하지 않는다 —
             # RNA로 곧장 우회하는 "지름길"을 막아 risk_head가 z_wsi(에 이미 녹아든 RNA 정보)와
             # z_clinical만으로 예측하도록 강제한다.
-            return torch.cat([z_wsi, z_clinical], dim=-1)       # (2D,)
-        return torch.cat([z_wsi, z_clinical, z_rna], dim=-1)    # (3D,)
+            fused = torch.cat([z_wsi, z_clinical], dim=-1)       # (2D,)
+        else:
+            fused = torch.cat([z_wsi, z_clinical, z_rna], dim=-1)  # (3D,)
+        if spatial_feat is not None:
+            fused = torch.cat([fused, spatial_feat], dim=-1)
+        return fused

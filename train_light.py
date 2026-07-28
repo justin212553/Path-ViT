@@ -155,6 +155,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=None,
                          help="cfg.data.seed / cfg.light.seed를 함께 덮어쓴다.")
     parser.add_argument(
+        "--init-seed", type=int, default=None,
+        help="2026-07-27: train.py --init-seed와 동일 — 모델 가중치 초기화만 --seed와 분리된 값으로 "
+             "고정한다(모델 생성 직전 이 값으로 재시딩, 생성 직후 --seed로 복원). M7_EX에서도 "
+             "초기화가 seed 간 external 격차의 주 원인인지 확인하기 위한 용도.",
+    )
+    parser.add_argument(
         "--external", action="store_true",
         help="internal test와 별도로, 학습에 전혀 쓰지 않은 반대 코호트 전체를 external test로 "
              "평가한다(train.py --external과 동일한 의미). --dataset both와는 함께 못 쓴다.",
@@ -263,6 +269,8 @@ def main():
     if args.match_reference_cohort:
         model_prefix += "_REFCOHORT"
 
+    if args.init_seed is not None:
+        torch.manual_seed(args.init_seed)
     if args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std).to(device)
     elif args.M6:
@@ -271,6 +279,8 @@ def main():
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     else:
         model = ClinicalRNAOnly(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim).to(device)
+    if args.init_seed is not None:
+        torch.manual_seed(cfg.light.seed)
 
     run_ts = datetime.now().strftime("%m%d::%H%M")
     group_ts = args.group_ts or run_ts

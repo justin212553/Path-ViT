@@ -79,6 +79,8 @@ class ViT_PM4(ViT_M1):
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
+        spatial_feat: torch.Tensor | None = None,  # ViT_PM4는 미지원(항상 None) — train.py
+                                                     # _patient_risk 공통 시그니처만 맞춘다.
     ) -> torch.Tensor:
         stage_kwargs = {}
         if stage_ord is not None:

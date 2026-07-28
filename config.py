@@ -30,6 +30,43 @@ class ModelConfig:
     # 2026-07-22: attention이 이미 uniform으로 붕괴한 상태에서 좌표 임베딩이 실제로 기여하는지
     # 직접 검증(findings_backlog.md, train.py --no-spatial-embed).
     use_spatial_embed:       bool  = True
+    # 2026-07-23: 얼린 Stage1 + 잔차 branch(models/spatial_residual.py) 방식은 PAAD(152명)·
+    # BRCA(1058명) 양쪽 모두에서 실패(BRCA조차 test_c_index 0.7151->0.6015로 붕괴) — late-fusion
+    # 잔차로 붙이는 방식 자체의 문제로 보고, 대신 WSI branch 내부(ViTEncoder)에서 직접 절대좌표
+    # 임베딩을 상대offset 기반 attention bias(Swin류, models/vit_encoder.py::RelativeBiasFullAttention)
+    # 로 교체해 처음부터 함께 학습시키는 실험용 플래그(train.py --rel-bias-attention). True면
+    # use_nystrom/use_spatial_embed는 자동으로 False로 강제된다(ViT_M1.__init__).
+    use_rel_bias_attn:       bool  = False
+    # 2026-07-23: use_rel_bias_attn(dense, O(N^2))을 BRCA(슬라이드당 패치 수 중앙값 10,309/최대
+    # 67,268, data/brca_slide_manifest.csv)에 그대로 돌리자 즉시 CUDA OOM — PAAD(N<=544) 전용
+    # 가정이 BRCA엔 안 맞는다. kNN 그래프로 제한한 희소 버전(models/vit_encoder.py::
+    # KNNBiasAttention, train.py --knn-bias-attention). use_rel_bias_attn과 배타적(둘 다 True면
+    # use_rel_bias_attn 우선).
+    use_knn_bias_attn:       bool  = False
+    knn_attn_k:               int   = 8
+    knn_attn_edge_dropout:    float = 0.2
+    # 2026-07-23: kNN-bias-attention 단독은 PAAD(pre-augment)에서도 기존 Nystrom+절대좌표
+    # baseline보다 낮았다(internal 0.6309->0.6094, external 0.6289->0.5880). Nystrom(전역)을
+    # 완전히 대체하는 대신 같은 레이어에서 kNN(국소)과 병렬로 더하는 hybrid
+    # (models/vit_encoder.py::HybridLocalGlobalAttention, train.py --hybrid-attention).
+    # use_rel_bias_attn/use_knn_bias_attn과 달리 use_nystrom/use_spatial_embed를 강제로 끄지
+    # 않는다 — global 경로(Nystrom)가 계속 절대좌표 임베딩을 활용해야 하므로.
+    use_hybrid_attn:          bool  = False
+    # 2026-07-23: 학습형 spatial attention(kNN/hybrid, PMA/M4A 둘 다)이 pre-augment PAAD에서
+    # 전부 baseline을 못 넘은 뒤, "새 attention 파라미터 자체가 과적합 유인"이라는 가설을
+    # 검증하는 저비용 대안 — models/spatial_features.py(학습 파라미터 없음)를 risk_head의
+    # 5번째 관점으로 추가한다(train.py --spatial-autocorr/--attn-dispersion, ViT_PMA 전용).
+    use_spatial_autocorr:     bool  = False
+    use_attn_dispersion:      bool  = False
+    # 2026-07-23: idea #3 — KNNBiasAttention의 학습되는 RelativePositionBias(MLP)를 고정(학습
+    # 파라미터 없는) 거리감쇠 커널 bias=-dist/tau로 교체(train.py --knn-fixed-bias-attention).
+    # q/k/v/out projection은 그대로 학습되므로 "bias MLP만" 없앤 것이 효과가 있는지 확인한다.
+    use_knn_fixed_bias_attn:  bool  = False
+    knn_bias_tau:              float = 50.0
+    # 2026-07-23: PSA-MIL(WACV 2026, arXiv:2503.16284) "learnable distance-decayed prior"의
+    # 경량 버전 — tau를 고정 상수 대신 head별로 학습되는 스칼라(head 개수만큼, 보통 2개)로
+    # 둔다(train.py --learnable-tau, --knn-fixed-bias-attention과 함께 사용).
+    knn_bias_learnable_tau:   bool  = False
 
 
 @dataclass

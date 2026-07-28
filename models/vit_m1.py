@@ -12,6 +12,7 @@ Forward 출력:
     embed        : (D,)          — WSI 임베딩 (risk_head 적용 전)
     attn_weights : (N_patches,)  — 패치별 attention 가중치 (시각화용)
 """
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -131,7 +132,15 @@ class ViT_M1(nn.Module):
                               use_grad_checkpoint=cfg.grad_checkpoint,
                               num_landmarks=cfg.num_landmarks,
                               use_nystrom=cfg.use_nystrom,
-                              use_spatial_embed=cfg.use_spatial_embed)
+                              use_spatial_embed=cfg.use_spatial_embed,
+                              use_rel_bias_attn=getattr(cfg, "use_rel_bias_attn", False),
+                              use_knn_bias_attn=getattr(cfg, "use_knn_bias_attn", False),
+                              use_hybrid_attn=getattr(cfg, "use_hybrid_attn", False),
+                              use_knn_fixed_bias_attn=getattr(cfg, "use_knn_fixed_bias_attn", False),
+                              knn_k=getattr(cfg, "knn_attn_k", 8),
+                              knn_edge_dropout=getattr(cfg, "knn_attn_edge_dropout", 0.2),
+                              knn_bias_tau=getattr(cfg, "knn_bias_tau", 50.0),
+                              knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False))
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         self.risk_head = nn.Sequential(
@@ -146,6 +155,7 @@ class ViT_M1(nn.Module):
         features: torch.Tensor | None = None,
         transform=None,
         chunk_size: int | None = None,
+        tile_cache: dict | None = None,
     ) -> torch.Tensor:
         """
         CNN을 통과시켜 (N_patches, embed_dim) 패치 토큰을 만든다.
@@ -158,6 +168,9 @@ class ViT_M1(nn.Module):
             features:    (N_patches, 2048) 사전 추출된 backbone+pool feature (precomputed=True 모드)
             transform:   패치 이미지 → 텐서 변환. patch_paths 모드에서만 사용
             chunk_size:  CNN을 이 크기 단위로 나눠 실행. None이면 한 번에 실행. patch_paths 모드에서만 사용
+            tile_cache:  {Path: PIL.Image}(이미 디코딩+리사이즈된 이미지, data/patch_utils.py::
+                         build_tile_cache) — 주어지면 디스크 디코딩 대신 이 캐시에서 조회한다
+                         (--tile-augment --image 진짜 real-time augmentation 경로 전용, 2026-07-22).
         """
         device = coords.device
 
@@ -165,15 +178,29 @@ class ViT_M1(nn.Module):
             return self.cnn.forward_pooled(features.to(device, non_blocking=True))
 
         chunk_size = chunk_size or len(patch_paths)
-        return torch.cat([
-            self.cnn(
-                torch.stack([
-                    transform(Image.open(p).convert("RGB"))
-                    for p in patch_paths[i : i + chunk_size]
-                ]).to(device, non_blocking=True)
-            )
-            for i in range(0, len(patch_paths), chunk_size)
-        ])
+        chunks = [patch_paths[i : i + chunk_size] for i in range(0, len(patch_paths), chunk_size)]
+
+        def _decode(paths: list[Path]) -> torch.Tensor:
+            if tile_cache is not None:
+                return torch.stack([transform(tile_cache[p]) for p in paths])
+            return torch.stack([transform(Image.open(p).convert("RGB")) for p in paths])
+
+        # [--tile-augment 속도 개선, 2026-07-22] PIL 디코딩/torchvision transform은 대부분 GIL을
+        # 놓아주는 C 레벨 연산이라, 스레드풀로 다음 청크(들)를 GPU가 현재 청크를 처리하는 동안
+        # 미리 디코딩해두면 CPU 디코딩 시간이 GPU 연산 뒤에 상당 부분 숨겨진다. prefetch_depth로
+        # 동시에 메모리에 올라가는 청크 수를 제한해(원래 chunk_size의 존재 이유였던 host RAM
+        # 상한) 대형 WSI에서도 무한정 쌓이지 않게 한다.
+        prefetch_depth = 2
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_decode, c) for c in chunks[:prefetch_depth]]
+            outputs = []
+            for i, _ in enumerate(chunks):
+                batch = futures[i].result().to(device, non_blocking=True)
+                outputs.append(self.cnn(batch))
+                nxt = i + prefetch_depth
+                if nxt < len(chunks):
+                    futures.append(executor.submit(_decode, chunks[nxt]))
+        return torch.cat(outputs)
 
     def forward(
         self,
@@ -183,6 +210,7 @@ class ViT_M1(nn.Module):
         transform=None,
         chunk_size: int | None = None,
         rna_context: torch.Tensor | None = None,
+        tile_cache: dict | None = None,
     ) -> dict:
         """
         risk_head를 적용하기 전, WSI 1장을 attention-pooled 임베딩 1개로 집계한다.
@@ -192,12 +220,13 @@ class ViT_M1(nn.Module):
         Args:
             rna_context: (D,) — RNA-guided attention pooling용 컨텍스트(ViT_M4에서만 사용).
                          attn_pool이 context_dim으로 생성되지 않은 모델(M1/M2)에서는 무시된다.
+            tile_cache:  _patch_tokens 참조 — 진짜 real-time augmentation 경로 전용.
 
         Returns:
             embed:        (D,) — WSI 임베딩
             attn_weights: (N_patches,)
         """
-        patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
+        patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         ctx_tokens   = self.vit(patch_tokens, coords)                          # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight

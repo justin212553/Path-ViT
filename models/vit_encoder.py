@@ -6,8 +6,10 @@ ViT Encoder with 2D Spatial Position Embedding
 """
 import torch
 import torch.nn as nn
-from torch.utils.checkpoint import checkpoint_sequential
+import torch.utils.checkpoint as cp
 from nystrom_attention import NystromAttention
+
+from models.spatial_residual import RelativePositionBias, knn_edges
 
 
 class SpatialPositionEmbedding(nn.Module):
@@ -60,6 +62,216 @@ class _FullSelfAttention(nn.Module):
         return out
 
 
+class RelativeBiasFullAttention(nn.Module):
+    """전체(O(N^2)) self-attention + 상대offset(Δrow, Δcol) bias(Swin류, models/spatial_residual.py
+    ::RelativePositionBias 재사용) — 절대좌표 sin/cos 임베딩(SpatialPositionEmbedding)을 patch_tokens에
+    더하는 대신, attention logit 자체에 "두 패치가 얼마나/어느 방향으로 떨어져 있는가"를 직접 주입한다.
+
+    2026-07-23: 얼린 Stage1 뒤에 별도 잔차 branch로 공간 정보를 붙이는 ResTopoMIL류 설계
+    (models/spatial_residual.py)가 PAAD·BRCA 둘 다에서 실패한 뒤 시도하는 대안 — late-fusion
+    잔차가 아니라 WSI branch 안에서 RNA/Clinical과 함께 end-to-end로 처음부터 학습시킨다.
+    상대offset이라 절대좌표 임베딩과 달리 슬라이드 크기/위치와 무관하게 같은 의미를 갖는다.
+    """
+
+    def __init__(self, dim: int, heads: int, dropout: float):
+        super().__init__()
+        assert dim % heads == 0, "dim은 heads로 나누어떨어져야 합니다"
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        self.rel_bias = RelativePositionBias(num_heads=heads)
+        self.attn_drop = nn.Dropout(dropout)
+        self.out_drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """x: (1, N, D), coords: (N, 2) -> (1, N, D)"""
+        n = x.shape[1]
+        q = self.q_proj(x).view(n, self.heads, self.head_dim)
+        k = self.k_proj(x).view(n, self.heads, self.head_dim)
+        v = self.v_proj(x).view(n, self.heads, self.head_dim)
+
+        rel = (coords.unsqueeze(1) - coords.unsqueeze(0)).float()          # (N, N, 2) j-i offset
+        bias = self.rel_bias(rel.view(-1, 2)).view(n, n, self.heads)       # (N, N, H)
+
+        logits = torch.einsum("qhd,khd->qkh", q, k) / (self.head_dim ** 0.5) + bias  # (N, N, H)
+        attn = logits.softmax(dim=1)                                       # key(dim=1) 기준 정규화
+        attn = self.attn_drop(attn)
+
+        out = torch.einsum("qkh,khd->qhd", attn, v).reshape(n, -1)
+        out = self.out_drop(self.out_proj(out))
+        return out.unsqueeze(0)                                            # (1, N, D)
+
+
+class KNNBiasAttention(nn.Module):
+    """RelativeBiasFullAttention의 희소(sparse) 버전 — 모든 패치 쌍(O(N^2)) 대신 각 패치의
+    kNN 이웃 k개에만 attention한다(엣지 수 E=N*k, N에 선형). models/spatial_residual.py::
+    knn_edges/RelativePositionBias 재사용(scatter-softmax 방식은 KNNGraphAttentionLayer와 동일).
+
+    2026-07-23: BRCA(슬라이드당 패치 수 중앙값 10,309, 최대 67,268 — data/brca_slide_manifest.csv)
+    로 RelativeBiasFullAttention을 그대로 돌리자 즉시 CUDA OOM(중앙값 규모 슬라이드에서 attention
+    logit/bias 텐서가 N^2으로 터짐, findings_backlog.md) — PAAD(N<=544)에서만 성립하던 "O(N^2)도
+    부담 없다"는 전제가 BRCA에는 아예 적용되지 않는다. kNN 그래프 구성(torch.cdist, O(N^2)이지만
+    hidden_dim 없이 거리값 하나뿐이라 가볍다) 자체는 이미 spatial_residual.py의 잔차 branch 실험에서
+    BRCA 규모로 문제없이 검증됨 — attention/bias 계산만 엣지 단위(E)로 제한하면 된다.
+    """
+
+    def __init__(self, dim: int, heads: int, dropout: float, k: int = 8, edge_dropout: float = 0.2):
+        super().__init__()
+        assert dim % heads == 0, "dim은 heads로 나누어떨어져야 합니다"
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.k = k
+        self.edge_dropout = edge_dropout
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        self.rel_bias = RelativePositionBias(num_heads=heads)
+        self.attn_drop = nn.Dropout(dropout)
+        self.out_drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """x: (1, N, D), coords: (N, 2) -> (1, N, D)"""
+        n = x.shape[1]
+        x0 = x[0]                                        # (N, D)
+        edge_index = knn_edges(coords, self.k)
+        if edge_index.shape[1] == 0:                      # 패치 1개뿐 — 이웃 없음
+            return x
+        if self.training and self.edge_dropout > 0:
+            keep = torch.rand(edge_index.shape[1], device=x.device) >= self.edge_dropout
+            if keep.any():
+                edge_index = edge_index[:, keep]
+        src, dst = edge_index[0], edge_index[1]            # src=쿼리(i), dst=이웃(j)
+
+        q = self.q_proj(x0).view(n, self.heads, self.head_dim)
+        k = self.k_proj(x0).view(n, self.heads, self.head_dim)
+        v = self.v_proj(x0).view(n, self.heads, self.head_dim)
+
+        rel = (coords[dst] - coords[src]).float()          # (E, 2)
+        bias = self.rel_bias(rel)                           # (E, H)
+
+        logits = (q[src] * k[dst]).sum(-1) / (self.head_dim ** 0.5) + bias  # (E, H)
+        logits = logits - logits.max()
+        exp = logits.exp()
+
+        denom = torch.zeros(n, self.heads, device=x.device, dtype=exp.dtype)
+        denom.index_add_(0, src, exp)
+        attn = exp / (denom[src] + 1e-8)                    # (E, H) — src(쿼리)별 softmax
+        attn = self.attn_drop(attn)
+
+        weighted_v = attn.unsqueeze(-1) * v[dst]            # (E, H, Dh)
+        out = torch.zeros(n, self.heads, self.head_dim, device=x.device, dtype=x.dtype)
+        out.index_add_(0, src, weighted_v.to(x.dtype))
+        out = out.reshape(n, -1)
+        out = self.out_drop(self.out_proj(out))
+        return out.unsqueeze(0)                             # (1, N, D)
+
+
+class HybridLocalGlobalAttention(nn.Module):
+    """local(KNNBiasAttention) + global(NystromAttention)를 같은 레이어에서 계산해 더한다.
+
+    2026-07-23: PAAD(pre-augment)에서 kNN-bias-attention 단독은 기존 Nystrom+절대좌표 baseline보다
+    낮았다(internal 0.6309->0.6094, external 0.6289->0.5880) — "국소만"으로 대체하는 대신, 기존
+    Nystrom(전역, landmark 근사)은 그대로 두고 kNN(국소, 상대offset bias)을 같은 레이어에 병렬로
+    얹어 더하는 쪽을 시도한다("Combining GNN and Mamba..." 논문의 local+global 병렬 조합과 같은 발상).
+    global 쪽(Nystrom)은 좌표 정보를 직접 안 받으므로, 이 모드에서는 절대좌표 임베딩
+    (SpatialPositionEmbedding, use_spatial_embed)을 계속 켜둔 채로 쓰는 게 자연스럽다.
+    """
+
+    def __init__(self, dim: int, heads: int, dropout: float, num_landmarks: int, k: int = 8, edge_dropout: float = 0.2):
+        super().__init__()
+        self.local = KNNBiasAttention(dim, heads, dropout, k=k, edge_dropout=edge_dropout)
+        self.global_attn = NystromAttention(
+            dim=dim, dim_head=dim // heads, heads=heads, num_landmarks=num_landmarks,
+            pinv_iterations=6, residual=True, dropout=dropout,
+        )
+
+    def forward(self, x: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        return self.local(x, coords) + self.global_attn(x)
+
+
+class KNNFixedBiasAttention(nn.Module):
+    """KNNBiasAttention과 동일하나, 학습되는 RelativePositionBias(MLP) 대신 거리 감쇠 커널을 쓴다
+    — bias = -||Δcoords|| / tau. learnable_tau=False(기본)면 tau는 학습되지 않는 스칼라
+    하이퍼파라미터(idea #3), learnable_tau=True면 head별로 학습되는 스칼라 1개씩(PSA-MIL
+    "learnable distance-decayed prior"의 경량 버전 — posterior∝likelihood×prior를 log공간에서
+    풀면 logits=QK+log(prior)가 되는데, 이미 이 클래스의 "logits+bias" 구조가 정확히 그 형태다.
+    학습 파라미터가 head 개수(보통 2)뿐이라 RelativePositionBias MLP(82개)보다 훨씬 작다).
+
+    2026-07-23: kNN/hybrid attention이 PAAD(pre-augment)에서 baseline을 못 넘은 뒤, "새로 학습되는
+    attention 파라미터 자체가 작은 코호트에서 과적합 유인"이라는 가설을 검증하는 3번째 대안 —
+    q/k/v/out projection(패치 내용 기반 attention에 필요)은 그대로 두되, 공간 정보를 주입하는
+    bias 항목의 학습량만 조절한다(0개=고정 tau, head개=learnable_tau, 82개=RelativePositionBias MLP).
+    """
+
+    def __init__(
+        self, dim: int, heads: int, dropout: float, k: int = 8, edge_dropout: float = 0.2,
+        tau: float = 50.0, learnable_tau: bool = False,
+    ):
+        super().__init__()
+        assert dim % heads == 0, "dim은 heads로 나누어떨어져야 합니다"
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.k = k
+        self.edge_dropout = edge_dropout
+        self.learnable_tau = learnable_tau
+        if learnable_tau:
+            # log_tau로 파라미터화 — tau=exp(log_tau)>0 보장(감쇠 스케일이 음수/0이 되면 안 됨).
+            self.log_tau = nn.Parameter(torch.full((heads,), float(torch.log(torch.tensor(tau)))))
+        else:
+            self.register_buffer("tau_fixed", torch.tensor(tau), persistent=False)
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Linear(dim, dim)
+        self.attn_drop = nn.Dropout(dropout)
+        self.out_drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """x: (1, N, D), coords: (N, 2) -> (1, N, D)"""
+        n = x.shape[1]
+        x0 = x[0]                                        # (N, D)
+        edge_index = knn_edges(coords, self.k)
+        if edge_index.shape[1] == 0:                      # 패치 1개뿐 — 이웃 없음
+            return x
+        if self.training and self.edge_dropout > 0:
+            keep = torch.rand(edge_index.shape[1], device=x.device) >= self.edge_dropout
+            if keep.any():
+                edge_index = edge_index[:, keep]
+        src, dst = edge_index[0], edge_index[1]            # src=쿼리(i), dst=이웃(j)
+
+        q = self.q_proj(x0).view(n, self.heads, self.head_dim)
+        k = self.k_proj(x0).view(n, self.heads, self.head_dim)
+        v = self.v_proj(x0).view(n, self.heads, self.head_dim)
+
+        rel = (coords[dst] - coords[src]).float()          # (E, 2)
+        dist = rel.norm(dim=-1)                             # (E,)
+        if self.learnable_tau:
+            tau = self.log_tau.exp()                        # (H,) — head별 학습되는 감쇠 스케일
+            bias = -dist.unsqueeze(-1) / tau.unsqueeze(0)    # (E, H)
+        else:
+            bias = (-dist / self.tau_fixed).unsqueeze(-1).expand(-1, self.heads)  # (E, H)
+
+        logits = (q[src] * k[dst]).sum(-1) / (self.head_dim ** 0.5) + bias  # (E, H)
+        logits = logits - logits.max()
+        exp = logits.exp()
+
+        denom = torch.zeros(n, self.heads, device=x.device, dtype=exp.dtype)
+        denom.index_add_(0, src, exp)
+        attn = exp / (denom[src] + 1e-8)                    # (E, H) — src(쿼리)별 softmax
+        attn = self.attn_drop(attn)
+
+        weighted_v = attn.unsqueeze(-1) * v[dst]            # (E, H, Dh)
+        out = torch.zeros(n, self.heads, self.head_dim, device=x.device, dtype=x.dtype)
+        out.index_add_(0, src, weighted_v.to(x.dtype))
+        out = out.reshape(n, -1)
+        out = self.out_drop(self.out_proj(out))
+        return out.unsqueeze(0)                             # (1, N, D)
+
+
 class NystromEncoderLayer(nn.Module):
     """
     Pre-LN Transformer 블록, self-attention을 Nystrom 근사(기본) 또는 표준 O(N^2)
@@ -90,10 +302,36 @@ class NystromEncoderLayer(nn.Module):
         use_ffn: bool = True,
         context_dim: int | None = None,
         use_nystrom: bool = True,
+        use_rel_bias_attn: bool = False,
+        use_knn_bias_attn: bool = False,
+        use_hybrid_attn: bool = False,
+        use_knn_fixed_bias_attn: bool = False,
+        knn_k: int = 8,
+        knn_edge_dropout: float = 0.2,
+        knn_bias_tau: float = 50.0,
+        knn_bias_learnable_tau: bool = False,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
-        if use_nystrom:
+        # use_rel_bias_attn/use_knn_bias_attn/use_hybrid_attn/use_knn_fixed_bias_attn이
+        # use_nystrom보다 우선한다(모델/ViT_M1.__init__이 배타적 조합을 강제) — dense(전체
+        # O(N^2), PAAD처럼 패치 수가 작을 때), sparse(kNN, BRCA처럼 패치 수가 많아 dense가
+        # OOM나는 경우), hybrid(kNN 국소 + Nystrom 전역을 병렬로 더함), knn_fixed_bias(kNN이되
+        # relative bias가 학습 없는 고정 거리 커널) 중 하나.
+        if use_rel_bias_attn:
+            self.attn = RelativeBiasFullAttention(embed_dim, num_heads, dropout)
+        elif use_hybrid_attn:
+            self.attn = HybridLocalGlobalAttention(
+                embed_dim, num_heads, dropout, num_landmarks, k=knn_k, edge_dropout=knn_edge_dropout,
+            )
+        elif use_knn_fixed_bias_attn:
+            self.attn = KNNFixedBiasAttention(
+                embed_dim, num_heads, dropout, k=knn_k, edge_dropout=knn_edge_dropout, tau=knn_bias_tau,
+                learnable_tau=knn_bias_learnable_tau,
+            )
+        elif use_knn_bias_attn:
+            self.attn = KNNBiasAttention(embed_dim, num_heads, dropout, k=knn_k, edge_dropout=knn_edge_dropout)
+        elif use_nystrom:
             self.attn = NystromAttention(
                 dim=embed_dim,
                 dim_head=embed_dim // num_heads,
@@ -105,6 +343,7 @@ class NystromEncoderLayer(nn.Module):
             )
         else:
             self.attn = _FullSelfAttention(embed_dim, num_heads, dropout)
+        self.needs_coords = use_rel_bias_attn or use_knn_bias_attn or use_hybrid_attn or use_knn_fixed_bias_attn
         self.dropout1 = nn.Dropout(dropout)
 
         self.use_ffn = use_ffn
@@ -121,8 +360,15 @@ class NystromEncoderLayer(nn.Module):
             if context_dim is not None:
                 self.context_proj = nn.Linear(context_dim, embed_dim, bias=False)
 
-    def forward(self, x: torch.Tensor, context: torch.Tensor | None = None) -> torch.Tensor:
-        x = x + self.dropout1(self.attn(self.norm1(x)))
+    def forward(
+        self, x: torch.Tensor, coords: torch.Tensor | None = None,
+        context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.needs_coords:
+            attn_out = self.attn(self.norm1(x), coords)
+        else:
+            attn_out = self.attn(self.norm1(x))
+        x = x + self.dropout1(attn_out)
         if self.use_ffn:
             h = self.norm2(x)
             if self.context_proj is not None and context is not None:
@@ -148,6 +394,14 @@ class ViTEncoder(nn.Module):
         context_dim: int | None = None,
         use_nystrom: bool = True,
         use_spatial_embed: bool = True,
+        use_rel_bias_attn: bool = False,
+        use_knn_bias_attn: bool = False,
+        use_hybrid_attn: bool = False,
+        use_knn_fixed_bias_attn: bool = False,
+        knn_k: int = 8,
+        knn_edge_dropout: float = 0.2,
+        knn_bias_tau: float = 50.0,
+        knn_bias_learnable_tau: bool = False,
     ):
         super().__init__()
         self.pos_embedding = SpatialPositionEmbedding(embed_dim)
@@ -168,6 +422,14 @@ class ViTEncoder(nn.Module):
                 use_ffn=use_ffn,
                 context_dim=context_dim,
                 use_nystrom=use_nystrom,
+                use_rel_bias_attn=use_rel_bias_attn,
+                use_knn_bias_attn=use_knn_bias_attn,
+                use_hybrid_attn=use_hybrid_attn,
+                use_knn_fixed_bias_attn=use_knn_fixed_bias_attn,
+                knn_bias_learnable_tau=knn_bias_learnable_tau,
+                knn_k=knn_k,
+                knn_edge_dropout=knn_edge_dropout,
+                knn_bias_tau=knn_bias_tau,
             )
             for _ in range(num_layers)
         ])
@@ -192,11 +454,11 @@ class ViTEncoder(nn.Module):
         else:
             x = patch_tokens.unsqueeze(0)          # (1, N, D)
 
-        if context is None and self.use_grad_checkpoint and self.training:
-            out = checkpoint_sequential(self.layers, len(self.layers), x, use_reentrant=False)
-        else:
-            for layer in self.layers:
-                x = layer(x, context=context)
-            out = x                            # (1, N, D)
+        use_ckpt = self.use_grad_checkpoint and self.training
+        for layer in self.layers:
+            if use_ckpt:
+                x = cp.checkpoint(layer, x, coords, context, use_reentrant=False)
+            else:
+                x = layer(x, coords, context)
 
-        return self.norm(out[0])               # (N, D)
+        return self.norm(x[0])                     # (N, D)

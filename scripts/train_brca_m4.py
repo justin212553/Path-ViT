@@ -79,6 +79,21 @@ def main():
                          help="train.py --no-spatial-embed와 동일 — SpatialPositionEmbedding(좌표 "
                               "sin/cos 인코딩)을 끈다. PAAD에서는 null이었지만 WSI 신호 자체가 "
                               "없던 환경이라(findings_backlog.md), WSI가 유의미해진 BRCA에서 재검증.")
+    parser.add_argument("--rel-bias-attention", action="store_true",
+                         help="train.py --rel-bias-attention과 동일 — 절대좌표 SpatialPositionEmbedding "
+                              "대신 상대offset(Δrow,Δcol) attention bias(Swin류, models/vit_encoder.py"
+                              "::RelativeBiasFullAttention)를 넣은 전체(O(N^2)) attention으로 교체한다 "
+                              "(use_nystrom/use_spatial_embed 자동 False). 2026-07-23: 얼린 Stage1+잔차 "
+                              "branch(models/spatial_residual.py)가 PAAD·BRCA 둘 다에서 실패한 뒤 "
+                              "WSI branch 안에서 처음부터 end-to-end로 학습시키는 대안 검증용.")
+    parser.add_argument("--knn-bias-attention", action="store_true",
+                         help="train.py --knn-bias-attention과 동일 — --rel-bias-attention의 희소 "
+                              "버전(models/vit_encoder.py::KNNBiasAttention, kNN 이웃 k개에만 "
+                              "attention). 2026-07-23: BRCA는 슬라이드당 패치 수 중앙값 10,309/최대 "
+                              "67,268이라 dense(--rel-bias-attention)가 즉시 CUDA OOM나서 대신 이걸 "
+                              "쓴다(use_nystrom/use_spatial_embed 자동 False).")
+    parser.add_argument("--knn-k", type=int, default=8,
+                         help="--knn-bias-attention 사용 시 패치당 kNN 이웃 수(기본 8).")
     parser.add_argument("--group-ts", type=str, default=None)
     args = parser.parse_args()
 
@@ -87,6 +102,15 @@ def main():
     if args.epochs is not None:
         cfg.train.epochs = args.epochs
     if args.no_spatial_embed:
+        cfg.model.use_spatial_embed = False
+    if args.rel_bias_attention:
+        cfg.model.use_rel_bias_attn = True
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.knn_bias_attention:
+        cfg.model.use_knn_bias_attn = True
+        cfg.model.knn_attn_k = args.knn_k
+        cfg.model.use_nystrom = False
         cfg.model.use_spatial_embed = False
     set_seed(cfg.train.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -134,6 +158,10 @@ def main():
         model_prefix += "_AUX"
     if args.no_spatial_embed:
         model_prefix += "_NOSPATIAL"
+    if args.rel_bias_attention:
+        model_prefix += "_RELBIAS"
+    if args.knn_bias_attention:
+        model_prefix += "_KNNATTN"
     print(f"Model: ViT_PMA (uni backbone, use_nystrom={cfg.model.use_nystrom}, "
           f"use_spatial_embed={cfg.model.use_spatial_embed}) | "
           f"params={sum(p.numel() for p in model.parameters()):,}")
@@ -154,7 +182,10 @@ def main():
                 "seed": cfg.train.seed, "n_genes": args.n_genes, "rna_input_dim": rna_input_dim,
                 "patch_keep_frac": args.patch_keep_frac, "rna_aux_weight": args.rna_aux_weight,
                 "embed_dim": cfg.model.embed_dim, "use_nystrom": cfg.model.use_nystrom,
-                "use_spatial_embed": cfg.model.use_spatial_embed, "model": model_prefix, "dataset": "brca",
+                "use_spatial_embed": cfg.model.use_spatial_embed,
+                "use_rel_bias_attn": cfg.model.use_rel_bias_attn,
+                "use_knn_bias_attn": cfg.model.use_knn_bias_attn,
+                "model": model_prefix, "dataset": "brca",
             },
         )
 

@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 import numpy as np
 import torch
+import torch.optim.swa_utils
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
@@ -45,7 +46,10 @@ from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     pathway_category_gene_ids,
 )
-from data.patch_utils import FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED
+from data.patch_utils import (
+    FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
+    PATCH_TRANSFORM_AUGMENTED_CACHED, PATCH_TRANSFORM_512, build_tile_cache,
+)
 from models import (
     ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
     ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
@@ -57,6 +61,7 @@ from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
+from utils.sam import SAM
 
 
 def set_seed(seed: int):
@@ -102,7 +107,8 @@ def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] |
 
 def _patient_risk(
     model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0,
-    shuffle_patches: bool = False,
+    shuffle_patches: bool = False, tile_cache: dict | None = None,
+    patch_subsample_generator: torch.Generator | None = None,
 ):
     """환자 1명이 보유한 슬라이드 전부를 forward해 임베딩을 평균 풀링한 뒤 risk score(scalar)를 계산한다.
     Returns: (risk, aux_loss, stage_aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서
@@ -152,6 +158,7 @@ def _patient_risk(
 
         slide_embeds = []
         slide_meanpool_embeds = []
+        slide_spatial_feats = []
         for slide in patient_slides:
             coords = slide["coords"]
             features = slide.get("features")
@@ -167,7 +174,11 @@ def _patient_risk(
             if model.training and (patch_keep_frac < 1.0 or shuffle_patches):
                 n = coords.shape[0]
                 k = max(1, round(n * patch_keep_frac))
-                idx = torch.randperm(n)[:k]
+                idx = (
+                    torch.randperm(n, generator=patch_subsample_generator)[:k]
+                    if patch_subsample_generator is not None
+                    else torch.randperm(n)[:k]
+                )
                 coords = coords[idx]
                 if features is not None:
                     features = features[idx]
@@ -179,13 +190,16 @@ def _patient_risk(
             if features is not None:
                 out = model(coords, features=features, **forward_kwargs)
             else:
-                out = model(coords, patch_paths=patch_paths,
-                             transform=transform, chunk_size=chunk_size, **forward_kwargs)
+                out = model(coords, patch_paths=patch_paths, transform=transform,
+                             chunk_size=chunk_size, tile_cache=tile_cache, **forward_kwargs)
             slide_embeds.append(out["embed"])
             if "meanpool_embed" in out:
                 slide_meanpool_embeds.append(out["meanpool_embed"])
+            if "spatial_feat" in out:
+                slide_spatial_feats.append(out["spatial_feat"])
 
         patient_embed = torch.stack(slide_embeds).mean(dim=0)      # (D,) — 슬라이드 평균 풀링
+        patient_spatial_feat = torch.stack(slide_spatial_feats).mean(dim=0) if slide_spatial_feats else None
 
         patient_meanpool = None
         if slide_meanpool_embeds and (hasattr(model, "rna_aux_head") or hasattr(model, "stage_aux_head")):
@@ -208,8 +222,9 @@ def _patient_risk(
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
             stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
             patient_embed = model.combine_with_clinical_rna(
-                patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord
-            )  # (3D,)
+                patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord,
+                spatial_feat=patient_spatial_feat,
+            )  # (3D,) (+ spatial_feat_dim, models/spatial_features.py 켜졌을 때만)
         elif hasattr(model, "combine_with_clinical"):
             # --M2_FF: rna_encoder는 있지만(FFN 직전 FiLM용) 최종 결합엔 RNA를 직접 노출하지 않는
             # 모델이라, encoder 존재 여부가 아니라 결합 메서드 존재 여부로 분기해야 한다.
@@ -227,7 +242,8 @@ def _patient_risk(
 def train_one_epoch(
     model, loader, optimizer, cfg, device, amp_ctx, transform,
     patch_keep_frac: float = 1.0, rna_aux_weight: float = 0.0, stage_aux_weight: float = 0.0,
-    shuffle_patches: bool = False,
+    shuffle_patches: bool = False, tile_cache: dict | None = None,
+    patch_subsample_generator: torch.Generator | None = None,
 ) -> float:
     model.train()
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
@@ -237,41 +253,88 @@ def train_one_epoch(
     chunk_size    = cfg.train.cnn_chunk_size
     batch_size    = cfg.train.cox_batch_size
 
-    risks, times, events, aux_losses, stage_aux_losses = [], [], [], [], []
+    risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
+    is_sam = isinstance(optimizer, SAM)
 
-    def _flush():
-        nonlocal risks, times, events, aux_losses, stage_aux_losses, total_loss, total_batches
-        if not risks:
-            return
-        risk_t  = torch.cat(risks)
-        time_t  = torch.cat(times).to(device)
-        event_t = torch.cat(events).to(device)
-
-        loss = cox_ph_loss(risk_t, time_t, event_t)
-        if rna_aux_weight > 0 and aux_losses:
+    def _compute_loss(risk_list, time_t, event_t, aux_list, stage_aux_list):
+        loss = cox_ph_loss(torch.cat(risk_list), time_t, event_t)
+        if rna_aux_weight > 0 and aux_list:
             # --rna-aux-weight(models/rna_predictor.py): WSI 표현이 RNA 발현도 예측하도록
             # 보조 loss를 더한다 — 생존 라벨(환자당 1개, censoring으로 더 약함)만으로
             # 62만 파라미터짜리 WSI 브랜치를 학습시키는 게 병목이라는 진단(model_zoo.md)에 대한
             # 대응. 결합 방식이 아니라 학습 신호 자체를 보강한다.
-            loss = loss + rna_aux_weight * torch.stack(aux_losses).mean()
-        if stage_aux_weight > 0 and stage_aux_losses:
+            loss = loss + rna_aux_weight * torch.stack(aux_list).mean()
+        if stage_aux_weight > 0 and stage_aux_list:
             # --stage-aux-weight(models/stage_predictor.py): 위와 동일 원리, 타깃만 T-stage/grade.
-            loss = loss + stage_aux_weight * torch.stack(stage_aux_losses).mean()
+            loss = loss + stage_aux_weight * torch.stack(stage_aux_list).mean()
+        return loss
+
+    def _refresh_batch(patients):
+        """SAM 2nd pass용 — perturb된 가중치로 같은 배치(환자 리스트)를 다시 forward한다."""
+        risks2, aux2, stage_aux2 = [], [], []
+        for ps in patients:
+            r2, a2, s2 = _patient_risk(
+                model, ps, device, amp_ctx, transform, chunk_size, patch_keep_frac,
+                shuffle_patches=shuffle_patches, tile_cache=tile_cache,
+                patch_subsample_generator=patch_subsample_generator,
+            )
+            risks2.append(r2)
+            if a2 is not None:
+                aux2.append(a2)
+            if s2 is not None:
+                stage_aux2.append(s2)
+        return risks2, aux2, stage_aux2
+
+    def _flush():
+        nonlocal risks, times, events, aux_losses, stage_aux_losses, patient_batch, total_loss, total_batches
+        if not risks:
+            return
+        time_t  = torch.cat(times).to(device)
+        event_t = torch.cat(events).to(device)
+
+        loss = _compute_loss(risks, time_t, event_t, aux_losses, stage_aux_losses)
         optimizer.zero_grad()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
 
-        total_loss    += loss.item()
-        total_batches += 1
-        risks, times, events, aux_losses, stage_aux_losses = [], [], [], [], []
+        # 2026-07-26: cptac 방향 학습(dispersion 병행) 중 특정 배치에서 loss가 NaN으로 발산해
+        # 그 순간부터 가중치 전체가 영구히 오염되는 현상 발견(RNA/clinical 원본 데이터엔 NaN/Inf
+        # 없음 확인됨 — bf16 AMP 하에서 특정 risk set 조합이 유발하는 forward-pass 수치 불안정으로
+        # 추정). gradient clipping은 gradient 자체가 NaN이면 무력하므로, step 직전에 loss/grad_norm이
+        # non-finite인 배치는 파라미터 업데이트를 건너뛴다 — 그 배치 하나만 버리고 학습은 계속된다.
+        if is_sam:
+            # [SAM] 1st pass gradient로 근방 최악점까지 이동한 뒤, 같은 배치를 그 지점에서
+            # 재평가(2nd pass)한 gradient로 실제 업데이트한다(utils/sam.py).
+            optimizer.first_step()
+            optimizer.zero_grad()
+            risks2, aux2, stage_aux2 = _refresh_batch(patient_batch)
+            loss2 = _compute_loss(risks2, time_t, event_t, aux2, stage_aux2)
+            loss2.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if not (torch.isfinite(loss2) and torch.isfinite(grad_norm)):
+                print(f"  [경고] non-finite loss2(={loss2.item()})/grad_norm(={grad_norm.item()}) 배치 스킵(SAM)")
+                optimizer.second_step(skip_update=True)
+            else:
+                optimizer.second_step(skip_update=False)
+                total_loss    += loss2.item()
+                total_batches += 1
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if not (torch.isfinite(loss) and torch.isfinite(grad_norm)):
+                print(f"  [경고] non-finite loss(={loss.item()})/grad_norm(={grad_norm.item()}) 배치 스킵")
+                optimizer.zero_grad()
+            else:
+                optimizer.step()
+                total_loss    += loss.item()
+                total_batches += 1
+        risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
 
     for patient_slides in loader:                # 환자 1명 분량의 슬라이드 리스트
         if len(patient_slides) == 0:
             continue
         risk, aux_loss, stage_aux_loss = _patient_risk(
             model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
-            shuffle_patches=shuffle_patches,
+            shuffle_patches=shuffle_patches, tile_cache=tile_cache,
+            patch_subsample_generator=patch_subsample_generator,
         )
 
         risks.append(risk)
@@ -281,6 +344,8 @@ def train_one_epoch(
             aux_losses.append(aux_loss)
         if stage_aux_loss is not None:
             stage_aux_losses.append(stage_aux_loss)
+        if is_sam:
+            patient_batch.append(patient_slides)
 
         if len(risks) >= batch_size:
             _flush()
@@ -355,6 +420,57 @@ def _parse_args() -> argparse.Namespace:
              "자동으로 붙는다.",
     )
     parser.add_argument(
+        "--patch-subsample-seed", type=int, default=None,
+        help="2026-07-27: --patch-keep-frac의 랜덤 서브샘플(torch.randperm)을 --seed(모델 초기화/"
+             "DataLoader 순서 등 나머지 전부)와 분리된 별도 torch.Generator로 고정한다. --full-train "
+             "5시드 반복에서 순수 학습 노이즈(std~0.02)가 여전히 크게 남는 원인이 패치 서브샘플링 "
+             "패턴 자체일 수 있다는 가설 검증용 — 예: --seed 168(초기화는 최악 시드 그대로) + "
+             "--patch-subsample-seed 42(서브샘플 패턴만 최고 시드로 고정)로 서브샘플링만 격리해서 "
+             "확인한다. 지정 안 하면(기본 None) 기존과 동일하게 전역 RNG를 그대로 쓴다.",
+    )
+    parser.add_argument(
+        "--init-seed", type=int, default=None,
+        help="2026-07-27: 모델 가중치 초기화만 --seed와 분리된 값으로 고정한다. torch.manual_seed()를 "
+             "모델 생성 직전에 이 값으로, 생성 직후 다시 --seed로 되돌리는 방식(nn.Module 기본 "
+             "reset_parameters()는 generator 인자를 안 받아 patch-subsample-seed처럼 완전히 독립된 "
+             "Generator로는 분리할 수 없음 — 대신 재시딩 경계로 분리). --full-train 반복에서 split/"
+             "dropout/patch-subsample 패턴/환자 순서를 전부 소거한 뒤 마지막으로 남은 후보(초기화 "
+             "자체)를 격리 검증하기 위한 용도. 주의: 이후 DataLoader 셔플/dropout 등은 '원래 --seed "
+             "런의 연속된 스트림'이 아니라 '모델 생성 직후 --seed로 새로 시작한 스트림'이라, 완전히 "
+             "동일한 재현은 아니고 독립적으로 잘 정의된 비교군이라는 정도로 해석해야 한다.",
+    )
+    parser.add_argument(
+        "--sam", action="store_true",
+        help="2026-07-27: SAM(Sharpness-Aware Minimization, utils/sam.py)으로 AdamW를 감싼다 — "
+             "현재 지점이 아니라 근방(반경 --sam-rho) 최악점 기준 gradient로 업데이트해 flat "
+             "minimum을 명시적으로 찾는다. 초기화만 바꿔도 external이 크게 흔들리는 현상(local "
+             "minimum 로또)에 대한 직접적 대응 가설 검증용. 배치당 forward+backward를 2번 하므로 "
+             "학습 시간이 대략 2배가 된다.",
+    )
+    parser.add_argument(
+        "--sam-rho", type=float, default=0.05,
+        help="--sam의 perturbation 반경(기본 0.05, SAM 원논문 기본값). 클수록 더 넓은 flat 영역을 "
+             "요구한다.",
+    )
+    parser.add_argument(
+        "--swa", action="store_true",
+        help="2026-07-27: SWA(Stochastic Weight Averaging) — 학습 후반부(--swa-start-frac 이후) "
+             "매 epoch의 가중치를 평균 낸 별도 모델을 유지하고, 학습 종료 후 이 평균 모델도 "
+             "internal/external test에 추가로 평가해 별도 리포트한다(기존 best-val/마지막-epoch "
+             "리포트는 그대로 유지, SWA는 세 번째 관점을 더하는 것). torch.optim.swa_utils 사용.",
+    )
+    parser.add_argument(
+        "--swa-start-frac", type=float, default=0.75,
+        help="--swa 평균을 시작할 시점(전체 epoch 대비 비율, 기본 0.75 = 마지막 25%%만 평균).",
+    )
+    parser.add_argument(
+        "--no-patient-shuffle", action="store_true",
+        help="2026-07-27: train DataLoader의 shuffle=True(기본, 매 epoch 환자 처리 순서를 다시 "
+             "섞음)를 끄고 항상 고정 순서로 순회한다. patch 서브샘플링 패턴을 격리해도 --full-train "
+             "시드 간 분산(std~0.02)이 그대로 남은 뒤, 남은 후보(모델 초기화 vs 환자 처리 순서) 중 "
+             "순서 쪽을 분리 검증하기 위한 용도.",
+    )
+    parser.add_argument(
         "--rna-aux-weight", type=float, default=0.0,
         help="WSI 표현이 RNA 발현도 예측하도록 하는 보조과제(auxiliary task) 가중치, "
              "models/rna_predictor.py::RNAPredictionHead. 0.0(기본)이면 비활성. RNA를 쓰는 "
@@ -387,6 +503,22 @@ def _parse_args() -> argparse.Namespace:
         help="internal test(같은 코호트 held-out)와 별도로, 학습에 전혀 쓰지 않은 반대 코호트 "
              "전체(tcga↔cptac 자동 선택)를 external test로 평가한다. 기본은 미사용(off) — "
              "켜려면 --external을 지정한다. --dataset both는 반대 코호트가 없어 함께 쓰면 에러.",
+    )
+    parser.add_argument(
+        "--exclude-case-ids", type=str, default=None,
+        help="2026-07-26: 콤마로 구분한 case_id 목록을 train set에서만 제외한다(val/test/external은 "
+             "그대로 유지 — split 자체를 다시 계산하지 않고, 이미 만들어진 train_ds.items에서 "
+             "해당 환자 행만 걸러낸다). seed84 train split에만 있는 '슬라이드 1장짜리 환자' 2명"
+             "(TCGA-IB-7645, TCGA-YH-A8SY)이 external 부진의 원인인지 검증하기 위한 용도.",
+    )
+    parser.add_argument(
+        "--full-train", action="store_true",
+        help="2026-07-26: 6:2:2 stratified split 없이 --dataset 코호트 전체를 train으로 쓴다 "
+             "(val/internal test 자체가 존재하지 않음). seed별 91명 train 분할의 '표본 운'이 "
+             "external 성능 차이를 만든다는 관찰(seed42 vs 84/126) 이후, 가용 데이터를 전부 "
+             "학습에 쓰면 external이 어떻게 되는지 보기 위한 실험용 플래그. val이 없어 best-val "
+             "체크포인트 선택이 불가능하므로 마지막 epoch 모델로 external을 정확히 1회 평가한다 "
+             "(--external과 함께 써야 의미가 있다).",
     )
     parser.add_argument(
         "--image", action="store_true",
@@ -431,6 +563,85 @@ def _parse_args() -> argparse.Namespace:
              "landmark·정밀도 실험에서 뚜렷한 신호가 없었던 상황에서, 좌표 임베딩 자체가 최종 "
              "예측에 기여하는지 직접 확인하는 ablation(findings_backlog.md). 켜면 wandb/"
              "checkpoint에 _NOSPATIAL 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--rel-bias-attention", action="store_true",
+        help="ViT/Nystromformer 블록의 절대좌표 SpatialPositionEmbedding을 빼고, 그 자리에 "
+             "상대offset(Δrow,Δcol) 기반 attention bias(Swin류, models/vit_encoder.py::"
+             "RelativeBiasFullAttention)를 넣은 전체(O(N^2)) self-attention으로 교체한다"
+             "(cfg.model.use_rel_bias_attn=True, use_nystrom/use_spatial_embed는 자동으로 "
+             "False). 2026-07-23: 얼린 Stage1 + 잔차 branch로 공간정보를 late-fusion하는 "
+             "ResTopoMIL류 설계(models/spatial_residual.py)가 PAAD·BRCA 둘 다에서 실패한 뒤, "
+             "WSI branch 안에서 RNA/Clinical과 함께 처음부터 end-to-end로 학습시키는 대안. "
+             "켜면 wandb/checkpoint에 _RELBIAS 접미사가 자동으로 붙는다. --full-attention/"
+             "--no-spatial-embed와 동시 사용 불필요(이미 포함됨).",
+    )
+    parser.add_argument(
+        "--knn-bias-attention", action="store_true",
+        help="--rel-bias-attention의 희소(sparse) 버전 — 전체(O(N^2)) attention 대신 각 패치의 "
+             "kNN 이웃 k개(--knn-k, 기본 8)에만 attention한다(models/vit_encoder.py::"
+             "KNNBiasAttention). 2026-07-23: BRCA(슬라이드당 패치 수 중앙값 10,309/최대 67,268)에 "
+             "--rel-bias-attention을 그대로 돌리면 attention logit/bias 텐서가 N^2으로 터져 즉시 "
+             "CUDA OOM — PAAD(N<=544) 전용이던 'O(N^2) 무부담' 가정이 BRCA에는 적용되지 않아 "
+             "추가한 대안. cfg.model.use_knn_bias_attn=True, use_nystrom/use_spatial_embed는 "
+             "자동으로 False. --rel-bias-attention과 동시 사용 시 dense가 우선한다. 켜면 wandb/"
+             "checkpoint에 _KNNATTN 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--knn-k", type=int, default=8,
+        help="--knn-bias-attention/--hybrid-attention 사용 시 패치당 kNN 이웃 수"
+             "(cfg.model.knn_attn_k, 기본 8).",
+    )
+    parser.add_argument(
+        "--hybrid-attention", action="store_true",
+        help="같은 레이어에서 local(kNN-bias-attention)과 global(기존 Nystrom)을 병렬로 계산해 "
+             "더한다(models/vit_encoder.py::HybridLocalGlobalAttention, cfg.model.use_hybrid_attn"
+             "=True). --rel-bias-attention/--knn-bias-attention과 달리 use_nystrom/"
+             "use_spatial_embed를 강제로 끄지 않는다 — global 경로가 계속 절대좌표 임베딩을 "
+             "쓰기 때문. 2026-07-23: kNN 단독이 PAAD(pre-augment)에서 기존 baseline보다 낮게 "
+             "나온 뒤(internal 0.6309->0.6094, external 0.6289->0.5880) 시도하는 대안. 켜면 "
+             "wandb/checkpoint에 _HYBRIDATTN 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--spatial-autocorr", action="store_true",
+        help="학습 파라미터 없는 공간 자기상관 특징(models/spatial_features.py::spatial_autocorr, "
+             "Moran's I류 — 패치 임베딩과 kNN 이웃의 코사인 유사도 평균/표준편차 2개)을 risk_head "
+             "5번째 관점으로 추가한다(cfg.model.use_spatial_autocorr=True, ViT_PMA 전용). "
+             "2026-07-23: 학습형 spatial attention(kNN/hybrid)이 전부 baseline을 못 넘은 뒤 "
+             "'새 attention 파라미터 자체가 과적합 유인'이라는 가설을 검증하는 저비용 대안. "
+             "켜면 wandb/checkpoint에 _AUTOCORR 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--attn-dispersion", action="store_true",
+        help="학습 파라미터 없는 attention 공간 분산 특징(models/spatial_features.py::"
+             "attention_dispersion — attn_weights로 가중한 좌표의 표준편차 1개)을 risk_head "
+             "5번째 관점으로 추가한다(cfg.model.use_attn_dispersion=True, ViT_PMA 전용). "
+             "--spatial-autocorr와 독립적으로 켤 수 있다(순차 검증용). 켜면 wandb/checkpoint에 "
+             "_DISP 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--knn-fixed-bias-attention", action="store_true",
+        help="--knn-bias-attention의 학습되는 RelativePositionBias(MLP)를 고정(학습 파라미터 없는) "
+             "거리감쇠 커널 bias=-dist/tau로 교체한다(models/vit_encoder.py::KNNFixedBiasAttention, "
+             "cfg.model.use_knn_fixed_bias_attn=True, use_nystrom/use_spatial_embed 자동 False). "
+             "q/k/v/out projection은 그대로 학습되므로, '새 attention 파라미터 전체'가 아니라 "
+             "'bias만 학습되는 것'이 과적합 유인인지 분리 검증하는 idea #3(2026-07-23). 켜면 "
+             "wandb/checkpoint에 _FIXEDBIAS 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--bias-tau", type=float, default=50.0,
+        help="--knn-fixed-bias-attention 사용 시 거리감쇠 스케일(cfg.model.knn_bias_tau, 기본 50). "
+             "bias=-dist/tau — tau가 클수록 거리에 덜 민감(bias가 완만해짐). --learnable-tau가 "
+             "켜지면 이 값은 초기값으로만 쓰인다.",
+    )
+    parser.add_argument(
+        "--learnable-tau", action="store_true",
+        help="--knn-fixed-bias-attention과 함께 사용 — tau를 고정 상수 대신 head별 학습 스칼라로 "
+             "바꾼다(cfg.model.knn_bias_learnable_tau=True). PSA-MIL(WACV 2026, arXiv:2503.16284)의 "
+             "'learnable distance-decayed prior'를 posterior=likelihood×prior의 log공간 덧셈 "
+             "형태(이미 이 프로젝트의 'attention logit + bias' 구조와 동일)로 경량 재현한 버전 — "
+             "head 개수(보통 2)만큼만 새로 학습되고 RelativePositionBias MLP(82개)보다 훨씬 작다. "
+             "켜면 wandb/checkpoint에 _LEARNTAU 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--epochs", type=int, default=None,
@@ -507,6 +718,14 @@ def _parse_args() -> argparse.Namespace:
              "findings_backlog.md 최상위 발견 2차) — RNA 정보는 co-attention을 통해 z_wsi에 "
              "여전히 녹아들지만, risk_head가 z_rna로 곧장 우회하는 지름길은 막는다. 켜면 "
              "wandb/checkpoint에 _RNAGATE 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--pretrained-wsi-trunk", type=str, default=None,
+        help="scripts/pretrain_brca_wsi_trunk.py 산출물 체크포인트 경로. model.cnn(proj)와 "
+             "model.vit(Nystromformer)만 이 가중치로 초기화한다 — RNA가 개입하는 부분"
+             "(RNAEncoder/rna_aux_head/component_coattn)은 원래대로 새로 초기화돼 이 코호트의 "
+             "유전자셋(--rna-genes)으로 학습된다. WSI를 쓰는 모든 --M*(cnn/vit를 가진 모델)에서 "
+             "사용 가능. 켜면 wandb/checkpoint에 _PRETRAINED 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--fusion", action="store_true",
@@ -654,6 +873,29 @@ def main():
     if args.full_attention:
         cfg.model.use_nystrom = False
     if args.no_spatial_embed:
+        cfg.model.use_spatial_embed = False
+    if args.rel_bias_attention:
+        cfg.model.use_rel_bias_attn = True
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.knn_bias_attention:
+        cfg.model.use_knn_bias_attn = True
+        cfg.model.knn_attn_k = args.knn_k
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.hybrid_attention:
+        cfg.model.use_hybrid_attn = True
+        cfg.model.knn_attn_k = args.knn_k
+    if args.spatial_autocorr:
+        cfg.model.use_spatial_autocorr = True
+    if args.attn_dispersion:
+        cfg.model.use_attn_dispersion = True
+    if args.knn_fixed_bias_attention:
+        cfg.model.use_knn_fixed_bias_attn = True
+        cfg.model.knn_attn_k = args.knn_k
+        cfg.model.knn_bias_tau = args.bias_tau
+        cfg.model.knn_bias_learnable_tau = args.learnable_tau
+        cfg.model.use_nystrom = False
         cfg.model.use_spatial_embed = False
 
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
@@ -847,6 +1089,22 @@ def main():
         model_prefix += "_FULLATTN"
     if args.no_spatial_embed:
         model_prefix += "_NOSPATIAL"
+    if args.rel_bias_attention:
+        model_prefix += "_RELBIAS"
+    if args.knn_bias_attention:
+        model_prefix += "_KNNATTN"
+    if args.hybrid_attention:
+        model_prefix += "_HYBRIDATTN"
+    if args.spatial_autocorr:
+        model_prefix += "_AUTOCORR"
+    if args.attn_dispersion:
+        model_prefix += "_DISP"
+    if args.knn_fixed_bias_attention:
+        model_prefix += "_FIXEDBIAS"
+        if args.learnable_tau:
+            model_prefix += "_LEARNTAU"
+    if args.pretrained_wsi_trunk:
+        model_prefix += "_PRETRAINED"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -907,6 +1165,13 @@ def main():
                 "shuffle_patches":       args.shuffle_patches,
                 "full_attention":        args.full_attention,
                 "no_spatial_embed":      args.no_spatial_embed,
+                "rel_bias_attention":    args.rel_bias_attention,
+                "knn_bias_attention":    args.knn_bias_attention,
+                "hybrid_attention":      args.hybrid_attention,
+                "spatial_autocorr":      args.spatial_autocorr,
+                "attn_dispersion":       args.attn_dispersion,
+                "knn_fixed_bias_attention": args.knn_fixed_bias_attention,
+                "learnable_tau":         args.learnable_tau,
                 "dataset":               args.dataset,
                 "external_dataset":      external_dataset,
             },
@@ -925,38 +1190,50 @@ def main():
     # PATCH_TRANSFORM). --image와 함께 쓰면 매 epoch 실시간 augmentation(transform 교체),
     # --image 없이 쓰면(precomputed 모드) 기존 1회성 features_aug.pt 폴백.
     train_ds = WSISurvivalDataset(
-        cfg.data, dataset=args.dataset, split="train",
+        cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),
         feature_filename_override=(
             FEATURES_AUG_FILENAME if (args.tile_augment and cfg.data.precomputed) else None
         ),
         transform=(
-            PATCH_TRANSFORM_AUGMENTED if (args.tile_augment and not cfg.data.precomputed) else None
+            PATCH_TRANSFORM_AUGMENTED_CACHED if (args.tile_augment and not cfg.data.precomputed) else None
         ),
         **ds_kwargs,
     )
-    # val/test/external은 항상 증강 없는 eval transform을 쓰므로(레퍼런스도 eval엔 미적용),
-    # --tile-augment --image 조합이어도 실시간 라이브 인코딩이 필요 없다 — 이미 캐싱된
-    # features.pt(비-증강)를 그대로 읽는 precomputed 모드로 강제해 매 epoch 불필요한 이미지
-    # 디코딩을 피한다(2026-07-22, real-time augmentation 파일럿이 예상보다 훨씬 느렸던 원인 중
-    # 하나 — eval 단계도 라이브 인코딩을 태우고 있었음).
-    eval_force_precomputed = args.tile_augment and not cfg.data.precomputed
-    if eval_force_precomputed:
-        cfg.data.precomputed = True
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
-    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
-    # train_c_index 리포팅도 항상 증강 없는 eval transform이므로, 캐싱된 features.pt로 읽는
-    # 별도 인스턴스를 둔다(train_ds 자체는 학습용으로 계속 patch_paths+라이브 augmentation 유지).
-    train_eval_ds = (
-        WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
-        if eval_force_precomputed else train_ds
-    )
+    if args.exclude_case_ids:
+        exclude_ids = [c.strip() for c in args.exclude_case_ids.split(",") if c.strip()]
+        before_n = train_ds.items["case_id"].nunique()
+        train_ds.items = train_ds.items[~train_ds.items["case_id"].isin(exclude_ids)].reset_index(drop=True)
+        after_n = train_ds.items["case_id"].nunique()
+        print(f"--exclude-case-ids: train case {before_n} -> {after_n} ({exclude_ids} 제외)")
+    # [진짜 real-time augmentation, 2026-07-22] 디코딩+리사이즈를 학습 시작 시 딱 한 번만 하고
+    # RAM에 캐싱 — 레퍼런스(tmp_m1_cell1.py::preload_resized_tile_images)와 동일한 절충
+    # (data/patch_utils.py::build_tile_cache 참조). 매 epoch은 이 캐시 위에서 flip/jitter/blur
+    # 같은 값싼 augmentation만 새로 적용해 "진짜 매 epoch 다른 augmentation"은 유지한다.
+    tile_cache = None
+    if args.tile_augment and args.image:
+        all_patch_paths = [
+            p for i in range(len(train_ds)) for slide in train_ds[i] for p in slide["patch_paths"]
+        ]
+        print(f"실시간 augmentation용 타일 프리로드: {len(all_patch_paths):,}개 패치")
+        tile_cache = build_tile_cache(all_patch_paths)
+    # [2026-07-23] val/test/external을 features.pt(precomputed)로 강제하던 이전 절충은
+    # train(512 리사이즈 raw)과 eval(원본 1024 features.pt) 사이에 유효 배율이 달라지는
+    # 버그였다(findings_backlog.md) — eval도 train과 똑같이 512로 리사이즈한 raw 이미지를
+    # 그대로 쓴다(PATCH_TRANSFORM_512, 증강 없음). RAM 캐싱은 train만 한다(tile_cache 없이
+    # 그때그때 디코딩 — val/test/external은 매 epoch 전체 재캐싱할 만큼 RAM 여유가 없다).
+    eval_transform = PATCH_TRANSFORM_512 if (args.tile_augment and args.image) else PATCH_TRANSFORM
+    val_ds   = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   transform=eval_transform, **ds_kwargs)
+    test_ds  = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  transform=eval_transform, **ds_kwargs)
+    # train_c_index 리포팅도 항상 증강 없는 eval_transform을 쓴다 — dataset.py의 .transform은
+    # __getitem__에서 쓰이지 않고 train.py가 evaluate() 호출 시 명시적으로 넘기는 값이므로
+    # (patch_paths/coords 자체는 precomputed 여부만 다르고 train_ds와 동일), 별도 인스턴스 없이
+    # train_ds를 그대로 재사용해도 된다.
+    train_eval_ds = train_ds
     # [ExternalTest] 학습에 전혀 쓰이지 않은 코호트 전체(split="all") — 없으면 None
     external_ds = (
-        WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
+        WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", transform=eval_transform, **ds_kwargs)
         if external_dataset else None
     )
-    if eval_force_precomputed:
-        cfg.data.precomputed = False
 
     dl_kwargs = dict(
         batch_size=1,
@@ -966,10 +1243,10 @@ def main():
         persistent_workers=(cfg.data.num_workers > 0),
         prefetch_factor=2 if cfg.data.num_workers > 0 else None,
     )
-    train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
+    train_loader      = DataLoader(train_ds, shuffle=not args.no_patient_shuffle,  **dl_kwargs)
     train_eval_loader = DataLoader(train_eval_ds, shuffle=False, **dl_kwargs)
-    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
-    test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
+    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs) if val_ds  is not None else None
+    test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs) if test_ds is not None else None
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
 
     # [Clinical/RNA/LateFusion] --M1/--M2/--M4/--M4A/--M4B/--M5/--M6/--fusion에 따라 모델 선택
@@ -990,6 +1267,8 @@ def main():
     # RNAOnlyExtend : RNAOnly와 동일 유전자 입력, 인코더 폭만 레퍼런스 사양(G->256->256)으로
     #                 확장 (--M6X)
     stage_kwargs = dict(use_staging=args.clinical_staging, stage_stats=stage_stats)
+    if args.init_seed is not None:
+        torch.manual_seed(args.init_seed)
     if args.M4:
         model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -1031,8 +1310,19 @@ def main():
         model = ViT_M1_AvgPool(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     else:
         model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+    if args.init_seed is not None:
+        torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
         model.cnn.backbone.requires_grad_(False)
+
+    if args.pretrained_wsi_trunk:
+        if not (hasattr(model, "cnn") and hasattr(model, "vit")):
+            raise ValueError("--pretrained-wsi-trunk는 WSI를 쓰는 모델(cnn/vit 보유)에서만 사용 가능합니다.")
+        trunk_ckpt = torch.load(args.pretrained_wsi_trunk, map_location=device, weights_only=False)
+        model.cnn.load_state_dict(trunk_ckpt["cnn"])
+        model.vit.load_state_dict(trunk_ckpt["vit"])
+        print(f"--pretrained-wsi-trunk: {args.pretrained_wsi_trunk}에서 cnn/vit 로드 완료 "
+              f"(pretrain epoch={trunk_ckpt.get('epoch')}, val_mse={trunk_ckpt.get('val_mse')})")
 
     if args.rna_aux_weight > 0:
         if not hasattr(model, "rna_encoder"):
@@ -1047,10 +1337,17 @@ def main():
         # rna_aux_head와 동일한 이유로 optimizer 생성 이전에 붙인다.
         model.stage_aux_head = StagePredictionHead(cfg.model.embed_dim, stage_stats).to(device)
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
-    )
+    if args.sam:
+        optimizer = SAM(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            torch.optim.AdamW, rho=args.sam_rho,
+            lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+        )
     scheduler = _build_scheduler(optimizer, cfg)
 
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
@@ -1099,8 +1396,12 @@ def main():
         print(f"Model: ViT_M1_AvgPool (ViT + 무학습 평균 풀링, ABMIL 제거)")
     else:
         print(f"Model: ViT_M1 (ViT+ABMIL baseline)")
-    print(f"Dataset: {args.dataset}  (6:2:2 stratified split)  "
-          f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
+    if args.full_train:
+        print(f"Dataset: {args.dataset}  (--full-train: 6:2:2 split 없이 코호트 전체를 train으로 사용)  "
+              f"Train: {len(train_ds)} patients (val/internal test 없음)")
+    else:
+        print(f"Dataset: {args.dataset}  (6:2:2 stratified split)  "
+              f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
     if external_ds is not None:
         print(f"External test dataset: {external_dataset}  (전체 코호트, 학습에 미사용)  "
               f"n={len(external_ds)} patients")
@@ -1117,6 +1418,7 @@ def main():
     # backbone을 태그에 안 넣으면 --backbone uni/resnet50을 오가며 돌릴 때 같은 파일을 덮어써서
     # 서로 다른 feature 차원의 checkpoint가 섞여버린다.
     tag = args.dataset if args.backbone == "resnet50" else f"{args.dataset}_{args.backbone}"
+    tag += f"_seed{cfg.train.seed}"
     if args.rna_genes == "pathway8":
         tag += "_PW8"
     elif args.rna_genes != "subtype":
@@ -1131,6 +1433,19 @@ def main():
         tag += "_AUX2"
     if args.clinical_staging:
         tag += "_STG"
+    if args.pretrained_wsi_trunk:
+        # 이게 없으면 같은 레시피를 --pretrained-wsi-trunk 유무만 다르게 동시에 돌릴 때
+        # 두 프로세스가 같은 checkpoint 파일을 공유해(경합 상태) best checkpoint를 서로
+        # 덮어써버린다 — 2026-07-22 실제로 이 버그로 baseline/pretrained 두 run의 최종
+        # test/external 지표가 완전히 동일하게 나온 것을 발견해 추가.
+        tag += "_PRETRAINED"
+    # [체크포인트 충돌 재발 방지, 2026-07-23] 위 수동 목록이 --tile-augment(_AUG)/
+    # --no-spatial-embed(_NOSPATIAL) 등을 빠뜨려, 오늘 밤 M7을 처음 넘긴 real-time augment
+    # 체크포인트가 이후 --no-spatial-embed 단독 실행에 그대로 덮어써진 사고가 있었다
+    # (findings_backlog.md). model_prefix(위, wandb run 이름용)는 모든 플래그를 빠짐없이
+    # 반영해온 만큼, 수동 목록을 유지보수하는 대신 아예 model_prefix를 tag에 그대로 붙여
+    # 이 버그 클래스 자체를 봉쇄한다(다소 중복되지만 파일명이 길어지는 것뿐, 안전이 우선).
+    tag += f"_{model_prefix}"
     if args.M4:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna.pt"
     elif args.M4A:
@@ -1162,6 +1477,18 @@ def main():
     else:
         ckpt_path = ckpt_dir / f"survival_{tag}_best.pt"
 
+    patch_subsample_generator = None
+    if args.patch_subsample_seed is not None:
+        patch_subsample_generator = torch.Generator(device="cpu")
+        patch_subsample_generator.manual_seed(args.patch_subsample_seed)
+
+    # [SWA] 후반부(--swa-start-frac 이후) 매 epoch 가중치를 평균 내는 별도 모델을 유지한다.
+    # AveragedModel은 forward만 위임하고 encode_rna/combine_with_clinical_rna 등 커스텀 메서드는
+    # 안 갖고 있으므로, 평가 시에는 swa_model이 아니라 swa_model.module(평균된 원본 클래스 인스턴스)을
+    # 써야 한다. LayerNorm만 쓰는 아키텍처라 BatchNorm running-stats 재계산(update_bn)은 불필요.
+    swa_model = torch.optim.swa_utils.AveragedModel(model) if args.swa else None
+    swa_start_epoch = round(cfg.train.epochs * args.swa_start_frac) if args.swa else None
+
     best_score   = -1.0
     best_metrics = {}
     for epoch in range(cfg.train.epochs):
@@ -1169,18 +1496,36 @@ def main():
         loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform,
                                          patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
                                          stage_aux_weight=args.stage_aux_weight,
-                                         shuffle_patches=args.shuffle_patches)
+                                         shuffle_patches=args.shuffle_patches, tile_cache=tile_cache,
+                                         patch_subsample_generator=patch_subsample_generator)
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
-        # 항상 증강 없는 PATCH_TRANSFORM으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
+        # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
         # --image일 때 매 epoch 학습 91명을 두 번(학습+리포팅) 실시간 augment하게 돼 시간이
         # 배로 든다(2026-07-22 발견, 실측 epoch당 소요가 예상의 2배 가까이 나온 원인).
-        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, PATCH_TRANSFORM)
+        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+        scheduler.step()
+        if swa_model is not None and (epoch + 1) >= swa_start_epoch:
+            swa_model.update_parameters(model)
+
+        if val_ds is None:
+            # --full-train: val 자체가 없음(코호트 전체를 train으로 씀) — train 지표만 기록한다.
+            print(f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
+                  f"train_c_index={train_metrics['c_index']:.4f}")
+            if WANDB_AVAILABLE:
+                wandb.log({
+                    "train/loss":       loss,
+                    "train/lr":         lr_now,
+                    "train/c_index":    train_metrics["c_index"],
+                    "train/hr":         train_metrics["hr"],
+                    "train/log_rank_p": train_metrics["log_rank_p"],
+                }, step=epoch + 1)
+            continue
+
         metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
         val_td_auc    = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"],
             metrics["times"], metrics["events"], metrics["risks"],
         )
-        scheduler.step()
 
         c_index = metrics.get("c_index", float("nan"))
         score   = c_index if not math.isnan(c_index) else -1.0
@@ -1234,25 +1579,97 @@ def main():
                 wandb.run.summary["best_val_auc_mean"]    = val_td_auc["auc_mean"]
                 wandb.run.summary["best_epoch"]           = epoch + 1
 
+    # 2026-07-26: 작은 validation set(31명)에서 best-val 체크포인트 선택 자체가 노이즈에 취약할
+    # 수 있다는 가설(seed126: val_c_index가 3시드 중 최고인데 test는 최저) 검증용 — best-val
+    # 선택 없이 마지막 epoch 모델을 그대로 평가해 비교한다. 재학습 불필요: 학습 루프 종료 직후
+    # (아래 best checkpoint 리로드 전) 메모리 상의 model이 곧 마지막 epoch 가중치다.
+    final_train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+    if test_ds is not None:
+        final_test_metrics  = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
+        final_test_td_auc   = compute_time_dependent_auc(
+            final_train_metrics["times"], final_train_metrics["events"],
+            final_test_metrics["times"], final_test_metrics["events"], final_test_metrics["risks"],
+        )
+        print("\n=== Internal Test 성능 (마지막 epoch %d 모델, best-val 선택 없음) ===" % cfg.train.epochs)
+        print(_log_line("final_test", final_test_metrics, final_test_td_auc))
+        if WANDB_AVAILABLE:
+            wandb.run.summary["final_epoch_test_c_index"]    = final_test_metrics["c_index"]
+            wandb.run.summary["final_epoch_test_hr"]          = final_test_metrics["hr"]
+            wandb.run.summary["final_epoch_test_log_rank_p"]  = final_test_metrics["log_rank_p"]
+            wandb.run.summary["final_epoch_test_auc_mean"]    = final_test_td_auc["auc_mean"]
+    if external_ds is not None:
+        final_external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform)
+        final_external_td_auc  = compute_time_dependent_auc(
+            final_train_metrics["times"], final_train_metrics["events"],
+            final_external_metrics["times"], final_external_metrics["events"], final_external_metrics["risks"],
+        )
+        print(f"=== External Test 성능 ({external_dataset} 전체 코호트, 마지막 epoch 모델) ===")
+        print(_log_line("final_external", final_external_metrics, final_external_td_auc))
+        if WANDB_AVAILABLE:
+            wandb.run.summary["final_epoch_external_c_index"]   = final_external_metrics["c_index"]
+            wandb.run.summary["final_epoch_external_hr"]         = final_external_metrics["hr"]
+            wandb.run.summary["final_epoch_external_log_rank_p"] = final_external_metrics["log_rank_p"]
+            wandb.run.summary["final_epoch_external_auc_mean"]   = final_external_td_auc["auc_mean"]
+
+    # [SWA] 평균 모델(swa_model.module)을 별도로 internal/external test에 평가 — 기존 best-val/
+    # 마지막-epoch 리포트와 나란히, 세 번째 관점으로만 추가한다(다른 로직에 영향 없음).
+    if swa_model is not None:
+        swa_module = swa_model.module
+        swa_train_metrics = evaluate(swa_module, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+        if test_ds is not None:
+            swa_test_metrics = evaluate(swa_module, test_loader, cfg, device, amp_ctx, test_ds.transform)
+            swa_test_td_auc  = compute_time_dependent_auc(
+                swa_train_metrics["times"], swa_train_metrics["events"],
+                swa_test_metrics["times"], swa_test_metrics["events"], swa_test_metrics["risks"],
+            )
+            print("\n=== Internal Test 성능 (SWA 평균 모델, epoch %d~%d 평균) ===" % (swa_start_epoch, cfg.train.epochs))
+            print(_log_line("swa_test", swa_test_metrics, swa_test_td_auc))
+            if WANDB_AVAILABLE:
+                wandb.run.summary["swa_test_c_index"]   = swa_test_metrics["c_index"]
+                wandb.run.summary["swa_test_hr"]         = swa_test_metrics["hr"]
+                wandb.run.summary["swa_test_log_rank_p"] = swa_test_metrics["log_rank_p"]
+                wandb.run.summary["swa_test_auc_mean"]   = swa_test_td_auc["auc_mean"]
+        if external_ds is not None:
+            swa_external_metrics = evaluate(swa_module, external_loader, cfg, device, amp_ctx, external_ds.transform)
+            swa_external_td_auc  = compute_time_dependent_auc(
+                swa_train_metrics["times"], swa_train_metrics["events"],
+                swa_external_metrics["times"], swa_external_metrics["events"], swa_external_metrics["risks"],
+            )
+            print(f"=== External Test 성능 ({external_dataset} 전체 코호트, SWA 평균 모델) ===")
+            print(_log_line("swa_external", swa_external_metrics, swa_external_td_auc))
+            if WANDB_AVAILABLE:
+                wandb.run.summary["swa_external_c_index"]   = swa_external_metrics["c_index"]
+                wandb.run.summary["swa_external_hr"]         = swa_external_metrics["hr"]
+                wandb.run.summary["swa_external_log_rank_p"] = swa_external_metrics["log_rank_p"]
+                wandb.run.summary["swa_external_auc_mean"]   = swa_external_td_auc["auc_mean"]
+
     # 학습 종료 후, best checkpoint로 held-out test set을 "딱 한 번" 평가한다.
-    ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model_state_dict"])
-    train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, PATCH_TRANSFORM)
-    test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
-    test_td_auc  = compute_time_dependent_auc(
-        train_metrics_final["times"], train_metrics_final["events"],
-        test_metrics["times"], test_metrics["events"], test_metrics["risks"],
-    )
-    print("\n=== Internal Test 성능 (같은 코호트 held-out, best checkpoint, epoch %d) ===" % ckpt["epoch"])
-    print(_log_line("test", test_metrics, test_td_auc))
-    if WANDB_AVAILABLE:
-        wandb.run.summary["test_c_index"]     = test_metrics["c_index"]
-        wandb.run.summary["test_hr"]          = test_metrics["hr"]
-        wandb.run.summary["test_hr_ci_lower"] = test_metrics["hr_ci_lower"]
-        wandb.run.summary["test_hr_ci_upper"] = test_metrics["hr_ci_upper"]
-        wandb.run.summary["test_log_rank_p"]  = test_metrics["log_rank_p"]
-        wandb.run.summary["test_auc_mean"]    = test_td_auc["auc_mean"]
-        wandb.finish()  # [ExternalTest] external은 별도 run(XM 접두)으로 로깅하므로 여기서 main run을 닫는다
+    # --full-train은 val 자체가 없어 best-val 체크포인트가 존재하지 않으므로, 위에서 이미 계산해둔
+    # 마지막 epoch 결과(final_train_metrics)를 그대로 재사용하고 model도 리로드하지 않는다 —
+    # 아래 external 평가가 자연히 "마지막 epoch 모델" 기준으로 정확히 1회 수행된다.
+    if not args.full_train:
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+        test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
+        test_td_auc  = compute_time_dependent_auc(
+            train_metrics_final["times"], train_metrics_final["events"],
+            test_metrics["times"], test_metrics["events"], test_metrics["risks"],
+        )
+        print("\n=== Internal Test 성능 (같은 코호트 held-out, best checkpoint, epoch %d) ===" % ckpt["epoch"])
+        print(_log_line("test", test_metrics, test_td_auc))
+        if WANDB_AVAILABLE:
+            wandb.run.summary["test_c_index"]     = test_metrics["c_index"]
+            wandb.run.summary["test_hr"]          = test_metrics["hr"]
+            wandb.run.summary["test_hr_ci_lower"] = test_metrics["hr_ci_lower"]
+            wandb.run.summary["test_hr_ci_upper"] = test_metrics["hr_ci_upper"]
+            wandb.run.summary["test_log_rank_p"]  = test_metrics["log_rank_p"]
+            wandb.run.summary["test_auc_mean"]    = test_td_auc["auc_mean"]
+            wandb.finish()  # [ExternalTest] external은 별도 run(XM 접두)으로 로깅하므로 여기서 main run을 닫는다
+    else:
+        train_metrics_final = final_train_metrics
+        if WANDB_AVAILABLE:
+            wandb.finish()
 
     # [ExternalTest] 학습에 전혀 쓰이지 않은 다른 코호트 전체를 best checkpoint로 딱 한 번 평가한다.
     # censoring 분포(time-dependent AUC)는 internal test와 동일하게 학습 코호트(train split) 기준.
@@ -1265,7 +1682,8 @@ def main():
             train_metrics_final["times"], train_metrics_final["events"],
             external_metrics["times"], external_metrics["events"], external_metrics["risks"],
         )
-        print(f"\n=== External Test 성능 ({external_dataset} 전체 코호트, best checkpoint) ===")
+        ckpt_desc = "마지막 epoch 모델, full-train" if args.full_train else "best checkpoint"
+        print(f"\n=== External Test 성능 ({external_dataset} 전체 코호트, {ckpt_desc}) ===")
         print(_log_line("external", external_metrics, external_td_auc))
         if WANDB_AVAILABLE:
             external_run_name = f"{args.dataset.upper()}_X{model_prefix}_seed{cfg.train.seed}_{run_ts}"
@@ -1320,17 +1738,25 @@ def main():
         f"{external_td_auc['auc_1095d']:.3f}\n"
         if external_metrics is not None else ""
     )
-    send_slack(
-        f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS) 학습 완료*\n"
-        f"> Epochs: {cfg.train.epochs} (best={best_metrics.get('epoch', '-')}) | "
-        f"Best val C-index: *{best_score:.4f}* | HR: {best_metrics.get('hr', float('nan')):.3f}\n"
-        f"> Internal Test C-index: *{test_metrics['c_index']:.4f}* | HR: {test_metrics['hr']:.3f} "
-        f"[{test_metrics['hr_ci_lower']:.3f}, {test_metrics['hr_ci_upper']:.3f}] | "
-        f"log-rank p: {test_metrics['log_rank_p']:.4f} | AUC(12/24/36m): "
-        f"{test_td_auc['auc_365d']:.3f}/{test_td_auc['auc_730d']:.3f}/{test_td_auc['auc_1095d']:.3f}\n"
-        f"{external_line}"
-        f"> 소요 시간: {h}h {m}m {s}s"
-    )
+    if args.full_train:
+        send_slack(
+            f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS, --full-train) 학습 완료*\n"
+            f"> Epochs: {cfg.train.epochs} (val/internal test 없음 — 코호트 전체를 train으로 사용)\n"
+            f"{external_line}"
+            f"> 소요 시간: {h}h {m}m {s}s"
+        )
+    else:
+        send_slack(
+            f":white_check_mark: *Path-ViT ({args.dataset.upper()} OS) 학습 완료*\n"
+            f"> Epochs: {cfg.train.epochs} (best={best_metrics.get('epoch', '-')}) | "
+            f"Best val C-index: *{best_score:.4f}* | HR: {best_metrics.get('hr', float('nan')):.3f}\n"
+            f"> Internal Test C-index: *{test_metrics['c_index']:.4f}* | HR: {test_metrics['hr']:.3f} "
+            f"[{test_metrics['hr_ci_lower']:.3f}, {test_metrics['hr_ci_upper']:.3f}] | "
+            f"log-rank p: {test_metrics['log_rank_p']:.4f} | AUC(12/24/36m): "
+            f"{test_td_auc['auc_365d']:.3f}/{test_td_auc['auc_730d']:.3f}/{test_td_auc['auc_1095d']:.3f}\n"
+            f"{external_line}"
+            f"> 소요 시간: {h}h {m}m {s}s"
+        )
 
 
 if __name__ == "__main__":
