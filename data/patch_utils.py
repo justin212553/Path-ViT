@@ -5,6 +5,7 @@ data/dataset.py(WSISurvivalDataset)와 data/extract_features.py, data/fit_cluste
 패치 단위로 동작하는 모듈들이 공통으로 재사용한다.
 """
 import re
+from collections import OrderedDict
 from pathlib import Path
 
 from PIL import Image
@@ -132,6 +133,61 @@ def build_tile_cache(
             cached_path.parent.mkdir(parents=True, exist_ok=True)
             img.save(cached_path, format="JPEG", quality=92)
     return cache
+
+
+class TileLRUCache:
+    """patch_path -> PIL Image(RGB) LRU 캐시, 항목 개수 상한(maxsize) 있음.
+
+    2026-07-29: build_tile_cache()(위)는 무제한 전량 RAM 캐싱이라, train_multi.py(모델 4개
+    동시 학습 — CNN backbone은 공유하지만 각 모델의 proj/ViT/pooling/optimizer state가 추가로
+    얹힘)에서 이 캐시(~22GB 추정, 위 build_tile_cache 문서 참조)만으로도 이미 빠듯했던 이 머신의
+    RAM(32GB) 한계를 넘겨 스와핑으로 6시간 넘게 멈춘 사고 이후 추가했다. build_tile_cache 자체는
+    (지금까지 잘 동작해온) train.py --tile-augment 경로를 건드리지 않기 위해 그대로 남겨두고,
+    이건 train_multi.py 전용 대안이다.
+
+    캐시가 꽉 찬 상태에서 새 타일을 넣으면 가장 오래전에 접근된 항목부터 제거한다(OrderedDict
+    move_to_end + popitem(last=False)). 디스크 캐시(TILE_DISK_CACHE_DIR) 정책은
+    build_tile_cache와 동일 — RAM에서 밀려나도 디스크 JPEG은 남아있어 다음 접근이 원본
+    디코딩보다는 빠르다.
+    """
+
+    def __init__(
+        self, maxsize: int, size: int | None = TILE_CACHE_SIZE,
+        disk_cache_dir: Path | None = TILE_DISK_CACHE_DIR,
+    ):
+        self.maxsize = maxsize
+        self.size = size
+        self.disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir is not None else None
+        self._cache: OrderedDict[Path, Image.Image] = OrderedDict()
+
+    def _load(self, p: Path) -> Image.Image:
+        cached_path = _disk_cache_path(p, self.disk_cache_dir) if self.disk_cache_dir is not None else None
+        if cached_path is not None and cached_path.exists():
+            with Image.open(cached_path) as img:
+                return img.convert("RGB")
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            if self.size is not None:
+                img = img.resize((self.size, self.size), resample=Image.BILINEAR)
+        if cached_path is not None:
+            cached_path.parent.mkdir(parents=True, exist_ok=True)
+            img.save(cached_path, format="JPEG", quality=92)
+        return img
+
+    def get(self, p: Path) -> Image.Image:
+        if p in self._cache:
+            self._cache.move_to_end(p)
+            return self._cache[p]
+        img = self._load(p)
+        self._cache[p] = img
+        if len(self._cache) > self.maxsize:
+            self._cache.popitem(last=False)
+        return img
+
+    def preload(self, patch_paths: list[Path]) -> None:
+        """maxsize까지만 채운다 — 전량 시도하지 않는다(무제한 캐싱이 원인이었던 사고 재발 방지)."""
+        for p in tqdm(patch_paths[: self.maxsize], desc="Preloading tiles (LRU-bounded)", unit="tile"):
+            self.get(p)
 
 
 FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)

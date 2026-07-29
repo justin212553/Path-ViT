@@ -36,14 +36,90 @@ CLINICAL_EMBED_DIM = 16
 
 
 class ClinicalRNAOnly(nn.Module):
-    def __init__(self, cfg: ModelConfig, age_mean: float, age_std: float, rna_input_dim: int):
+    """
+    combine_mode(2026-07-29, train_light.py --combine-mode)로 clinical과 RNA를 합치는 방식을
+    선택한다 — concat이 M6(RNA만)를 못 넘는 게 "clinical 브랜치 내부 설계"가 아니라 "신호 없는
+    변수(M5 external p=0.754)를 신호 있는 RNA와 하나의 선형 결합기에서 공동 학습시키는 구조 자체"
+    때문이라는 가설(findings_backlog.md 15번 항목) 검증용 — clinical이 개입할 수 있는 자유도를
+    극단적으로 줄인 대안 두 가지를 추가했다.
+
+    - "concat"(기본, 기존 동작): clinical_encoder(MLP)→z_c(clinical_dim)를 z_rna와 이어붙여
+      risk_head가 처리. clinical 쪽 유효 파라미터가 가장 많다.
+    - "film": clinical(age_z, sex)에서 스칼라 γ,β(각 2개 파라미터, 총 4개)만 만들어
+      z_rna' = γ·z_rna + β로 RNA 임베딩 전체를 균일하게 스케일/이동만 시킨다. γ→1, β→0
+      항등(identity) 근처로 초기화해 학습 시작 시점엔 사실상 M6와 동일하게 동작하고,
+      clinical이 실제로 유용해야만 gradient가 항등에서 밀어낸다.
+    - "cox_add": clinical을 임베딩하지 않고 고전적 Cox 비례위험모형처럼 최종 risk 스칼라에
+      직접 선형항으로 더한다: risk = risk_head(z_rna) + β_age·age_z + β_sex·sex_idx.
+      파라미터 딱 2개(β_age, β_sex)뿐 — 세 방식 중 자유도가 가장 작다.
+    """
+
+    def __init__(self, cfg: ModelConfig, age_mean: float, age_std: float, rna_input_dim: int,
+                 clinical_dim: int | None = None, rna_dim: int | None = None,
+                 clinical_dropout: float = 0.0, sex_onehot: bool = False,
+                 combine_mode: str = "concat",
+                 risk_hidden_dim: int | None = None, risk_dropout: float = 0.0):
         super().__init__()
-        self.clinical_encoder = ClinicalEncoder(CLINICAL_EMBED_DIM, age_mean, age_std)
-        self.rna_encoder = RNAEncoderExtend(rna_input_dim, embed_dim=RNA_EMBED_DIM, hidden_dim=RNA_EMBED_DIM, dropout=0.25)
-        self.risk_head = nn.Sequential(
-            nn.LayerNorm(RNA_EMBED_DIM + CLINICAL_EMBED_DIM),
-            nn.Linear(RNA_EMBED_DIM + CLINICAL_EMBED_DIM, 1),
-        )
+        if combine_mode not in ("concat", "film", "cox_add"):
+            raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
+        self.combine_mode = combine_mode
+        # 2026-07-28: clinical_dim을 키워서(레퍼런스 비대칭 16 대신 RNA와 같은 폭) "정보를 더
+        # 주면(표현력을 늘리면) 오히려 나빠지는지" 검증하기 위한 ablation(train_light.py
+        # --clinical-dim/--rna-dim). 기본값(None)이면 기존 동작(모듈 상수 256/16) 그대로 보존.
+        # rna_dim도 같이 줄이면(예: 64/4) 레퍼런스의 RNA:Clinical=16:1 비율을 유지한 채 이
+        # 프로젝트의 다른 모델들과 같은 절대 폭(64)으로 맞춰볼 수 있다.
+        clinical_dim = clinical_dim or CLINICAL_EMBED_DIM
+        rna_dim = rna_dim or RNA_EMBED_DIM
+        self.rna_encoder = RNAEncoderExtend(rna_input_dim, embed_dim=rna_dim, hidden_dim=rna_dim, dropout=0.25)
+
+        if combine_mode == "concat":
+            # 2026-07-29: 레퍼런스 clinical 브랜치엔 Dropout(0.25)이 있는데 우리는 없었다는 차이를
+            # 검증하는 ablation(train_light.py --clinical-dropout). 기본 0.0=기존 동작 보존.
+            self.clinical_encoder = ClinicalEncoder(clinical_dim, age_mean, age_std, dropout=clinical_dropout,
+                                                     sex_onehot=sex_onehot)
+            fused_dim = rna_dim + clinical_dim
+            if risk_hidden_dim is None:
+                self.risk_head = nn.Sequential(
+                    nn.LayerNorm(fused_dim),
+                    nn.Linear(fused_dim, 1),
+                )
+            else:
+                # 2026-07-29: 레퍼런스(tabular_survival.py::ClinicalRNASeqSurvivalModel.classifier)
+                # 사양(LayerNorm→Dropout→Linear→GELU→Dropout→Linear, hidden=128)을 13번 항목에서
+                # 그대로 이식했을 땐 negative(0.634→0.533)였는데, 그건 레퍼런스 원래 절대 폭
+                # (rna=256/clinical=16/hidden=128)까지 다 같이 썼을 때였다 — 지금 우리 폭(rna=64/
+                # clinical=4)에 맞춰 hidden도 같은 비율로 4배 축소(128/4=32)하고 dropout도
+                # 0.4 대신 0.3(cfg.model.dropout 기본값과 동일 관례)으로 낮춰서 재검증
+                # (train_light.py --risk-hidden-dim/--risk-dropout).
+                self.risk_head = nn.Sequential(
+                    nn.LayerNorm(fused_dim),
+                    nn.Dropout(risk_dropout),
+                    nn.Linear(fused_dim, risk_hidden_dim),
+                    nn.GELU(),
+                    nn.Dropout(risk_dropout),
+                    nn.Linear(risk_hidden_dim, 1),
+                )
+        else:
+            self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
+            self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+            self.risk_head = nn.Sequential(
+                nn.LayerNorm(rna_dim),
+                nn.Linear(rna_dim, 1),
+            )
+            if combine_mode == "film":
+                self.film_gamma = nn.Linear(2, 1)
+                self.film_beta = nn.Linear(2, 1)
+                nn.init.zeros_(self.film_gamma.weight)
+                nn.init.constant_(self.film_gamma.bias, 1.0)  # γ≈1(항등) 근처에서 시작
+                nn.init.zeros_(self.film_beta.weight)
+                nn.init.zeros_(self.film_beta.bias)            # β≈0(항등) 근처에서 시작
+            else:  # cox_add
+                self.clinical_linear = nn.Linear(2, 1, bias=False)  # β_age, β_sex 딱 2개
+                nn.init.zeros_(self.clinical_linear.weight)          # 초기엔 risk_head(z_rna)와 동일
+
+    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor) -> torch.Tensor:
+        age_z = (age_years.float() - self.age_mean) / self.age_std
+        return torch.stack([age_z, sex_idx.float()], dim=-1).unsqueeze(0)  # (1, 2)
 
     def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor) -> torch.Tensor:
         """
@@ -54,7 +130,21 @@ class ClinicalRNAOnly(nn.Module):
         Returns:
             risk: (1,)
         """
-        z_c = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
-        z_r = self.rna_encoder(rna.unsqueeze(0)).squeeze(0)                                    # (D,)
-        fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
-        return self.risk_head(fused.unsqueeze(0)).view(1)
+        z_r = self.rna_encoder(rna.unsqueeze(0)).squeeze(0)  # (D,)
+
+        if self.combine_mode == "concat":
+            z_c = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+            fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
+            return self.risk_head(fused.unsqueeze(0)).view(1)
+
+        clin_raw = self._clinical_raw(age_years, sex_idx)  # (1, 2)
+        if self.combine_mode == "film":
+            gamma = self.film_gamma(clin_raw).view(1)  # (1,)
+            beta = self.film_beta(clin_raw).view(1)    # (1,)
+            z_r_mod = gamma * z_r + beta                # (D,) — 전 차원에 균일 스케일/이동
+            return self.risk_head(z_r_mod.unsqueeze(0)).view(1)
+
+        # cox_add
+        risk_rna = self.risk_head(z_r.unsqueeze(0)).view(1)
+        risk_clin = self.clinical_linear(clin_raw).view(1)
+        return risk_rna + risk_clin

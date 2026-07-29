@@ -1010,7 +1010,97 @@ preprocess 했는지, WSI도 그렇고 데이터 프로세싱 과정과 risk hea
 
 ---
 
-## 중간 우선순위
+### 15. M7(RNA+Clinical)이 M6(RNA만)를 못 넘는 문제 — clinical 브랜치 내부를 세 방향으로 고쳐봤지만 전부 negative result
+
+`train_light.py --M7`(RNA=64/Clinical=4, `--dataset tcga --external`, seed42 고정, 단일 시드)로
+레퍼런스(tabular_survival.py::ClinicalEmbedding)와 우리 `ClinicalEncoder`(models/clinical_encoder.py)의
+구조 차이 두 가지를 직접 이식해 검증했다:
+
+- **clinical 브랜치 내부 dropout(0.25) 추가**: 레퍼런스엔 있고 우리에겐 없던 것. external C
+  0.6385→0.6179로 악화(AUC 0.6750→0.6430도 동반 악화). HR/p는 개선(1.570→1.746, 0.0157→0.0031)됐지만
+  주 지표인 c-index 기준 negative.
+- **sex를 스칼라 이진 인덱스(0/1) 대신 one-hot(2차원, 레퍼런스 clinical_dim=3 방식)으로 인코딩**:
+  external C 0.6385→0.6370, AUC 0.6750→0.6756 — 사실상 무차이(이미 확인된 seed 간 자연 변동폭
+  ±0.04~0.05 이내). 이론적으로는 one-hot이 유효 파라미터 하나(스칼라 가중치)를 비식별 파라미터
+  둘(w_male/w_female)로 표현해 초기화 분산·Adam 최적화 경로가 달라질 수 있다는 가설을 세웠지만,
+  단일 seed 점추정으로는 차이가 드러나지 않았다(여러 seed로 분산 자체를 비교해야 진짜 검증됨,
+  아직 안 함).
+
+같은 조건(seed42, tcga→cptac)에서 M5(ClinicalOnly, age/sex만)와 M6(RNAOnly)도 재검증했다:
+
+| 모델 | external C | external HR | external p | external AUC |
+|---|---|---|---|---|
+| M5 (ClinicalOnly, age/sex만) | 0.5369 | 1.058 [0.733, 1.527] | 0.7540(무의미) | 0.5412 |
+| **M6 (RNAOnly)** | **0.6468** | **2.477 [1.687, 3.637]** | **0.0000** | **0.7074** |
+| M7_EX (RNA=64/Clin=4, 기존) | 0.6385 | 1.570 [1.086, 2.270] | 0.0157 | 0.6750 |
+| M7_EX + clinical-dropout 0.25 | 0.6179 | 1.746 [1.201, 2.539] | 0.0031 | 0.6430 |
+| M7_EX + sex one-hot | 0.6370 | 1.808 [1.245, 2.625] | 0.0016 | 0.6756 |
+
+**M5(age/sex만)는 external에서 사실상 무의미(p=0.754, HR≈1)** — 이전 세션에서 "M5가 전 모델을
+이긴다"고 봤던 관찰은 아마 `--dataset both`(같은-코호트) 프로토콜에서 나온 것으로 보이며, 지금
+프로토콜(seed42/`--external`, 진짜 cross-institution)에서는 재현되지 않는다. **반면 M6(RNA만)는
+c-index·HR·p·AUC 전 지표에서 M7_EX 세 변형 전부를 앞선다.**
+
+**결론(가설)**: clinical(age/sex) 정보 자체가 이 코호트에서 external 기준으로 통계적으로 무의미한
+수준(M5: p=0.754)인데, 이를 RNA와 concat해 하나의 작은 risk_head(`LayerNorm→Linear(rna_dim+
+clinical_dim→1)`)로 공동 학습시키면, 그 risk_head는 훈련 세트(~90명)에서 clinical 가중치를
+0이 아닌 값으로 피팅하게 된다 — 신호가 없으니 이 가중치는 사실상 훈련 세트 노이즈에 대한
+과적합이고, held-out(특히 external)에서는 오히려 risk 순위를 흐트러뜨리는 역할을 한다(c-index는
+순위 기반 지표라 이런 노이즈에 특히 민감).
+
+**후속 검증(2026-07-29) — clinical의 자유도를 이론적 최솟값까지 줄여도 소용없음**:
+concat이 문제라면 "clinical이 개입할 수 있는 파라미터 수를 극단적으로 줄이면 해결될 것"이라는
+가설로 `models/clinical_rna_only.py::ClinicalRNAOnly`에 `combine_mode` 옵션 두 개를 추가해
+같은 조건(RNA=64, seed42, tcga→cptac)으로 검증했다:
+
+- **film**: clinical(age_z, sex)에서 스칼라 γ,β(항등 근처 초기화, 파라미터 6개)만 만들어
+  `z_rna' = γ·z_rna + β`로 RNA 임베딩 전체를 균일 스케일/이동만 시킴.
+- **cox_add**: 고전적 Cox 가산항처럼 `risk = risk_head(z_rna) + β_age·age_z + β_sex·sex_idx`로
+  최종 risk 스칼라에 직접 더함(파라미터 딱 2개, 세 방식 중 최소).
+
+| combine_mode | 파라미터 수(clinical 쪽) | external C | external HR | external p | external AUC |
+|---|---|---|---|---|---|
+| concat(기존) | ~수백(MLP 포함) | **0.6385** | 1.570 | 0.0157 | 0.6750 |
+| concat + sex one-hot | ~수백 | 0.6370 | 1.808 | 0.0016 | 0.6756 |
+| **cox_add** | **2** | 0.6304 | 1.933 | 0.0004 | 0.6864 |
+| concat + dropout 0.25 | ~수백 | 0.6228→0.6179* | — | — | — |
+| **film** | **6** | 0.6228 | 1.693 | 0.0049 | 0.6744 |
+| M6(RNA만, clinical 없음) | 0 | **0.6468** | **2.477** | **0.0000** | **0.7074** |
+
+(*dropout 행은 위 표와 별개 실험, 참고용으로만 병기)
+
+**가설 기각, 그것도 역방향으로**: 자유도를 줄일수록 오히려 나빠졌다(concat 0.6385 > cox_add
+0.6304 > film 0.6228) — "파라미터를 줄이면 노이즈 과적합이 줄어 M6에 가까워질 것"이라는 예측과
+정반대다. 그럴듯한 이유: concat은 clinical의 가중치가 RNA의 64개 차원과 함께 하나의
+LayerNorm+Linear로 희석되며 반영되는 반면, film은 γ·β가 z_rna **전체를 곱셈으로 직접 왜곡**하고
+(노이즈가 있으면 RNA의 64차원 전부에 비례해서 퍼짐), cox_add는 단 2개 파라미터가 최종 risk
+스칼라에 **감쇠 없이 직결**된다 — 파라미터 수는 적어도 그 각각이 손실에 미치는 "직접성"이 커서,
+오히려 더 적은 데이터로 더 공격적으로 피팅됐을 수 있다(가설, 추가 검증 안 됨).
+
+**추가 검증(2026-07-29, 3차) — risk_head 자체를 레퍼런스처럼 깊게(히든 레이어 추가), 단 비율은
+축소**: 13번 항목에서 레퍼런스 `classifier`(LayerNorm→Dropout(0.4)→Linear→GELU→Dropout(0.4)→
+Linear, hidden=128) 사양을 절대 폭 그대로(rna=256/clinical=16) 이식했을 땐 붕괴(0.634→0.533)
+했었는데, 그건 폭 자체가 이 프로젝트 다른 모델과 안 맞았을 가능성이 있어 지금 우리 폭(rna=64/
+clinical=4)에 맞춰 hidden도 같은 비율로 4배 축소(128/4=32)하고 dropout도 0.4→0.3으로 낮춰
+재검증(`--risk-hidden-dim 32 --risk-dropout 0.3`):
+
+| risk_head 구조 | external C | external HR | external p | external AUC |
+|---|---|---|---|---|
+| 레퍼런스 원본 비율(hidden=128, rna=256/clin=16, dropout=0.4) | 0.5330(13번 항목) | — | — | — |
+| **hidden=32(4배 축소), dropout=0.3, rna=64/clin=4** | **0.6340** | 2.016 [1.390, 2.925] | 0.0002 | 0.6701 |
+| 히든 없음(기존 concat, rna=64/clin=4) | 0.6385 | 1.570 | 0.0157 | 0.6750 |
+| M6(RNA만) | **0.6468** | 2.477 | 0.0000 | 0.7074 |
+
+비율을 맞춰 축소하니 레퍼런스 원본 비율(0.533)보다는 훨씬 나아졌지만(+0.101), 여전히 히든 없는
+기존 concat(0.6385)보다 낮고 M6(0.6468)는 당연히 못 넘었다 — risk_head를 깊게 만드는 것도
+순증분 이득이 없다는 뜻.
+
+**최종 결론**: dropout 유무, sex 인코딩 방식, clinical 차원(16/4), 결합 방식(concat/film/
+cox_add, 파라미터 수백↔2), risk_head 깊이(히든 없음 vs 32) — clinical·결합부에서 시도해볼 수
+있는 거의 모든 축을 바꿔봤지만 **단 하나도 M6(RNA 단독)를 넘지 못했다.** 이 정도로 다방면에서
+일관되게 실패하면 "clinical을 넣는 방법이 잘못됐다"보다 **"이 코호트에서 clinical(age/sex)은
+어떤 형태로 넣어도 RNA 대비 순증분 가치가 없다"**는 결론이 더 타당하다 — M6를 최종 baseline으로
+채택하고 이 실험 갈래는 종료.
 
 ### 3. 학습 하이퍼파라미터 검증 (light + WSI 모델 모두)
 **상태: 본격 스윕은 보류 — 아키텍처가 확정되지 않은 지금 시점엔 하지 않기로 결정(2026-07-17). 아키텍처 최종

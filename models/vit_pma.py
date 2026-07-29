@@ -52,19 +52,25 @@ class ViT_PMA(ViT_M1):
         rna_dim: int | None = None,
         clinical_dim: int | None = None,
         rna_gate_only: bool = False,
+        use_clinical: bool = True,
     ):
         super().__init__(cfg, precomputed, backbone)
         rna_dim = rna_dim or cfg.embed_dim
         clinical_dim = clinical_dim or cfg.embed_dim
         self.rna_gate_only = rna_gate_only
+        # 2026-07-28: M3(WSI+RNA, clinical 제외) ablation용 — PMA_EX_SS_AUX(M4 슬롯) 구조 그대로
+        # 두고 clinical concat만 뺀다(train.py --no-clinical). False면 clinical_encoder 자체를
+        # 안 만들고 combine_with_clinical_rna()도 z_clinical을 계산/concat하지 않는다.
+        self.use_clinical = use_clinical
         self.attn_pool = MultiComponentPooling(cfg.embed_dim)
         self.component_coattn = CoAttentionPooling(
             cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
         )
 
-        self.clinical_encoder = ClinicalEncoder(
-            clinical_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
-        )
+        if self.use_clinical:
+            self.clinical_encoder = ClinicalEncoder(
+                clinical_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+            )
         self.rna_encoder = RNAEncoder(rna_input_dim, rna_dim, dropout=cfg.dropout)
         # 2026-07-23: 학습형 spatial attention(kNN/hybrid) 전부가 pre-augment에서 baseline을
         # 못 넘은 뒤(findings_backlog.md), "새 attention 파라미터 자체가 과적합 유인"이라는
@@ -74,11 +80,17 @@ class ViT_PMA(ViT_M1):
         self.use_spatial_autocorr = getattr(cfg, "use_spatial_autocorr", False)
         self.use_attn_dispersion = getattr(cfg, "use_attn_dispersion", False)
         spatial_feat_dim = (2 if self.use_spatial_autocorr else 0) + (1 if self.use_attn_dispersion else 0)
-        # risk_head 입력: [z_wsi(WSI_D), z_clinical(clinical_dim)] (+ z_rna(rna_dim), rna_gate_only=False일 때만)
-        # (+ spatial_feat(spatial_feat_dim), 위 두 플래그 중 하나라도 켜졌을 때만)
-        # (rna_dim/clinical_dim이 둘 다 기본값(None)이고 rna_gate_only=False, spatial_feat_dim=0이면
-        # 3*cfg.embed_dim과 동일 — 기존 동작 보존)
-        risk_input_dim = cfg.embed_dim + clinical_dim + (0 if rna_gate_only else rna_dim) + spatial_feat_dim
+        # risk_head 입력: [z_wsi(WSI_D)] (+ z_clinical(clinical_dim), use_clinical=True일 때만)
+        # (+ z_rna(rna_dim), rna_gate_only=False일 때만) (+ spatial_feat(spatial_feat_dim), 위 두
+        # 플래그 중 하나라도 켜졌을 때만)
+        # (rna_dim/clinical_dim이 둘 다 기본값(None)이고 use_clinical=True, rna_gate_only=False,
+        # spatial_feat_dim=0이면 3*cfg.embed_dim과 동일 — 기존 동작 보존)
+        risk_input_dim = (
+            cfg.embed_dim
+            + (clinical_dim if self.use_clinical else 0)
+            + (0 if rna_gate_only else rna_dim)
+            + spatial_feat_dim
+        )
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
             nn.Linear(risk_input_dim, 1),
@@ -131,17 +143,19 @@ class ViT_PMA(ViT_M1):
         stage_kwargs = {}
         if stage_ord is not None:
             stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
-        z_clinical = self.clinical_encoder(
-            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
-        ).squeeze(0)  # (D,)
         z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
-        if self.rna_gate_only:
-            # z_rna는 위 co-attention의 query로만 관여하고, risk_head에는 직결 concat하지 않는다 —
-            # RNA로 곧장 우회하는 "지름길"을 막아 risk_head가 z_wsi(에 이미 녹아든 RNA 정보)와
-            # z_clinical만으로 예측하도록 강제한다.
-            fused = torch.cat([z_wsi, z_clinical], dim=-1)       # (2D,)
-        else:
-            fused = torch.cat([z_wsi, z_clinical, z_rna], dim=-1)  # (3D,)
+        parts = [z_wsi]
+        if self.use_clinical:
+            z_clinical = self.clinical_encoder(
+                age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+            ).squeeze(0)  # (D,)
+            parts.append(z_clinical)
+        if not self.rna_gate_only:
+            # rna_gate_only=True면 z_rna는 위 co-attention의 query로만 관여하고, risk_head에는
+            # 직결 concat하지 않는다 — RNA로 곧장 우회하는 "지름길"을 막아 risk_head가
+            # z_wsi(에 이미 녹아든 RNA 정보)와 z_clinical만으로 예측하도록 강제한다.
+            parts.append(z_rna)
+        fused = torch.cat(parts, dim=-1)
         if spatial_feat is not None:
             fused = torch.cat([fused, spatial_feat], dim=-1)
         return fused

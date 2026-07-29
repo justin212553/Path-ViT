@@ -72,14 +72,17 @@ def _identity_collate(batch: list) -> list:
 def _patient_risk(model, patient_slides, device) -> torch.Tensor:
     """WSI 없이 환자 단위 메타데이터(age/sex 및/또는 rna)만으로 risk score를 계산한다.
 
-    model이 rna_encoder와 clinical_encoder를 둘 다 가지면 ClinicalRNAOnly(M7),
-    rna_encoder만 있으면 RNAOnly/RNAOnlyExtend(M6/M6X), clinical_encoder만 있으면
-    ClinicalOnly(M5) — forward 시그니처가 모델마다 다르므로 hasattr로 분기한다.
+    model이 ClinicalRNAOnly(M7)면 age/sex/rna 전부, rna_encoder만 있으면
+    RNAOnly/RNAOnlyExtend(M6/M6X), 그 외(clinical_encoder만)는 ClinicalOnly(M5) —
+    forward 시그니처가 모델마다 다르므로 분기한다. 2026-07-29: ClinicalRNAOnly의
+    combine_mode="film"/"cox_add"는 clinical_encoder 속성이 없어(그 대신 film_gamma/
+    clinical_linear) hasattr(model, "clinical_encoder")만으로는 M7을 못 잡는 버그가 있었다 —
+    isinstance로 명시적으로 잡는다.
     """
     p = patient_slides[0]
-    has_clinical = hasattr(model, "clinical_encoder")
+    is_m7 = isinstance(model, ClinicalRNAOnly)
     has_rna = hasattr(model, "rna_encoder")
-    if has_clinical and has_rna:
+    if is_m7:
         return model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
@@ -145,7 +148,14 @@ def _log_line(prefix: str, metrics: dict, td_auc: dict | None = None) -> str:
         f"{prefix}_logrank_p={metrics['log_rank_p']:.4f}"
     )
     if td_auc is not None:
+        day_keys = sorted(
+            (k for k in td_auc if k.startswith("auc_") and k.endswith("d")),
+            key=lambda k: int(k[4:-1]),
+        )
+        per_day = " ".join(f"{k}={td_auc[k]:.4f}" for k in day_keys)
         line += f" | {prefix}_AUC_mean={td_auc['auc_mean']:.4f}"
+        if per_day:
+            line += f" ({per_day})"
     return line
 
 
@@ -159,6 +169,11 @@ def _parse_args() -> argparse.Namespace:
         help="2026-07-27: train.py --init-seed와 동일 — 모델 가중치 초기화만 --seed와 분리된 값으로 "
              "고정한다(모델 생성 직전 이 값으로 재시딩, 생성 직후 --seed로 복원). M7_EX에서도 "
              "초기화가 seed 간 external 격차의 주 원인인지 확인하기 위한 용도.",
+    )
+    parser.add_argument(
+        "--auc-days", type=str, default="365,730,1095",
+        help="2026-07-28: train.py --auc-days와 동일 — time-dependent AUC 계산 시점(day, 콤마 "
+             "구분). 기본 12/24/36개월(365,730,1095). 예: --auc-days 91,182,365,730.",
     )
     parser.add_argument(
         "--external", action="store_true",
@@ -207,12 +222,62 @@ def _parse_args() -> argparse.Namespace:
     model_group.add_argument("--M6", action="store_true", help="RNAOnly (RNA-seq만).")
     model_group.add_argument("--M6X", action="store_true", help="RNAOnlyExtend (RNA-seq, G->256->256 인코더).")
     model_group.add_argument("--M7", action="store_true", help="ClinicalRNAOnly (age/sex + RNA-seq).")
+    parser.add_argument(
+        "--clinical-dim", type=int, default=None,
+        help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수 16, models/"
+             "clinical_rna_only.py). RNA(256)와 같은 폭(예: 64)으로 키워서 '정보(표현력)를 "
+             "더 주면 오히려 나빠지는지' 검증하는 ablation용 — M5(RNA만)가 M7(RNA+Clinical)을 "
+             "이긴 관찰(2026-07-28) 이후 clinical 표현력 증가가 해로운지 확인하기 위한 용도.",
+    )
+    parser.add_argument(
+        "--rna-dim", type=int, default=None,
+        help="--M7 전용: rna_encoder 출력 차원(기본 None=모듈 상수 256). --clinical-dim과 같이 "
+             "써서(예: --rna-dim 64 --clinical-dim 4) 레퍼런스의 RNA:Clinical=16:1 비율은 "
+             "유지한 채, 이 프로젝트의 다른 모델(M1~M6, 전부 64차원)과 같은 절대 폭으로 맞춰볼 "
+             "때 사용한다.",
+    )
+    parser.add_argument(
+        "--clinical-dropout", type=float, default=0.0,
+        help="--M7 전용: clinical_encoder MLP 내부 dropout(기본 0.0=기존 동작). 레퍼런스"
+             "(tabular_survival.py::ClinicalEmbedding)엔 Dropout(0.25)이 있는데 우리는 없었다는 "
+             "차이가 M7의 clinical 브랜치가 다른 모달리티를 누르는 원인인지 검증하는 ablation.",
+    )
+    parser.add_argument(
+        "--sex-onehot", action="store_true",
+        help="--M7 전용: sex를 스칼라 이진 인덱스(0/1) 대신 one-hot(2차원, 레퍼런스 clinical_dim=3 "
+             "방식)으로 인코딩한다. 표현력은 수학적으로 등가이지만 초기화 분산/Adam 최적화 경로가 "
+             "달라져 결과가 갈릴 수 있는지 검증하는 ablation.",
+    )
+    parser.add_argument(
+        "--risk-hidden-dim", type=int, default=None,
+        help="--M7 --combine-mode concat 전용: risk_head에 레퍼런스(tabular_survival.py::"
+             "ClinicalRNASeqSurvivalModel.classifier) 사양(LayerNorm→Dropout→Linear→GELU→"
+             "Dropout→Linear)처럼 히든 레이어를 추가한다. 기본 None이면 기존(히든 없는 "
+             "LayerNorm→Linear 직결) 동작 그대로. 13번 항목에서 레퍼런스 절대 폭(hidden=128)은 "
+             "negative였는데, 우리 폭(rna=64/clinical=4)에 맞춰 같은 비율로 축소(예: 32)해서 "
+             "재검증할 때 사용.",
+    )
+    parser.add_argument(
+        "--risk-dropout", type=float, default=0.0,
+        help="--risk-hidden-dim과 함께 사용하는 risk_head 내부 dropout(기본 0.0). 레퍼런스는 0.4.",
+    )
+    parser.add_argument(
+        "--combine-mode", type=str, default="concat", choices=["concat", "film", "cox_add"],
+        help="--M7 전용: clinical과 RNA를 합치는 방식(models/clinical_rna_only.py::ClinicalRNAOnly "
+             "참조). concat(기본, 기존 동작) | film(clinical→스칼라 γ,β로 z_rna 전체를 균일 "
+             "스케일/이동, 항등 근처 초기화, 파라미터 4개) | cox_add(clinical을 고전적 Cox 가산항 "
+             "risk_head(z_rna)+β_age·age_z+β_sex·sex로 직접 더함, 파라미터 2개). findings_backlog.md "
+             "15번 항목 — concat이 M6를 못 넘는 게 '신호 없는 clinical을 신호 있는 RNA와 하나의 "
+             "선형 결합기에서 공동 학습시키는 구조 자체' 때문인지, 자유도를 극단적으로 줄이면 "
+             "해결되는지 검증.",
+    )
     return parser.parse_args()
 
 
 def main():
     load_env()
     args = _parse_args()
+    auc_days = tuple(int(x.strip()) for x in args.auc_days.split(",") if x.strip())
     cfg = Config()
     if args.seed is not None:
         cfg.data.seed  = args.seed
@@ -268,6 +333,20 @@ def main():
         model_prefix += f"_WD{args.weight_decay:.0e}"
     if args.match_reference_cohort:
         model_prefix += "_REFCOHORT"
+    if args.clinical_dim is not None:
+        model_prefix += f"_CLINDIM{args.clinical_dim}"
+    if args.rna_dim is not None:
+        model_prefix += f"_RNADIM{args.rna_dim}"
+    if args.clinical_dropout != 0.0:
+        model_prefix += f"_CLINDROP{args.clinical_dropout:g}"
+    if args.sex_onehot:
+        model_prefix += "_SEXOH"
+    if args.combine_mode != "concat":
+        model_prefix += f"_{args.combine_mode.upper()}"
+    if args.risk_hidden_dim is not None:
+        model_prefix += f"_RISKDIM{args.risk_hidden_dim}"
+    if args.risk_dropout != 0.0:
+        model_prefix += f"_RISKDROP{args.risk_dropout:g}"
 
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
@@ -278,7 +357,11 @@ def main():
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     else:
-        model = ClinicalRNAOnly(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim).to(device)
+        model = ClinicalRNAOnly(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                                 clinical_dim=args.clinical_dim, rna_dim=args.rna_dim,
+                                 clinical_dropout=args.clinical_dropout, sex_onehot=args.sex_onehot,
+                                 combine_mode=args.combine_mode, risk_hidden_dim=args.risk_hidden_dim,
+                                 risk_dropout=args.risk_dropout).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.light.seed)
 
@@ -349,6 +432,7 @@ def main():
         metrics = evaluate(model, val_loader, device)
         val_td_auc = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"], metrics["times"], metrics["events"], metrics["risks"],
+            eval_days=auc_days,
         )
         scheduler.step()
 
@@ -388,6 +472,7 @@ def main():
     test_td_auc = compute_time_dependent_auc(
         train_metrics_final["times"], train_metrics_final["events"],
         test_metrics["times"], test_metrics["events"], test_metrics["risks"],
+        eval_days=auc_days,
     )
     print(f"\n=== Internal Test (best checkpoint epoch {ckpt['epoch']}) ===")
     print(_log_line("test", test_metrics, test_td_auc))
@@ -404,6 +489,7 @@ def main():
         external_td_auc = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             external_metrics["times"], external_metrics["events"], external_metrics["risks"],
+            eval_days=auc_days,
         )
         print(f"\n=== External Test ({external_dataset} 전체 코호트) ===")
         print(_log_line("external", external_metrics, external_td_auc))

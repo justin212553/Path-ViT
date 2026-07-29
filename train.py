@@ -220,7 +220,13 @@ def _patient_risk(
         if hasattr(model, "combine_with_clinical_rna"):
             age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
-            stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
+            # --no-clinical(ViT_PMA use_clinical=False)이면 clinical_encoder 자체가 없다 —
+            # getattr로 존재 여부부터 확인해야 한다(2026-07-29, --no-clinical 첫 실사용 중 발견).
+            _clinical_enc = getattr(model, "clinical_encoder", None)
+            stage_ord = (
+                _stage_ord_from_patient(patient_slides, device)
+                if _clinical_enc is not None and _clinical_enc.use_staging else None
+            )
             patient_embed = model.combine_with_clinical_rna(
                 patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord,
                 spatial_feat=patient_spatial_feat,
@@ -440,6 +446,14 @@ def _parse_args() -> argparse.Namespace:
              "동일한 재현은 아니고 독립적으로 잘 정의된 비교군이라는 정도로 해석해야 한다.",
     )
     parser.add_argument(
+        "--auc-days", type=str, default="365,730,1095",
+        help="2026-07-28: time-dependent AUC(Uno's) 계산 시점(day, 콤마 구분). 기본 12/24/36개월"
+             "(365,730,1095). 3/6/12/24개월처럼 다른 구간 분포를 보고 싶을 때 예: "
+             "--auc-days 91,182,365,730. wandb의 auc_12m/24m/36m 로깅은 --auc-days가 기본값이 "
+             "아니면 값이 없을 수 있어(.get, nan 처리) — 콘솔 로그(_log_line)에는 실제 계산된 "
+             "모든 시점의 AUC가 항상 개별 표시된다.",
+    )
+    parser.add_argument(
         "--sam", action="store_true",
         help="2026-07-27: SAM(Sharpness-Aware Minimization, utils/sam.py)으로 AdamW를 감싼다 — "
              "현재 지점이 아니라 근방(반경 --sam-rho) 최악점 기준 gradient로 업데이트해 flat "
@@ -656,6 +670,13 @@ def _parse_args() -> argparse.Namespace:
              "_DROP{dropout} 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--embed-dim", type=int, default=None,
+        help="cfg.model.embed_dim(기본 64) 덮어쓰기 — WSI 브랜치 전체(CNN proj/ViT/pooling)의 "
+             "폭. --rna-dim/--clinical-dim과 달리 이 값은 WSI 쪽 자체를 줄이는 용도(2026-07-28, "
+             "PMA에서 clinical/RNA만 줄여본 뒤 'WSI를 줄이면 어떤지'도 보기 위한 ablation). "
+             "기본값(None)과 다르면 wandb/checkpoint에 _EMBDIM{embed_dim} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--one-slide-per-case", action="store_true",
         help="케이스당 슬라이드를 대표 1장으로 줄인다(data/dataset.py::_select_representative_slide, "
              "findings_backlog.md 14번 항목). 기본은 미사용(케이스가 가진 슬라이드를 전부 사용하는 "
@@ -718,6 +739,13 @@ def _parse_args() -> argparse.Namespace:
              "findings_backlog.md 최상위 발견 2차) — RNA 정보는 co-attention을 통해 z_wsi에 "
              "여전히 녹아들지만, risk_head가 z_rna로 곧장 우회하는 지름길은 막는다. 켜면 "
              "wandb/checkpoint에 _RNAGATE 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--no-clinical", action="store_true",
+        help="2026-07-28: --PMA 전용, M3(WSI+RNA, clinical 제외) ablation용 — clinical_encoder "
+             "자체를 안 만들고 risk_head 입력에서 z_clinical을 뺀다(risk_head 입력이 [z_wsi, "
+             "z_rna]로 축소, rna_gate_only와도 함께 쓸 수 있음). 켜면 wandb/checkpoint에 "
+             "_NOCLINICAL 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--pretrained-wsi-trunk", type=str, default=None,
@@ -850,13 +878,21 @@ def _log_line(prefix: str, metrics: dict, td_auc: dict | None = None) -> str:
         f"{prefix}_logrank_p={metrics['log_rank_p']:.4f}"
     )
     if td_auc is not None:
+        day_keys = sorted(
+            (k for k in td_auc if k.startswith("auc_") and k.endswith("d")),
+            key=lambda k: int(k[4:-1]),
+        )
+        per_day = " ".join(f"{k}={td_auc[k]:.4f}" for k in day_keys)
         line += f" | {prefix}_AUC_mean={td_auc['auc_mean']:.4f}"
+        if per_day:
+            line += f" ({per_day})"
     return line
 
 
 def main():
     load_env()
     args   = _parse_args()
+    auc_days = tuple(int(x.strip()) for x in args.auc_days.split(",") if x.strip())
     cfg    = Config()
     cfg.data.precomputed = not args.image
     if args.seed is not None:
@@ -868,6 +904,8 @@ def main():
         cfg.data.patches_root_cptac = args.patches_root_cptac
     if args.dropout is not None:
         cfg.model.dropout = args.dropout
+    if args.embed_dim is not None:
+        cfg.model.embed_dim = args.embed_dim
     if args.epochs is not None:
         cfg.train.epochs = args.epochs
     if args.full_attention:
@@ -924,6 +962,8 @@ def main():
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
     if args.rna_gate_only and not args.PMA:
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
+    if args.no_clinical and not args.PMA:
+        raise ValueError("--no-clinical은 --PMA에서만 사용 가능합니다.")
     if args.fusion and args.backbone != "resnet50":
         raise ValueError(
             "--fusion(LateFusionViT)의 cluster_centroids.pt는 ResNet50 raw feature(2048-dim) "
@@ -1081,8 +1121,12 @@ def main():
         model_prefix += f"_RNADIM{args.rna_dim}"
     if args.clinical_dim is not None:
         model_prefix += f"_CLINDIM{args.clinical_dim}"
+    if args.embed_dim is not None:
+        model_prefix += f"_EMBDIM{args.embed_dim}"
     if args.rna_gate_only:
         model_prefix += "_RNAGATE"
+    if args.no_clinical:
+        model_prefix += "_NOCLINICAL"
     if args.shuffle_patches:
         model_prefix += "_SHUF"
     if args.full_attention:
@@ -1162,6 +1206,7 @@ def main():
                 "rna_dim":               args.rna_dim,
                 "clinical_dim":          args.clinical_dim,
                 "rna_gate_only":         args.rna_gate_only,
+                "no_clinical":           args.no_clinical,
                 "shuffle_patches":       args.shuffle_patches,
                 "full_attention":        args.full_attention,
                 "no_spatial_embed":      args.no_spatial_embed,
@@ -1285,7 +1330,8 @@ def main():
         model = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                          precomputed=cfg.data.precomputed, backbone=args.backbone,
                          rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
-                         rna_gate_only=args.rna_gate_only, **stage_kwargs).to(device)
+                         rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
+                         **stage_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                             precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -1525,6 +1571,7 @@ def main():
         val_td_auc    = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"],
             metrics["times"], metrics["events"], metrics["risks"],
+            eval_days=auc_days,
         )
 
         c_index = metrics.get("c_index", float("nan"))
@@ -1546,11 +1593,15 @@ def main():
                 "val_performance/hr_ci_lower":   metrics["hr_ci_lower"],
                 "val_performance/hr_ci_upper":   metrics["hr_ci_upper"],
                 "val_performance/log_rank_p":    metrics["log_rank_p"],
-                "val_performance/auc_12m":       val_td_auc["auc_365d"],
-                "val_performance/auc_24m":       val_td_auc["auc_730d"],
-                "val_performance/auc_36m":       val_td_auc["auc_1095d"],
+                "val_performance/auc_12m":       val_td_auc.get("auc_365d", float("nan")),
+                "val_performance/auc_24m":       val_td_auc.get("auc_730d", float("nan")),
+                "val_performance/auc_36m":       val_td_auc.get("auc_1095d", float("nan")),
                 "val_performance/auc_mean":      val_td_auc["auc_mean"],
             }
+            # --auc-days가 기본값(12/24/36m)이 아니면, 실제 계산된 시점들도 원본 day 단위 키로 남긴다.
+            for k, v in val_td_auc.items():
+                if k.startswith("auc_") and k.endswith("d"):
+                    log_dict[f"val_performance/{k}"] = v
             wandb.log(log_dict, step=epoch + 1)
 
         if score > best_score:
@@ -1589,6 +1640,7 @@ def main():
         final_test_td_auc   = compute_time_dependent_auc(
             final_train_metrics["times"], final_train_metrics["events"],
             final_test_metrics["times"], final_test_metrics["events"], final_test_metrics["risks"],
+            eval_days=auc_days,
         )
         print("\n=== Internal Test 성능 (마지막 epoch %d 모델, best-val 선택 없음) ===" % cfg.train.epochs)
         print(_log_line("final_test", final_test_metrics, final_test_td_auc))
@@ -1602,6 +1654,7 @@ def main():
         final_external_td_auc  = compute_time_dependent_auc(
             final_train_metrics["times"], final_train_metrics["events"],
             final_external_metrics["times"], final_external_metrics["events"], final_external_metrics["risks"],
+            eval_days=auc_days,
         )
         print(f"=== External Test 성능 ({external_dataset} 전체 코호트, 마지막 epoch 모델) ===")
         print(_log_line("final_external", final_external_metrics, final_external_td_auc))
@@ -1621,6 +1674,7 @@ def main():
             swa_test_td_auc  = compute_time_dependent_auc(
                 swa_train_metrics["times"], swa_train_metrics["events"],
                 swa_test_metrics["times"], swa_test_metrics["events"], swa_test_metrics["risks"],
+                eval_days=auc_days,
             )
             print("\n=== Internal Test 성능 (SWA 평균 모델, epoch %d~%d 평균) ===" % (swa_start_epoch, cfg.train.epochs))
             print(_log_line("swa_test", swa_test_metrics, swa_test_td_auc))
@@ -1634,6 +1688,7 @@ def main():
             swa_external_td_auc  = compute_time_dependent_auc(
                 swa_train_metrics["times"], swa_train_metrics["events"],
                 swa_external_metrics["times"], swa_external_metrics["events"], swa_external_metrics["risks"],
+                eval_days=auc_days,
             )
             print(f"=== External Test 성능 ({external_dataset} 전체 코호트, SWA 평균 모델) ===")
             print(_log_line("swa_external", swa_external_metrics, swa_external_td_auc))
@@ -1655,6 +1710,7 @@ def main():
         test_td_auc  = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             test_metrics["times"], test_metrics["events"], test_metrics["risks"],
+            eval_days=auc_days,
         )
         print("\n=== Internal Test 성능 (같은 코호트 held-out, best checkpoint, epoch %d) ===" % ckpt["epoch"])
         print(_log_line("test", test_metrics, test_td_auc))
@@ -1681,6 +1737,7 @@ def main():
         external_td_auc  = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             external_metrics["times"], external_metrics["events"], external_metrics["risks"],
+            eval_days=auc_days,
         )
         ckpt_desc = "마지막 epoch 모델, full-train" if args.full_train else "best checkpoint"
         print(f"\n=== External Test 성능 ({external_dataset} 전체 코호트, {ckpt_desc}) ===")
@@ -1713,17 +1770,21 @@ def main():
             # wandb.log()로 history를 한 줄 남겨야 Charts에 값이 찍힌다 — summary만 채우면
             # (예전 방식) 그 run의 History가 비어 있어 Charts에는 아무것도 안 보이고
             # Overview의 summary 표에만 값이 존재하는 것처럼 보였다.
-            wandb.log({
+            external_log_dict = {
                 "external/c_index":     external_metrics["c_index"],
                 "external/hr":          external_metrics["hr"],
                 "external/hr_ci_lower": external_metrics["hr_ci_lower"],
                 "external/hr_ci_upper": external_metrics["hr_ci_upper"],
                 "external/log_rank_p":  external_metrics["log_rank_p"],
-                "external/auc_12m":     external_td_auc["auc_365d"],
-                "external/auc_24m":     external_td_auc["auc_730d"],
-                "external/auc_36m":     external_td_auc["auc_1095d"],
+                "external/auc_12m":     external_td_auc.get("auc_365d", float("nan")),
+                "external/auc_24m":     external_td_auc.get("auc_730d", float("nan")),
+                "external/auc_36m":     external_td_auc.get("auc_1095d", float("nan")),
                 "external/auc_mean":    external_td_auc["auc_mean"],
-            })
+            }
+            for k, v in external_td_auc.items():
+                if k.startswith("auc_") and k.endswith("d"):
+                    external_log_dict[f"external/{k}"] = v
+            wandb.log(external_log_dict)
             wandb.run.summary["external_dataset"] = external_dataset
             wandb.finish()
 
@@ -1734,8 +1795,9 @@ def main():
         f"> External({external_dataset.upper()}) C-index: *{external_metrics['c_index']:.4f}* | "
         f"HR: {external_metrics['hr']:.3f} [{external_metrics['hr_ci_lower']:.3f}, "
         f"{external_metrics['hr_ci_upper']:.3f}] | log-rank p: {external_metrics['log_rank_p']:.4f} | "
-        f"AUC(12/24/36m): {external_td_auc['auc_365d']:.3f}/{external_td_auc['auc_730d']:.3f}/"
-        f"{external_td_auc['auc_1095d']:.3f}\n"
+        f"AUC(12/24/36m): {external_td_auc.get('auc_365d', float('nan')):.3f}/"
+        f"{external_td_auc.get('auc_730d', float('nan')):.3f}/"
+        f"{external_td_auc.get('auc_1095d', float('nan')):.3f}\n"
         if external_metrics is not None else ""
     )
     if args.full_train:
@@ -1753,7 +1815,8 @@ def main():
             f"> Internal Test C-index: *{test_metrics['c_index']:.4f}* | HR: {test_metrics['hr']:.3f} "
             f"[{test_metrics['hr_ci_lower']:.3f}, {test_metrics['hr_ci_upper']:.3f}] | "
             f"log-rank p: {test_metrics['log_rank_p']:.4f} | AUC(12/24/36m): "
-            f"{test_td_auc['auc_365d']:.3f}/{test_td_auc['auc_730d']:.3f}/{test_td_auc['auc_1095d']:.3f}\n"
+            f"{test_td_auc.get('auc_365d', float('nan')):.3f}/{test_td_auc.get('auc_730d', float('nan')):.3f}/"
+            f"{test_td_auc.get('auc_1095d', float('nan')):.3f}\n"
             f"{external_line}"
             f"> 소요 시간: {h}h {m}m {s}s"
         )

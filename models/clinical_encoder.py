@@ -104,13 +104,21 @@ class ClinicalEncoder(nn.Module):
     def __init__(
         self, embed_dim: int, age_mean: float, age_std: float, hidden_dim: int = 64,
         use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None,
+        dropout: float = 0.0, sex_onehot: bool = False,
     ):
         super().__init__()
         self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
         self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
 
         self.use_staging = use_staging
-        input_dim = 2
+        # 2026-07-29: sex를 스칼라 이진 인덱스(0/1) 대신 레퍼런스(m2_pathology_clinical_mil.py::
+        # ClinicalEmbedding, clinical_dim=3)처럼 one-hot(2차원)으로 인코딩하는 ablation
+        # (train_light.py --sex-onehot, --M7 전용). 표현력은 수학적으로 동일하지만(선형 레이어
+        # 뒤에서 sex_male+sex_female=1 제약으로 스칼라 인코딩과 완전히 등가), one-hot은 유효
+        # 파라미터 하나(스칼라 가중치)를 비식별 파라미터 둘(w_male, w_female)로 표현해 초기화
+        # 분산과 Adam 최적화 경로가 달라진다 — 이게 실제 성능 분산에 영향을 주는지 검증.
+        self.sex_onehot = sex_onehot
+        input_dim = 3 if sex_onehot else 2
         if use_staging:
             if stage_stats is None:
                 raise ValueError("use_staging=True면 stage_stats가 필요합니다 (stage_stats_from_csv 참조).")
@@ -122,10 +130,14 @@ class ClinicalEncoder(nn.Module):
             input_dim += 2 * len(STAGE_FIELDS)  # 필드당 (z_score, known_flag)
 
         # 입력 (age_z, sex_bin[, T/N/M/grade z_score+known 8차원]) → 임베딩 (D,): 두 층 MLP
+        # 2026-07-29: dropout(기본 0.0=기존 동작 보존) — 레퍼런스(tabular_survival.py::
+        # ClinicalEmbedding)는 clinical 브랜치 안에 Dropout(0.25)이 있는데 우리는 없었다는
+        # 차이를 검증하기 위한 ablation(train_light.py --clinical-dropout, --M7 전용).
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, embed_dim),
         )
 
@@ -143,7 +155,10 @@ class ClinicalEncoder(nn.Module):
             z_clinical: (N, D) — 임상 정보 임베딩
         """
         age_z = (age_years.float() - self.age_mean) / self.age_std
-        feats = [age_z, sex_idx.float()]
+        if self.sex_onehot:
+            feats = [age_z, (sex_idx == 0).float(), (sex_idx == 1).float()]
+        else:
+            feats = [age_z, sex_idx.float()]
         if self.use_staging:
             for field in STAGE_FIELDS:
                 short = _STAGE_BUFFER_NAMES[field]
