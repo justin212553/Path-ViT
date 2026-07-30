@@ -118,7 +118,12 @@ def build_tile_cache(
     """
     cache: dict[Path, Image.Image] = {}
     disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir is not None else None
-    for p in tqdm(patch_paths, desc="Preloading tiles", unit="tile"):
+    # 2026-07-30: mininterval=30 — 터미널에선 tqdm이 한 줄을 덮어써서(\r) 문제없지만, Kaggle/
+    # SLURM처럼 로그를 파일·API로 그대로 받아적는 비-TTY 환경에서는 \r을 못 알아먹고 매
+    # 갱신(기본 0.1초 간격)이 새 줄로 쌓여 수천~수만 줄이 된다(실측: Kaggle 로그 뷰어가
+    # 그래서 렉 걸림). 30초 간격이면 터미널에서도 여전히 쓸만한 진행 상황을 보여주면서
+    # 로그 폭주는 막는다.
+    for p in tqdm(patch_paths, desc="Preloading tiles", unit="tile", mininterval=30):
         cached_path = _disk_cache_path(p, disk_cache_dir) if disk_cache_dir is not None else None
         if cached_path is not None and cached_path.exists():
             with Image.open(cached_path) as img:
@@ -186,7 +191,9 @@ class TileLRUCache:
 
     def preload(self, patch_paths: list[Path]) -> None:
         """maxsize까지만 채운다 — 전량 시도하지 않는다(무제한 캐싱이 원인이었던 사고 재발 방지)."""
-        for p in tqdm(patch_paths[: self.maxsize], desc="Preloading tiles (LRU-bounded)", unit="tile"):
+        # mininterval=30: build_tile_cache와 동일한 이유(비-TTY 로그 폭주 방지, 2026-07-30).
+        for p in tqdm(patch_paths[: self.maxsize], desc="Preloading tiles (LRU-bounded)",
+                      unit="tile", mininterval=30):
             self.get(p)
 
 

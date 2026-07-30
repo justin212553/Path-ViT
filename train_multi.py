@@ -28,8 +28,10 @@ train.py는 건드리지 않는다 — 필요한 헬퍼(스케줄러/로그포�
     python train_multi.py --dataset tcga --seed 42 --M1 --PMA --tile-augment --external  # 필요한 것만 골라서
 """
 import argparse
+import math
 import time
 from datetime import datetime
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
@@ -272,6 +274,17 @@ def main():
                      for name, m in models.items()}
 
     model_tag = "".join(models)  # 예: "M1M2M3" 또는 "M1PMA"
+
+    # 2026-07-30: val_ds/val_loader는 만들어져 있었지만 실제로는 어디서도 안 쓰이던 죽은
+    # 코드였다 — epoch마다 마지막 가중치를 그대로 최종 평가에 썼는데, train.py(원본)는 매
+    # epoch val로 평가해 best-val 체크포인트를 저장/로드하는 방식이라 다른 실험들과 공정한
+    # 비교가 안 됐다. 여기서도 같은 패턴(모델별 best-val 체크포인트)으로 맞춘다.
+    ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_paths = {name: ckpt_dir / f"survival_{args.dataset}_{model_tag}_{name}_best_multi.pt"
+                  for name in models}
+    best_scores = {name: -1.0 for name in models}
+
     if WANDB_AVAILABLE:
         run_ts = datetime.now().strftime("%m%d::%H%M")
         wandb.init(project="Path-ViT", name=f"{args.dataset.upper()}_{model_tag}_seed{args.seed}_{run_ts}",
@@ -303,17 +316,50 @@ def main():
         for sch in schedulers.values():
             sch.step()
 
+        val_metrics = {}
+        for name, m in models.items():
+            m.eval()
+            val_metrics[name] = evaluate(m, val_loader, cfg, device, amp_ctx, eval_transform)
+        # 다음 epoch 맨 위(for epoch 루프 시작 부분)에서 다시 m.train()을 걸어주므로 여기서
+        # train 모드로 되돌릴 필요 없음.
+
+        for name, m in models.items():
+            c_index = val_metrics[name]["c_index"]
+            score = c_index if not math.isnan(c_index) else -1.0
+            if score > best_scores[name]:
+                best_scores[name] = score
+                torch.save({
+                    "model_state_dict": m.state_dict(),
+                    "epoch":            epoch + 1,
+                    "val_c_index":      score,
+                    "val_hr":           val_metrics[name]["hr"],
+                    "val_log_rank_p":   val_metrics[name]["log_rank_p"],
+                }, ckpt_paths[name])
+
         dt = time.time() - t0
         epoch_times.append(dt)
         losses = {name: acc.epoch_loss() for name, acc in accumulators.items()}
         print(f"Epoch {epoch+1:3d} | {dt:6.1f}s | " +
-              " | ".join(f"{name}_loss={losses[name]:.4f}" for name in models))
+              " | ".join(f"{name}_loss={losses[name]:.4f}" for name in models) + " | " +
+              " | ".join(f"{name}_val_c={val_metrics[name]['c_index']:.4f}" for name in models))
         if WANDB_AVAILABLE:
-            wandb.log({f"train/{name}_loss": losses[name] for name in models} | {"epoch_seconds": dt},
-                       step=epoch + 1)
+            log_dict = {f"train/{name}_loss": losses[name] for name in models}
+            log_dict |= {f"val/{name}_c_index": val_metrics[name]["c_index"] for name in models}
+            log_dict["epoch_seconds"] = dt
+            wandb.log(log_dict, step=epoch + 1)
 
     print(f"\n평균 epoch 시간: {sum(epoch_times)/len(epoch_times):.1f}s "
           f"({len(models)}개 모델({model_tag}) 합계 — 독립 실행 {len(models)}회 대비 예상 절감률은 벤치마크 참조)")
+
+    # 최종 평가 전, epoch 루프에서 저장해둔 모델별 best-val 체크포인트로 되돌린다 — 마지막
+    # epoch이 아니라 best-val 시점 가중치로 test/external을 평가해야 다른 실험들과 공정하게
+    # 비교된다.
+    for name, m in models.items():
+        if ckpt_paths[name].exists():
+            ckpt = torch.load(ckpt_paths[name], map_location=device)
+            m.load_state_dict(ckpt["model_state_dict"])
+            print(f"{name}: best checkpoint 로드(epoch {ckpt['epoch']}, "
+                  f"val_c_index={ckpt['val_c_index']:.4f})")
 
     # 최종 평가는 모델당 한 번뿐이라 공유 최적화가 필요 없음 — 기존 evaluate()를 그대로 재사용.
     for name, m in models.items():
