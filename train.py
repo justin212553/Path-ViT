@@ -238,8 +238,14 @@ def _patient_risk(
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
             stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
             patient_embed = model.combine_with_clinical(
-                patient_embed, age_years, sex_idx, stage_ord=stage_ord
-            )  # (2D,)
+                patient_embed, age_years, sex_idx, stage_ord=stage_ord, spatial_feat=patient_spatial_feat,
+            )  # (2D,) (+ spatial_feat_dim, 2026-07-30 — M1/M2에도 dispersion 확장, train_multi.py)
+        elif patient_spatial_feat is not None:
+            # 2026-07-30: M1(ViT_M1)은 combine 메서드가 없어 patient_embed에 직접 이어붙인다 —
+            # use_attn_dispersion=True인 M1을 이전엔 아무도 안 써서 드러나지 않았던 버그
+            # (train_multi.py에서 M1/M2에도 dispersion을 확장하며 발견, RuntimeError:
+            # LayerNorm 차원 불일치).
+            patient_embed = torch.cat([patient_embed, patient_spatial_feat], dim=-1)
 
         risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)  # (1,)
     return risk, aux_loss, stage_aux_loss
