@@ -79,6 +79,10 @@ class ViT_PMA(ViT_M1):
         # 추가한다. 둘 다 독립적으로 켤 수 있다(순차 검증용).
         self.use_spatial_autocorr = getattr(cfg, "use_spatial_autocorr", False)
         self.use_attn_dispersion = getattr(cfg, "use_attn_dispersion", False)
+        if self.use_attn_dispersion:
+            # 2026-07-30: vit_m1.py와 동일한 이유(dispersion 원값 스케일이 나머지 risk_head
+            # 입력보다 5~10배 커서 LayerNorm 통계를 왜곡할 수 있음) — 학습되는 배율로 낮춘다.
+            self.dispersion_scale = nn.Parameter(torch.tensor(0.2))
         spatial_feat_dim = (2 if self.use_spatial_autocorr else 0) + (1 if self.use_attn_dispersion else 0)
         # risk_head 입력: [z_wsi(WSI_D)] (+ z_clinical(clinical_dim), use_clinical=True일 때만)
         # (+ z_rna(rna_dim), rna_gate_only=False일 때만) (+ spatial_feat(spatial_feat_dim), 위 두
@@ -124,7 +128,7 @@ class ViT_PMA(ViT_M1):
             if self.use_spatial_autocorr:
                 feats.append(spatial_autocorr(patch_tokens, coords))
             if self.use_attn_dispersion:
-                feats.append(attention_dispersion(coords, attn_weights))
+                feats.append(attention_dispersion(coords, attn_weights) * self.dispersion_scale)
             out["spatial_feat"] = torch.cat(feats, dim=0)  # (spatial_feat_dim,)
         return out
 

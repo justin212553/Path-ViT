@@ -311,28 +311,44 @@ def main():
     # 생성자 인자로 명시적으로 받는다(vit_m1.py/vit_m2.py 2026-07-30 변경).
     cfg.model.use_attn_dispersion = True
 
+    # 2026-07-30: 모델 생성 하나하나 앞에 torch.manual_seed(args.seed)를 다시 걸어 재현성을
+    # 격리한다 — PyTorch 랜덤 초기화는 하나로 이어지는 전역 RNG 스트림을 쓰기 때문에, M1을
+    # 몇 번째로 생성하느냐(그리고 M1의 파라미터 수가 얼마냐)에 따라 그 뒤에 생성되는 M2/M3/PMA가
+    # "같은 --seed"를 줘도 실제로 다른 난수 위치에서 초기화된다 — train.py(단독 실행, 모델 1개만
+    # 생성)의 PMA와 train_multi.py(M1/M2/M3/PMA 순서대로 4개 생성)의 PMA가 같은 시드로도 다른
+    # 초기 가중치를 받는 문제(오늘 PMA_EX_SS_AUX_AUG_DISP seed42 재현 시도 중 0.6517 vs 0.6257
+    # 격차로 발견). train.py --init-seed와 같은 재시딩 원리를 모델 4개 전부에 적용해, "혼자 돌든
+    # 같이 돌든 각 모델이 항상 동일한 초기 가중치를 받게" 만든다 — backbone 공유로 얻는 속도
+    # 이득과는 무관(frozen backbone은 사전학습 가중치를 로드하지 랜덤 초기화가 아님).
+    # 2026-07-30: --rna-aux-weight(rna_encoder 있는 모델 전용, WSI-RNA 결합 전략의 일부 —
+    # M1/M2엔 대응 없음)의 aux_head도 각 모델 본체 바로 뒤, 같은 재시딩 구간 안에서 붙인다 —
+    # train.py(단독 실행)에서 모델 생성 직후 곧바로 aux_head를 붙이는 순서와 똑같이 맞추기
+    # 위함이다. 전부 만든 뒤 별도 루프에서 붙이면(이전 버전) M3/PMA의 aux_head끼리 서로의 RNG
+    # 소비량에 다시 영향을 주게 돼 재시딩 취지가 무색해진다. optimizer 생성 *이전에* 끝나야
+    # aux_head 파라미터가 옵티마이저에 포함된다.
     models = {}
     if args.M1:
+        torch.manual_seed(args.seed)
         models["M1"] = ViT_M1(cfg.model, precomputed=False, backbone="resnet50",
                                use_attn_dispersion=True).to(device)
     if args.M2:
+        torch.manual_seed(args.seed)
         models["M2"] = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
                                precomputed=False, backbone="resnet50",
                                use_attn_dispersion=True).to(device)
     if args.M3:
+        torch.manual_seed(args.seed)
         models["M3"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                 precomputed=False, backbone="resnet50", use_clinical=False).to(device)
+        if args.rna_aux_weight > 0:
+            models["M3"].rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
     if args.PMA:
+        torch.manual_seed(args.seed)
         models["PMA"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                  precomputed=False, backbone="resnet50", use_clinical=True).to(device)
-
-    # 2026-07-30: --rna-aux-weight — rna_encoder가 있는 모델(M3/PMA)에만 붙인다. WSI-RNA 결합
-    # 전략의 일부로 취급(M1/M2엔 대응 없음, dim 튜닝과 달리 모델 간 균일화 대상이 아님 — 사용자
-    # 판단). optimizer 생성 *이전에* 붙여야 rna_aux_head 파라미터가 옵티마이저에 포함된다.
-    if args.rna_aux_weight > 0:
-        for name, m in models.items():
-            if hasattr(m, "rna_encoder"):
-                m.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
+        if args.rna_aux_weight > 0:
+            models["PMA"].rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
+    torch.manual_seed(args.seed)  # 모델 생성 이후 이어지는 DataLoader 셔플 등도 항상 같은 지점에서 시작
 
     for m in models.values():
         m.cnn.backbone.requires_grad_(False)

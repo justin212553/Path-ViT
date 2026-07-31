@@ -132,6 +132,16 @@ class ViT_M1(nn.Module):
         self.precomputed = precomputed
         self.backbone_name = backbone
         self.use_attn_dispersion = use_attn_dispersion
+        if use_attn_dispersion:
+            # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
+            # ~5.0, 범위 ~3.7~6.5)이라, LayerNorm/GELU를 거쳐 대체로 O(1) 스케일인 나머지
+            # risk_head 입력(z_wsi/z_clinical 등)과 섞이면 risk_head 맨 앞의 LayerNorm이
+            # 전체 통계를 이 하나의 outlier-스케일 값에 휘둘려 나머지 차원을 짓누를 수 있다
+            # (findings_backlog.md — M1/M2에 dispersion 처음 적용했을 때 internal 성능 붕괴로
+            # 발견). 학습되는 스칼라 배율(경험적 실측 평균의 역수 근처인 0.2로 초기화)로
+            # O(1) 근처까지 낮춰서 넣는다 — 고정 상수 대신 학습되게 둬서 실제 최적 스케일은
+            # backprop이 찾게 한다.
+            self.dispersion_scale = nn.Parameter(torch.tensor(0.2))
         encoder_cls = TILE_ENCODER_REGISTRY[backbone]
         self.cnn = encoder_cls(cfg.embed_dim, with_backbone=not precomputed)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
@@ -241,5 +251,5 @@ class ViT_M1(nn.Module):
         # (models/rna_predictor.py::RNAPredictionHead) 보조과제 입력으로만 쓰인다.
         out = {"embed": wsi_embed, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}
         if self.use_attn_dispersion:
-            out["spatial_feat"] = attention_dispersion(coords, attn_weights)  # (1,), 학습 파라미터 없음
+            out["spatial_feat"] = attention_dispersion(coords, attn_weights) * self.dispersion_scale  # (1,)
         return out
