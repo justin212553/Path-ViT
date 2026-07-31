@@ -38,22 +38,25 @@ class ViT_M2(ViT_M1):
         backbone: str = "resnet50",
         use_staging: bool = False,
         stage_stats: dict[str, tuple[float, float]] | None = None,
+        use_attn_dispersion: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone)
+        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion)
         self.clinical_encoder = ClinicalEncoder(
             cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
         )
 
-        # Late Fusion risk head: [z_wsi ‖ z_clinical] (2D,) → risk_score (1,)
-        # ViT_M1이 만든 D 차원 risk_head를 2D 차원으로 교체한다.
+        # Late Fusion risk head: [z_wsi ‖ z_clinical] (2D,) [+ dispersion(1,)] → risk_score (1,)
+        # ViT_M1이 만든 risk_head를 이 차원으로 교체한다.
+        risk_input_dim = cfg.embed_dim * 2 + (1 if use_attn_dispersion else 0)
         self.risk_head = nn.Sequential(
-            nn.LayerNorm(cfg.embed_dim * 2),
-            nn.Linear(cfg.embed_dim * 2, 1),
+            nn.LayerNorm(risk_input_dim),
+            nn.Linear(risk_input_dim, 1),
         )
 
     def combine_with_clinical(
         self, patient_embed: torch.Tensor, age_years: torch.Tensor, sex_idx: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
+        spatial_feat: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -62,8 +65,10 @@ class ViT_M2(ViT_M1):
             sex_idx:       ()   — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
             stage_ord:     self.clinical_encoder.use_staging=True(--clinical-staging)일 때만
                            필요. {field: () 스칼라 long} — encode_stage_value() 규약.
+            spatial_feat:  (1,) — self.use_attn_dispersion=True일 때만, 환자 단위 평균
+                           dispersion(models/spatial_features.py). 2026-07-30, PMA와 동일 관례.
         Returns:
-            fused: (2D,) — risk_head 입력
+            fused: (2D,) 또는 (2D+1,) — risk_head 입력
         """
         stage_kwargs = {}
         if stage_ord is not None:
@@ -71,4 +76,7 @@ class ViT_M2(ViT_M1):
         z_clinical = self.clinical_encoder(
             age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
         ).squeeze(0)  # (D,)
-        return torch.cat([patient_embed, z_clinical], dim=-1)  # (2D,)
+        fused = torch.cat([patient_embed, z_clinical], dim=-1)  # (2D,)
+        if spatial_feat is not None:
+            fused = torch.cat([fused, spatial_feat], dim=-1)
+        return fused

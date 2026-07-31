@@ -24,3 +24,4 @@ data/rna_brca_raw_log2.csv
 data/tile_cache_*
 data/spatial_residual_cache
 data/gene_overlap_screen
+_backup*

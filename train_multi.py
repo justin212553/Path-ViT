@@ -48,6 +48,7 @@ from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, literature_guided_g
 from data.patch_utils import PATCH_TRANSFORM_512, PATCH_TRANSFORM_AUGMENTED_CACHED, TileLRUCache
 from models import ViT_M1, ViT_M2, ViT_PMA
 from models.clinical_encoder import age_stats_from_csv
+from models.rna_predictor import RNAPredictionHead
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_time_dependent_auc
@@ -56,18 +57,36 @@ from utils.metrics import compute_time_dependent_auc
 from train import set_seed, _build_scheduler, _log_line, _identity_collate, evaluate
 
 
-def _shared_backbone_features(shared_cnn, patient_slides, tile_cache, transform, device):
+def _shared_backbone_features(shared_cnn, patient_slides, tile_cache, transform, device,
+                               patch_keep_frac: float = 1.0):
     """슬라이드별로 이미지를 디코딩(+실시간 augmentation)한 뒤, frozen backbone+pool까지만
     "한 번" 계산해 (N, 2048) raw pooled feature를 얻는다 — proj(embed_dim 투영)는 모델마다
     따로 학습되므로 여기서 하지 않는다(각 모델의 forward(features=...)가 자기 proj를 적용).
+
+    2026-07-30: patch_keep_frac<1.0이면(--patch-keep-frac, PatchDropout) 슬라이드별로 패치를
+    이 비율만큼 랜덤 서브샘플한다 — train.py::_patient_risk와 동일한 관례(findings_backlog.md
+    7번 항목). backbone feature를 모델 4개가 공유하므로, 서브샘플링도 모델별이 아니라 여기서
+    슬라이드당 1번만 해야 한다(안 그러면 모델마다 다른 패치를 보게 돼 "backbone 공유"라는
+    전제 자체가 깨진다). 이전엔 --patch-keep-frac 인자만 있고 실제로 아무 데도 안 쓰이던
+    죽은 코드였다 — val_ds/val_loader와 같은 종류의 버그.
+
+    이 함수는 학습 루프에서만 호출된다(eval은 train.py::evaluate가 모델별로 개별 처리하며
+    항상 전체 패치를 씀) — 그래서 train.py처럼 model.training 체크가 따로 필요 없다.
 
     Returns: [(coords_gpu, pooled_2048_feat), ...] 슬라이드 순서대로.
     """
     out = []
     with torch.no_grad():
         for slide in patient_slides:
-            coords = slide["coords"].to(device, non_blocking=True)
+            coords = slide["coords"]
             patch_paths = slide["patch_paths"]
+            if patch_keep_frac < 1.0:
+                n = coords.shape[0]
+                k = max(1, round(n * patch_keep_frac))
+                idx = torch.randperm(n)[:k]
+                coords = coords[idx]
+                patch_paths = [patch_paths[i] for i in idx.tolist()]
+            coords = coords.to(device, non_blocking=True)
             imgs = torch.stack([transform(tile_cache.get(p)) for p in patch_paths]).to(device, non_blocking=True)
             pooled = shared_cnn.pool(shared_cnn.backbone(imgs))  # (N, 2048) — backbone은 세 모델 다 동일(frozen)
             out.append((coords, pooled))
@@ -75,25 +94,44 @@ def _shared_backbone_features(shared_cnn, patient_slides, tile_cache, transform,
 
 
 def _model_patient_risk(model, patient_slides, shared_feats, device):
-    """공유 backbone feature(shared_feats)를 받아 모델 하나의 risk score를 계산한다.
+    """공유 backbone feature(shared_feats)를 받아 모델 하나의 (risk score, aux_loss)를 계산한다.
     train.py::_patient_risk와 동일한 분기 로직(combine_with_clinical_rna/combine_with_clinical/
     M1 직결)이지만, coords/features를 shared_feats에서 가져온다는 점만 다르다.
+
+    2026-07-30 변경 두 가지:
+    (1) M1(ViT_M1)이 patient_spatial_feat를 계산만 하고 실제로는 안 쓰던 버그를 고쳤다 —
+        use_attn_dispersion=True인 M1/M2도 이제 risk_head에 반영된다(M2는 combine_with_clinical
+        의 spatial_feat 인자로).
+    (2) model.rna_aux_head가 있으면(--rna-aux-weight, train.py와 동일한 관례) RNA-free
+        meanpool_embed로 RNA 발현을 예측해 aux_loss를 같이 반환한다.
+
+    Returns: (risk, aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서, 없으면 None.
     """
     z_rna = None
+    rna_true = None
     if hasattr(model, "rna_encoder"):
         rna = patient_slides[0]["rna"].to(device, non_blocking=True)
         z_rna = model.encode_rna(rna)
+        rna_true = rna
 
-    slide_embeds, slide_spatial_feats = [], []
+    slide_embeds, slide_spatial_feats, slide_meanpool_embeds = [], [], []
     for (coords, pooled), slide in zip(shared_feats, patient_slides):
         forward_kwargs = {"rna_context": z_rna} if z_rna is not None else {}
         out = model(coords, features=pooled, **forward_kwargs)
         slide_embeds.append(out["embed"])
         if "spatial_feat" in out:
             slide_spatial_feats.append(out["spatial_feat"])
+        if "meanpool_embed" in out:
+            slide_meanpool_embeds.append(out["meanpool_embed"])
 
     patient_embed = torch.stack(slide_embeds).mean(dim=0)
     patient_spatial_feat = torch.stack(slide_spatial_feats).mean(dim=0) if slide_spatial_feats else None
+
+    aux_loss = None
+    if hasattr(model, "rna_aux_head") and slide_meanpool_embeds:
+        patient_meanpool = torch.stack(slide_meanpool_embeds).mean(dim=0)
+        rna_pred = model.rna_aux_head(patient_meanpool)
+        aux_loss = F.mse_loss(rna_pred, rna_true)
 
     if hasattr(model, "combine_with_clinical_rna"):
         age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
@@ -104,25 +142,37 @@ def _model_patient_risk(model, patient_slides, shared_feats, device):
     elif hasattr(model, "combine_with_clinical"):
         age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
         sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
-        patient_embed = model.combine_with_clinical(patient_embed, age_years, sex_idx)
-    # M1(ViT_M1)은 combine 메서드가 없어 patient_embed를 그대로 risk_head에 넣는다.
+        patient_embed = model.combine_with_clinical(
+            patient_embed, age_years, sex_idx, spatial_feat=patient_spatial_feat,
+        )
+    elif patient_spatial_feat is not None:
+        # M1(ViT_M1)은 combine 메서드가 없어 patient_embed에 직접 이어붙인다.
+        patient_embed = torch.cat([patient_embed, patient_spatial_feat], dim=-1)
 
-    return model.risk_head(patient_embed.unsqueeze(0)).view(1)
+    risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)
+    return risk, aux_loss
 
 
 class _RiskAccumulator:
     """모델 1개분 risk/time/event를 cox_batch_size만큼 모았다가 flush(loss+backward+step)한다.
-    train.py::train_one_epoch::_flush()와 동일한 역할이지만 모델 3개를 각자 독립적으로 관리한다."""
+    train.py::train_one_epoch::_flush()와 동일한 역할이지만 모델 3개를 각자 독립적으로 관리한다.
 
-    def __init__(self, model, optimizer, batch_size: int):
+    2026-07-30: rna_aux_weight>0(model.rna_aux_head 있는 모델, --rna-aux-weight)이면 cox loss에
+    aux_loss 평균을 더한다 — train.py::train_one_epoch::_compute_loss와 동일한 관례.
+    """
+
+    def __init__(self, model, optimizer, batch_size: int, rna_aux_weight: float = 0.0):
         self.model, self.optimizer, self.batch_size = model, optimizer, batch_size
-        self.risks, self.times, self.events = [], [], []
+        self.rna_aux_weight = rna_aux_weight
+        self.risks, self.times, self.events, self.aux_losses = [], [], [], []
         self.total_loss, self.total_batches = 0.0, 0
 
-    def add(self, risk, time_, event_):
+    def add(self, risk, time_, event_, aux_loss=None):
         self.risks.append(risk)
         self.times.append(time_)
         self.events.append(event_)
+        if aux_loss is not None:
+            self.aux_losses.append(aux_loss)
         if len(self.risks) >= self.batch_size:
             self.flush()
 
@@ -133,6 +183,8 @@ class _RiskAccumulator:
         time_t  = torch.cat(self.times).to(risk_t.device)
         event_t = torch.cat(self.events).to(risk_t.device)
         loss = cox_ph_loss(risk_t, time_t, event_t)
+        if self.rna_aux_weight > 0 and self.aux_losses:
+            loss = loss + self.rna_aux_weight * torch.stack(self.aux_losses).mean()
         self.optimizer.zero_grad()
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -140,7 +192,7 @@ class _RiskAccumulator:
             self.optimizer.step()
             self.total_loss += loss.item()
             self.total_batches += 1
-        self.risks, self.times, self.events = [], [], []
+        self.risks, self.times, self.events, self.aux_losses = [], [], [], []
 
     def epoch_loss(self) -> float:
         v = self.total_loss / max(self.total_batches, 1)
@@ -161,7 +213,13 @@ def _parse_args() -> argparse.Namespace:
              "이미 feature가 캐싱돼 있어 공유할 backbone forward 자체가 없다).",
     )
     p.add_argument("--rna-genes", type=str, default="literature_1500")
-    p.add_argument("--patch-keep-frac", type=float, default=0.8)
+    p.add_argument(
+        "--patch-keep-frac", type=float, default=0.8,
+        help="PatchDropout(train.py --patch-keep-frac와 동일한 관례, findings_backlog.md 7번 "
+             "항목). 1.0이면 비활성. 2026-07-30 이전엔 인자만 있고 실제로 안 쓰이던 죽은 "
+             "코드였다 — _shared_backbone_features()에서 슬라이드당 1번(모델 4개가 backbone "
+             "feature를 공유하므로) 랜덤 서브샘플하도록 고쳤다.",
+    )
     p.add_argument(
         "--tile-cache-maxsize", type=int, default=24576,
         help="2026-07-29: --tile-augment 타일 RAM 캐시 상한(항목 개수, data/patch_utils.py::"
@@ -180,6 +238,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--PMA", action="store_true",
         help="WSI+RNA+Clinical(ViT_PMA, PMA_EX_SS_AUX + dispersion — 기존 M4 슬롯)을 포함한다.",
+    )
+    p.add_argument(
+        "--rna-aux-weight", type=float, default=0.0,
+        help="2026-07-30: train.py --rna-aux-weight와 동일(models/rna_predictor.py::"
+             "RNAPredictionHead) — WSI 표현(RNA-free meanpool_embed)이 RNA 발현도 예측하게 하는 "
+             "보조과제. rna_encoder가 있는 모델(--M3/--PMA)에만 적용된다 — M1/M2는 RNA가 없어 "
+             "대응되는 게 없으므로 대상에서 제외(WSI-RNA 결합 전략의 일부로 취급, dim 튜닝처럼 "
+             "모델 간 균일하게 맞출 항목이 아니라는 판단, 2026-07-30). 0.0(기본)이면 비활성.",
     )
     return p.parse_args()
 
@@ -238,23 +304,35 @@ def main():
     if (args.M3 or args.PMA) and gene_ids is None:
         raise ValueError("--M3/--PMA는 RNA 인코더가 필요합니다 — --rna-genes를 확인하세요.")
 
-    # M3/PMA 둘 다 ViT_PMA(다성분 pooling+co-attention) 구조를 쓴다 — dispersion(학습 파라미터
-    # 없는 공간 특징, models/spatial_features.py)을 PMA_EX_SS_AUX 레시피대로 둘 다 켠다.
-    if args.M3 or args.PMA:
-        cfg.model.use_attn_dispersion = True
+    # 2026-07-30: dispersion(학습 파라미터 없는 공간 특징, models/spatial_features.py)을 M3/PMA
+    # 전용에서 M1/M2까지 확장 — ABMIL(M1/M2)도 attn_weights를 만드므로 원칙적으로 동일하게 적용
+    # 가능한데 PMA 계열만 주는 건 "이 모델만 특별 취급"이 되어 공정한 비교를 해친다는 판단
+    # (findings_backlog.md 참조). ViT_PMA는 cfg.model.use_attn_dispersion을 읽고, ViT_M1/ViT_M2는
+    # 생성자 인자로 명시적으로 받는다(vit_m1.py/vit_m2.py 2026-07-30 변경).
+    cfg.model.use_attn_dispersion = True
 
     models = {}
     if args.M1:
-        models["M1"] = ViT_M1(cfg.model, precomputed=False, backbone="resnet50").to(device)
+        models["M1"] = ViT_M1(cfg.model, precomputed=False, backbone="resnet50",
+                               use_attn_dispersion=True).to(device)
     if args.M2:
         models["M2"] = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
-                               precomputed=False, backbone="resnet50").to(device)
+                               precomputed=False, backbone="resnet50",
+                               use_attn_dispersion=True).to(device)
     if args.M3:
         models["M3"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                 precomputed=False, backbone="resnet50", use_clinical=False).to(device)
     if args.PMA:
         models["PMA"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                  precomputed=False, backbone="resnet50", use_clinical=True).to(device)
+
+    # 2026-07-30: --rna-aux-weight — rna_encoder가 있는 모델(M3/PMA)에만 붙인다. WSI-RNA 결합
+    # 전략의 일부로 취급(M1/M2엔 대응 없음, dim 튜닝과 달리 모델 간 균일화 대상이 아님 — 사용자
+    # 판단). optimizer 생성 *이전에* 붙여야 rna_aux_head 파라미터가 옵티마이저에 포함된다.
+    if args.rna_aux_weight > 0:
+        for name, m in models.items():
+            if hasattr(m, "rna_encoder"):
+                m.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
 
     for m in models.values():
         m.cnn.backbone.requires_grad_(False)
@@ -270,10 +348,15 @@ def main():
         for name, m in models.items()
     }
     schedulers = {name: _build_scheduler(opt, cfg) for name, opt in optimizers.items()}
-    accumulators = {name: _RiskAccumulator(m, optimizers[name], cfg.train.cox_batch_size)
-                     for name, m in models.items()}
+    accumulators = {
+        name: _RiskAccumulator(m, optimizers[name], cfg.train.cox_batch_size,
+                                rna_aux_weight=args.rna_aux_weight if hasattr(m, "rna_aux_head") else 0.0)
+        for name, m in models.items()
+    }
 
     model_tag = "".join(models)  # 예: "M1M2M3" 또는 "M1PMA"
+    if args.rna_aux_weight > 0:
+        model_tag += "_AUX"
 
     # 2026-07-30: val_ds/val_loader는 만들어져 있었지만 실제로는 어디서도 안 쓰이던 죽은
     # 코드였다 — epoch마다 마지막 가중치를 그대로 최종 평가에 썼는데, train.py(원본)는 매
@@ -304,12 +387,13 @@ def main():
             if len(patient_slides) == 0:
                 continue
             with amp_ctx:
-                shared_feats = _shared_backbone_features(shared_cnn, patient_slides, tile_cache, train_transform, device)
+                shared_feats = _shared_backbone_features(shared_cnn, patient_slides, tile_cache, train_transform,
+                                                          device, patch_keep_frac=args.patch_keep_frac)
                 time_t  = patient_slides[0]["OS_time"]
                 event_t = patient_slides[0]["OS_event"]
                 for name, m in models.items():
-                    risk = _model_patient_risk(m, patient_slides, shared_feats, device)
-                    accumulators[name].add(risk, time_t, event_t)
+                    risk, aux_loss = _model_patient_risk(m, patient_slides, shared_feats, device)
+                    accumulators[name].add(risk, time_t, event_t, aux_loss)
 
         for acc in accumulators.values():
             acc.flush()

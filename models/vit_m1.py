@@ -20,6 +20,7 @@ import torch.nn as nn
 from PIL import Image
 
 from .cnn_encoder import CNNEncoder
+from .spatial_features import attention_dispersion
 from .uni_encoder import UNIEncoder
 from .vit_encoder import ViTEncoder
 from config import ModelConfig
@@ -110,7 +111,8 @@ class AttentionPooling(nn.Module):
 
 
 class ViT_M1(nn.Module):
-    def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50"):
+    def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50",
+                 use_attn_dispersion: bool = False):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -121,10 +123,15 @@ class ViT_M1(nn.Module):
                          data/extract_features.py --backbone과 값을 맞춰야 캐싱된 feature
                          차원이 일치한다. attribute 이름은 backbone이 uni여도 관례상 self.cnn을
                          유지한다(train.py의 model.cnn.backbone 참조 전부와 호환).
+            use_attn_dispersion: 2026-07-30 — 학습 파라미터 없는 공간 특징(models/
+                         spatial_features.py::attention_dispersion, ViT_PMA가 먼저 도입한 것을
+                         이식). ABMIL도 attn_weights를 만드니 PMA 계열만 쓰던 걸 M1/M2에도
+                         똑같이 적용해 모델 간 비교 조건을 통일한다(train_multi.py).
         """
         super().__init__()
         self.precomputed = precomputed
         self.backbone_name = backbone
+        self.use_attn_dispersion = use_attn_dispersion
         encoder_cls = TILE_ENCODER_REGISTRY[backbone]
         self.cnn = encoder_cls(cfg.embed_dim, with_backbone=not precomputed)
         self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
@@ -143,9 +150,10 @@ class ViT_M1(nn.Module):
                               knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False))
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
+        risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
         self.risk_head = nn.Sequential(
-            nn.LayerNorm(cfg.embed_dim),
-            nn.Linear(cfg.embed_dim, 1),
+            nn.LayerNorm(risk_input_dim),
+            nn.Linear(risk_input_dim, 1),
         )
 
     def _patch_tokens(
@@ -231,4 +239,7 @@ class ViT_M1(nn.Module):
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
         # (models/rna_predictor.py::RNAPredictionHead) 보조과제 입력으로만 쓰인다.
-        return {"embed": wsi_embed, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}
+        out = {"embed": wsi_embed, "attn_weights": attn_weights, "meanpool_embed": ctx_tokens.mean(dim=0)}
+        if self.use_attn_dispersion:
+            out["spatial_feat"] = attention_dispersion(coords, attn_weights)  # (1,), 학습 파라미터 없음
+        return out
