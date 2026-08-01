@@ -25,6 +25,7 @@ from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, literature_guided_g
 from data.patch_utils import PATCH_TRANSFORM_512
 from models import ViT_M1, ViT_M2, ViT_PMA
 from models.clinical_encoder import age_stats_from_csv
+from models.rna_predictor import RNAPredictionHead
 from utils.metrics import compute_time_dependent_auc
 
 # train.py를 건드리지 않고 그대로 재사용(train_multi.py와 동일한 관례).
@@ -46,6 +47,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--M2", action="store_true", help="WSI+Clinical(ViT_M2) 포함.")
     p.add_argument("--M3", action="store_true", help="WSI+RNA(clinical 제외, ViT_PMA) 포함.")
     p.add_argument("--PMA", action="store_true", help="WSI+RNA+Clinical(ViT_PMA) 포함.")
+    p.add_argument(
+        "--rna-aux-weight", type=float, default=0.0,
+        help="train_multi.py --rna-aux-weight와 동일한 값을 줘야 함(0보다 크면 M3/PMA에 "
+             "rna_aux_head를 붙인다) — 체크포인트가 그 값으로 학습됐다면 반드시 맞춰야 "
+             "state_dict가 로드된다(rna_aux_head.* 키 유무).",
+    )
     return p.parse_args()
 
 
@@ -66,9 +73,10 @@ def main():
         raise ValueError("--M3/--PMA는 RNA 인코더가 필요합니다 — --rna-genes를 확인하세요.")
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATHS[args.dataset])
 
-    # M3/PMA 둘 다 ViT_PMA(다성분 pooling+co-attention) — train_multi.py와 동일하게 dispersion 활성화.
-    if args.M3 or args.PMA:
-        cfg.model.use_attn_dispersion = True
+    # 2026-07-30: train_multi.py가 dispersion을 M1/M2까지 확장하면서 무조건 True로 바뀌었다 —
+    # 여기도 맞춘다(안 맞으면 risk_head 차원/dispersion_scale 키가 체크포인트와 어긋나
+    # load_state_dict가 실패한다).
+    cfg.model.use_attn_dispersion = True
 
     ds_kwargs = dict(with_clinical=True, with_rna=True, rna_gene_ids=gene_ids)
     eval_transform = PATCH_TRANSFORM_512
@@ -87,16 +95,22 @@ def main():
 
     models = {}
     if args.M1:
-        models["M1"] = ViT_M1(cfg.model, precomputed=False, backbone="resnet50").to(device)
+        models["M1"] = ViT_M1(cfg.model, precomputed=False, backbone="resnet50",
+                               use_attn_dispersion=True).to(device)
     if args.M2:
         models["M2"] = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
-                               precomputed=False, backbone="resnet50").to(device)
+                               precomputed=False, backbone="resnet50",
+                               use_attn_dispersion=True).to(device)
     if args.M3:
         models["M3"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                 precomputed=False, backbone="resnet50", use_clinical=False).to(device)
+        if args.rna_aux_weight > 0:
+            models["M3"].rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
     if args.PMA:
         models["PMA"] = ViT_PMA(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(gene_ids),
                                  precomputed=False, backbone="resnet50", use_clinical=True).to(device)
+        if args.rna_aux_weight > 0:
+            models["PMA"].rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, len(gene_ids)).to(device)
 
     ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
     for name, m in models.items():

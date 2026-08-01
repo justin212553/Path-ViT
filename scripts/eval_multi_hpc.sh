@@ -23,4 +23,4 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # backbone forward를 모델 4개가 공유하지 않고 각자 독립적으로 돌리는 데다, 평가 대상도
 # train+test+external(약 280명, 학습 1epoch의 train만 91명보다 훨씬 많음)이라 실측 전엔
 # 정확한 소요 시간을 알 수 없다(free-gpu는 SU 비용이 0이라 넉넉히 잡아도 손해 없음).
-python -u ./eval_multi.py --dataset tcga --external --model-tag M1M2M3PMA --M1 --M2 --M3 --PMA
+python -u ./eval_multi.py --dataset tcga --external --model-tag M1M2M3PMA --M1 --M2 --M3 --PMA --rna-aux-weight 1.0
