@@ -114,7 +114,7 @@ def main():
 
     ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
     for name, m in models.items():
-        ckpt_path = ckpt_dir / f"survival_{args.dataset}_{args.model_tag}_{name}_AUX_best_multi.pt"
+        ckpt_path = ckpt_dir / f"survival_{args.dataset}_{args.model_tag}_AUX_{name}_best_multi.pt"
         if not ckpt_path.exists():
             raise FileNotFoundError(f"{ckpt_path} 없음 — --model-tag/--dataset이 체크포인트 파일명과 맞는지 확인.")
         ckpt = torch.load(ckpt_path, map_location=device)
