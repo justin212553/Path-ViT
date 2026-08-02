@@ -1355,13 +1355,19 @@ def main():
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
-                        precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+                        precomputed=cfg.data.precomputed, backbone=args.backbone,
+                        use_attn_dispersion=args.attn_dispersion, **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     elif args.avgpool:
         model = ViT_M1_AvgPool(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
     else:
-        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone).to(device)
+        # 2026-07-30: use_attn_dispersion — train_multi.py가 M1/M2에도 dispersion을 확장하며
+        # ViT_M1/ViT_M2 생성자에 명시적 kwarg로 추가한 것을 여기도 맞춘다. 이전엔 --attn-dispersion이
+        # cfg.model.use_attn_dispersion을 True로 세팅해도 M1/M2 생성자가 그 값을 받는 파라미터
+        # 자체가 없어 무시됐다(ViT_PMA만 getattr로 읽었음) — M1(기본 모델)에서 처음 실사용 중 발견.
+        model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone,
+                        use_attn_dispersion=args.attn_dispersion).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
