@@ -34,6 +34,7 @@ import torch.optim.swa_utils
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LambdaLR
+from tqdm import tqdm
 
 try:
     import wandb
@@ -256,6 +257,7 @@ def train_one_epoch(
     patch_keep_frac: float = 1.0, rna_aux_weight: float = 0.0, stage_aux_weight: float = 0.0,
     shuffle_patches: bool = False, tile_cache: dict | None = None,
     patch_subsample_generator: torch.Generator | None = None,
+    desc: str = "train",
 ) -> float:
     model.train()
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
@@ -340,7 +342,8 @@ def train_one_epoch(
                 total_batches += 1
         risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
 
-    for patient_slides in loader:                # 환자 1명 분량의 슬라이드 리스트
+    # mininterval=30: data/patch_utils.py::build_tile_cache와 동일한 이유(비-TTY 로그 폭주 방지).
+    for patient_slides in tqdm(loader, desc=desc, unit="patient", mininterval=30):  # 환자 1명 분량의 슬라이드 리스트
         if len(patient_slides) == 0:
             continue
         risk, aux_loss, stage_aux_loss = _patient_risk(
@@ -368,15 +371,25 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
+def evaluate(model, loader, cfg, device, amp_ctx, transform, tile_cache: dict | None = None,
+             desc: str = "eval") -> dict:
+    """tile_cache: --tile-augment --image 모드에서, 이 loader가 순회하는 patient들의 타일이 이미
+    RAM에 캐싱돼 있으면(train_eval은 train_ds와 동일 데이터, val은 별도로 프리로드해둔 캐시)
+    넘긴다 — 없으면(기본) 기존처럼 매 호출마다 디스크에서 그때그때 디코딩한다(test/external처럼
+    학습 중 반복 안 되는 1회성 평가는 이대로가 맞다). 2026-08-04: train_eval/val을 매 epoch마다
+    디스크에서 새로 디코딩하고 있던 게 HPC(느린 파일시스템)에서 epoch 1도 못 넘기는 병목이었다
+    — train_eval은 train_ds의 tile_cache를 그대로 재사용하고, val은 작은 별도 캐시를 만들어
+    넘기면 이 병목이 사라진다.
+    """
     model.eval()
     all_risks, all_times, all_events, all_case_ids = [], [], [], []
     chunk_size = cfg.train.cnn_chunk_size
 
-    for patient_slides in loader:
+    for patient_slides in tqdm(loader, desc=desc, unit="patient", mininterval=30):
         if len(patient_slides) == 0:
             continue
-        risk, _, _ = _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size)
+        risk, _, _ = _patient_risk(model, patient_slides, device, amp_ctx, transform, chunk_size,
+                                    tile_cache=tile_cache)
 
         all_risks.append(risk.float().item())
         all_times.append(float(patient_slides[0]["OS_time"].item()))
@@ -577,6 +590,24 @@ def _parse_args() -> argparse.Namespace:
              "실제 병목 — models/vit_m1.py::_patch_tokens가 이 개수만큼 스레드로 타일 디코딩+증강을 "
              "미리 돌려 GPU 연산과 겹친다(2026-07-22 도입, 그동안 4로 하드코딩되어 있었음). SLURM "
              "--cpus-per-task로 예약한 CPU 개수만큼(예: 8) 줘야 그 CPU를 실제로 다 쓴다.",
+    )
+    parser.add_argument(
+        "--cache-val-tiles", action="store_true",
+        help="--tile-augment --image와 함께, val split도 train처럼 RAM에 프리로드한다(기본 꺼짐). "
+             "2026-08-04: evaluate()가 train_eval/val 둘 다 tile_cache 없이 매 epoch 디스크에서 "
+             "새로 디코딩하고 있던 게 느린 파일시스템(HPC 등)에서 epoch 1도 못 넘기는 병목이었다 — "
+             "train_eval은 train_ds의 tile_cache를 그냥 재사용(추가 메모리 0)하도록 항상 고쳤고, "
+             "val은 별도 캐시가 필요해(추가 RAM 필요, val 규모만큼) 옵트인으로 뒀다. 로컬처럼 RAM이 "
+             "빠듯한 머신(train 캐시만으로 32GB 중 ~22GB를 이미 씀, findings_backlog.md 스와핑 사고 "
+             "전례)에서는 끄고, HPC처럼 RAM 여유가 큰 곳에서만 켜라.",
+    )
+    parser.add_argument(
+        "--cache-external-tiles", action="store_true",
+        help="--tile-augment --image와 함께, external(반대 코호트 전체) split도 RAM에 프리로드한다"
+             "(기본 꺼짐) — --cache-val-tiles와 동일한 이유. external은 보통 한 run당 1회만 평가돼 "
+             "val만큼 반복 이득은 없지만(매 epoch 아님), 그 1회 자체가 코호트 전체(TCGA/CPTAC 상대편) "
+             "라 val보다 크고 디스크에서 새로 읽으면 여전히 느리다. 로컬 실측 기준 cptac 전체 "
+             "~28,000타일(~21GB), tcga 전체는 더 크다 — 128GB급 HPC에서만 켜라.",
     )
     parser.add_argument(
         "--patches-root-tcga", type=str, default=None,
@@ -1297,15 +1328,27 @@ def main():
             p for i in range(len(train_ds)) for slide in train_ds[i] for p in slide["patch_paths"]
         ]
         print(f"실시간 augmentation용 타일 프리로드: {len(all_patch_paths):,}개 패치")
-        tile_cache = build_tile_cache(all_patch_paths)
+        tile_cache = build_tile_cache(all_patch_paths, workers=args.tile_decode_workers)
     # [2026-07-23] val/test/external을 features.pt(precomputed)로 강제하던 이전 절충은
     # train(512 리사이즈 raw)과 eval(원본 1024 features.pt) 사이에 유효 배율이 달라지는
     # 버그였다(findings_backlog.md) — eval도 train과 똑같이 512로 리사이즈한 raw 이미지를
-    # 그대로 쓴다(PATCH_TRANSFORM_512, 증강 없음). RAM 캐싱은 train만 한다(tile_cache 없이
-    # 그때그때 디코딩 — val/test/external은 매 epoch 전체 재캐싱할 만큼 RAM 여유가 없다).
+    # 그대로 쓴다(PATCH_TRANSFORM_512, 증강 없음). RAM 캐싱은 기본적으로 train만 한다(val/test/
+    # external은 매 epoch 전체 재캐싱할 만큼 RAM 여유가 없을 수 있어서) — val은 --cache-val-tiles로
+    # 옵트인(아래), test/external은 학습 중 반복 안 되는 1회성 평가라 그대로 디스크 디코딩.
     eval_transform = PATCH_TRANSFORM_512 if (args.tile_augment and args.image) else PATCH_TRANSFORM
     val_ds   = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   transform=eval_transform, **ds_kwargs)
     test_ds  = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  transform=eval_transform, **ds_kwargs)
+    # [2026-08-04] evaluate()가 train_eval/val 둘 다 tile_cache 없이 매 epoch 디스크에서 새로
+    # 디코딩하고 있던 게 느린 파일시스템에서 epoch 1도 못 넘기는 병목이었다 — train_eval은 train_ds
+    # 와 완전히 같은 데이터라 위에서 만든 tile_cache를 그냥 재사용(추가 메모리 0)하고, val은 별도
+    # 캐시가 필요해(--cache-val-tiles) 옵트인으로만 만든다.
+    val_tile_cache = None
+    if args.tile_augment and args.image and args.cache_val_tiles and val_ds is not None:
+        val_patch_paths = [
+            p for i in range(len(val_ds)) for slide in val_ds[i] for p in slide["patch_paths"]
+        ]
+        print(f"--cache-val-tiles: val 타일 프리로드: {len(val_patch_paths):,}개 패치")
+        val_tile_cache = build_tile_cache(val_patch_paths, workers=args.tile_decode_workers)
     # train_c_index 리포팅도 항상 증강 없는 eval_transform을 쓴다 — dataset.py의 .transform은
     # __getitem__에서 쓰이지 않고 train.py가 evaluate() 호출 시 명시적으로 넘기는 값이므로
     # (patch_paths/coords 자체는 precomputed 여부만 다르고 train_ds와 동일), 별도 인스턴스 없이
@@ -1316,6 +1359,16 @@ def main():
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", transform=eval_transform, **ds_kwargs)
         if external_dataset else None
     )
+    # [2026-08-04] val과 동일한 이유(--cache-val-tiles) — external은 보통 run당 1회만 평가되지만
+    # (val처럼 매 epoch 반복은 아님), 그 1회가 반대 코호트 전체라 디스크에서 새로 읽으면 여전히
+    # 느릴 수 있다. 옵트인(--cache-external-tiles).
+    external_tile_cache = None
+    if args.tile_augment and args.image and args.cache_external_tiles and external_ds is not None:
+        external_patch_paths = [
+            p for i in range(len(external_ds)) for slide in external_ds[i] for p in slide["patch_paths"]
+        ]
+        print(f"--cache-external-tiles: external 타일 프리로드: {len(external_patch_paths):,}개 패치")
+        external_tile_cache = build_tile_cache(external_patch_paths, workers=args.tile_decode_workers)
 
     dl_kwargs = dict(
         batch_size=1,
@@ -1587,12 +1640,14 @@ def main():
                                          patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
                                          stage_aux_weight=args.stage_aux_weight,
                                          shuffle_patches=args.shuffle_patches, tile_cache=tile_cache,
-                                         patch_subsample_generator=patch_subsample_generator)
+                                         patch_subsample_generator=patch_subsample_generator,
+                                         desc=f"epoch {epoch+1} train")
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
         # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
         # --image일 때 매 epoch 학습 91명을 두 번(학습+리포팅) 실시간 augment하게 돼 시간이
         # 배로 든다(2026-07-22 발견, 실측 epoch당 소요가 예상의 2배 가까이 나온 원인).
-        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+        train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform, tile_cache=tile_cache,
+                                  desc=f"epoch {epoch+1} train_eval")
         scheduler.step()
         if swa_model is not None and (epoch + 1) >= swa_start_epoch:
             swa_model.update_parameters(model)
@@ -1611,7 +1666,8 @@ def main():
                 }, step=epoch + 1)
             continue
 
-        metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform)
+        metrics       = evaluate(model, val_loader, cfg, device, amp_ctx, val_ds.transform, tile_cache=val_tile_cache,
+                                  desc=f"epoch {epoch+1} val")
         val_td_auc    = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"],
             metrics["times"], metrics["events"], metrics["risks"],
@@ -1678,9 +1734,10 @@ def main():
     # 수 있다는 가설(seed126: val_c_index가 3시드 중 최고인데 test는 최저) 검증용 — best-val
     # 선택 없이 마지막 epoch 모델을 그대로 평가해 비교한다. 재학습 불필요: 학습 루프 종료 직후
     # (아래 best checkpoint 리로드 전) 메모리 상의 model이 곧 마지막 epoch 가중치다.
-    final_train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+    final_train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform, tile_cache=tile_cache,
+                                    desc="final train_eval")
     if test_ds is not None:
-        final_test_metrics  = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
+        final_test_metrics  = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform, desc="final test")
         final_test_td_auc   = compute_time_dependent_auc(
             final_train_metrics["times"], final_train_metrics["events"],
             final_test_metrics["times"], final_test_metrics["events"], final_test_metrics["risks"],
@@ -1694,7 +1751,8 @@ def main():
             wandb.run.summary["final_epoch_test_log_rank_p"]  = final_test_metrics["log_rank_p"]
             wandb.run.summary["final_epoch_test_auc_mean"]    = final_test_td_auc["auc_mean"]
     if external_ds is not None:
-        final_external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform)
+        final_external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                           tile_cache=external_tile_cache, desc="final external")
         final_external_td_auc  = compute_time_dependent_auc(
             final_train_metrics["times"], final_train_metrics["events"],
             final_external_metrics["times"], final_external_metrics["events"], final_external_metrics["risks"],
@@ -1712,9 +1770,10 @@ def main():
     # 마지막-epoch 리포트와 나란히, 세 번째 관점으로만 추가한다(다른 로직에 영향 없음).
     if swa_model is not None:
         swa_module = swa_model.module
-        swa_train_metrics = evaluate(swa_module, train_eval_loader, cfg, device, amp_ctx, eval_transform)
+        swa_train_metrics = evaluate(swa_module, train_eval_loader, cfg, device, amp_ctx, eval_transform, tile_cache=tile_cache,
+                                      desc="swa train_eval")
         if test_ds is not None:
-            swa_test_metrics = evaluate(swa_module, test_loader, cfg, device, amp_ctx, test_ds.transform)
+            swa_test_metrics = evaluate(swa_module, test_loader, cfg, device, amp_ctx, test_ds.transform, desc="swa test")
             swa_test_td_auc  = compute_time_dependent_auc(
                 swa_train_metrics["times"], swa_train_metrics["events"],
                 swa_test_metrics["times"], swa_test_metrics["events"], swa_test_metrics["risks"],
@@ -1728,7 +1787,8 @@ def main():
                 wandb.run.summary["swa_test_log_rank_p"] = swa_test_metrics["log_rank_p"]
                 wandb.run.summary["swa_test_auc_mean"]   = swa_test_td_auc["auc_mean"]
         if external_ds is not None:
-            swa_external_metrics = evaluate(swa_module, external_loader, cfg, device, amp_ctx, external_ds.transform)
+            swa_external_metrics = evaluate(swa_module, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                             tile_cache=external_tile_cache, desc="swa external")
             swa_external_td_auc  = compute_time_dependent_auc(
                 swa_train_metrics["times"], swa_train_metrics["events"],
                 swa_external_metrics["times"], swa_external_metrics["events"], swa_external_metrics["risks"],
@@ -1749,8 +1809,9 @@ def main():
     if not args.full_train:
         ckpt = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
-        train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform)
-        test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform)
+        train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, eval_transform, tile_cache=tile_cache,
+                                        desc="train_eval")
+        test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform, desc="internal test")
         test_td_auc  = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             test_metrics["times"], test_metrics["events"], test_metrics["risks"],
@@ -1791,7 +1852,8 @@ def main():
     # 별도 run(예: TCGA_XM2_0715::1430)으로 남겨 internal(main) run과 구분한다.
     external_metrics, external_td_auc = None, None
     if external_ds is not None:
-        external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform)
+        external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                     tile_cache=external_tile_cache, desc="external")
         external_td_auc  = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             external_metrics["times"], external_metrics["events"], external_metrics["risks"],

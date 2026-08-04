@@ -27,9 +27,16 @@ export WANDB_MODE=offline
 # train_m1/m2/m3_hpc.sh가 이미 쓰고 있는 "SS+AUG+DISP(+AUX)" 레시피를 PMA(clinical 포함, M4
 # 슬롯)에도 맞춘 것.
 #
-# --tile-decode-workers 8: models/vit_m1.py::_patch_tokens의 타일 디코딩+증강 스레드풀 크기.
+# --tile-decode-workers 8: models/vit_m1.py::_patch_tokens의 타일 디코딩+증강 스레드풀 크기 +
+# data/patch_utils.py::build_tile_cache의 프리로드 스레드 수(2026-08-04부터 여기도 병렬화됨).
 # 이 작업은 forward() 안에서 도는 별도 스레드풀이라 DataLoader num_workers와는 무관하다 — 위
 # --cpus-per-task=8을 실제로 다 쓰려면 이 값도 맞춰야 한다(2026-08-03, 그 전까지 4로 하드코딩).
+#
+# --cache-val-tiles: 2026-08-04 — evaluate()가 train_eval/val 둘 다 tile_cache 없이 매 epoch
+# 디스크에서 새로 디코딩하고 있던 게 이 클러스터(hpc3-gpu-24-06)에서 epoch 1도 못 넘기는 진짜
+# 병목이었다(py-spy로 MainThread가 PIL Image.open() 안에서 멈춘 걸 직접 확인). train_eval은
+# train_ds의 tile_cache를 재사용하도록 고쳤고(추가 메모리 0), val은 이 플래그로 별도 캐시를
+# 만든다 — 128GB 예산이면 val(31명) 추가 캐싱 여유 충분(로컬 32GB에서는 끄는 게 안전).
 #
 # 제출: sbatch scripts/_pma_ex_ss_aux_tileaugment_dispersion_ext.sh
 
@@ -42,7 +49,7 @@ for seed in "${Seeds[@]}"; do
     log="${LogDir}/train_tcga_seed${seed}_PMA_EX_SS_AUX_AUG_DISP_ext.log"
     python -u ./train.py --dataset tcga --seed "${seed}" --PMA --rna-genes literature_1500 \
         --patch-keep-frac 0.8 --rna-aux-weight 1.0 --image --tile-augment --attn-dispersion \
-        --tile-decode-workers 8 \
+        --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
         --external --group-ts "${GroupTs}" 2>&1 | tee "${log}"
     echo "=== PMA_EX_SS_AUX_AUG_DISP seed=${seed} Complete: $(date) ==="
 done
