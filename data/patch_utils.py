@@ -4,6 +4,7 @@ WSI 패치 공용 유틸리티 — 패치 파일명 좌표 파싱, 정렬된 패
 data/dataset.py(WSISurvivalDataset)와 data/extract_features.py, data/fit_clusters.py 등
 패치 단위로 동작하는 모듈들이 공통으로 재사용한다.
 """
+import os
 import re
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -101,6 +102,43 @@ def _disk_cache_path(patch_path: Path, cache_dir: Path) -> Path:
     return cache_dir / patch_path.parent.name / (patch_path.stem + ".jpg")
 
 
+def _decode_with_disk_cache(p: Path, cached_path: Path | None, size: int | None) -> Image.Image:
+    """디스크 JPEG 캐시가 있으면 읽고, 없거나(혹은 깨져 있으면) 원본을 디코딩해 캐시에 쓴다.
+
+    2026-08-04: K-fold를 SLURM job array로 병렬 제출하면 여러 fold가 train/val pool을 상당 부분
+    공유해(fold마다 test 20%만 바뀜) 같은 타일을 동시에 이 캐시에 쓰려는 경합이 실제로
+    발생했다(UnidentifiedImageError — 한 프로세스가 쓰는 도중인 파일을 다른 프로세스가 읽음).
+    두 가지로 막는다:
+    (1) 쓰기를 원자적으로 한다 — 같은 파일에 여러 프로세스가 동시에 write해도 반쪽짜리 파일이
+        보이는 대신 "아직 없음" 또는 "완성본"만 보이게, 임시 파일에 먼저 쓰고 os.replace로
+        교체한다(POSIX/Windows 둘 다 os.replace는 원자적).
+    (2) 그래도 이미 깨진 파일이 디스크에 남아있는 경우(이번 사고로 실제 발생, race 픽스 이전에
+        쓰인 파일)를 자동 복구한다 — 캐시 읽기가 실패하면 예외를 죽이는 대신 원본을 다시
+        디코딩해 캐시를 덮어쓴다. 재시도 없이 그냥 죽던 이전 동작 대비, 병렬이든 직렬이든
+        어느 쪽으로 재실행해도 스스로 회복된다.
+    """
+    if cached_path is not None and cached_path.exists():
+        try:
+            with Image.open(cached_path) as img:
+                img.load()  # exists()만으로는 못 잡는 반쪽짜리/깨진 파일을 여기서 확실히 걸러낸다
+                return img.convert("RGB")
+        except (OSError, ValueError):
+            pass  # 깨진 캐시 파일 — 아래에서 원본부터 다시 디코딩해 복구한다
+
+    with Image.open(p) as img:
+        img = img.convert("RGB")
+        if size is not None:
+            img = img.resize((size, size), resample=Image.BILINEAR)
+
+    if cached_path is not None:
+        cached_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = cached_path.with_name(f".{cached_path.name}.tmp{os.getpid()}")
+        img.save(tmp_path, format="JPEG", quality=92)
+        os.replace(tmp_path, cached_path)  # 원자적 교체 — 동시에 읽는 다른 프로세스가 반쪽을 못 봄
+
+    return img
+
+
 def build_tile_cache(
     patch_paths: list[Path],
     size: int | None = TILE_CACHE_SIZE,
@@ -130,17 +168,7 @@ def build_tile_cache(
 
     def _load_one(p: Path) -> tuple[Path, Image.Image]:
         cached_path = _disk_cache_path(p, disk_cache_dir) if disk_cache_dir is not None else None
-        if cached_path is not None and cached_path.exists():
-            with Image.open(cached_path) as img:
-                return p, img.convert("RGB")
-        with Image.open(p) as img:
-            img = img.convert("RGB")
-            if size is not None:
-                img = img.resize((size, size), resample=Image.BILINEAR)
-        if cached_path is not None:
-            cached_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(cached_path, format="JPEG", quality=92)
-        return p, img
+        return p, _decode_with_disk_cache(p, cached_path, size)
 
     # 2026-07-30: mininterval=30 — 터미널에선 tqdm이 한 줄을 덮어써서(\r) 문제없지만, Kaggle/
     # SLURM처럼 로그를 파일·API로 그대로 받아적는 비-TTY 환경에서는 \r을 못 알아먹고 매
@@ -186,17 +214,7 @@ class TileLRUCache:
 
     def _load(self, p: Path) -> Image.Image:
         cached_path = _disk_cache_path(p, self.disk_cache_dir) if self.disk_cache_dir is not None else None
-        if cached_path is not None and cached_path.exists():
-            with Image.open(cached_path) as img:
-                return img.convert("RGB")
-        with Image.open(p) as img:
-            img = img.convert("RGB")
-            if self.size is not None:
-                img = img.resize((self.size, self.size), resample=Image.BILINEAR)
-        if cached_path is not None:
-            cached_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(cached_path, format="JPEG", quality=92)
-        return img
+        return _decode_with_disk_cache(p, cached_path, self.size)
 
     def get(self, p: Path) -> Image.Image:
         if p in self._cache:
