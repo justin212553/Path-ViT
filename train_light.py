@@ -129,7 +129,7 @@ def train_one_epoch(model, loader, optimizer, device, batch_size: int) -> float:
 @torch.no_grad()
 def evaluate(model, loader, device) -> dict:
     model.eval()
-    all_risks, all_times, all_events = [], [], []
+    all_risks, all_times, all_events, all_case_ids = [], [], [], []
     for patient_slides in loader:
         if len(patient_slides) == 0:
             continue
@@ -137,8 +137,12 @@ def evaluate(model, loader, device) -> dict:
         all_risks.append(risk.float().item())
         all_times.append(float(patient_slides[0]["OS_time"].item()))
         all_events.append(int(patient_slides[0]["OS_event"].item()))
+        all_case_ids.append(patient_slides[0]["case_id"])
     risks, times, events = np.array(all_risks), np.array(all_times), np.array(all_events)
-    return {**compute_survival_metrics(risks, times, events), "risks": risks, "times": times, "events": events}
+    return {
+        **compute_survival_metrics(risks, times, events),
+        "risks": risks, "times": times, "events": events, "case_ids": all_case_ids,
+    }
 
 
 def _log_line(prefix: str, metrics: dict, td_auc: dict | None = None) -> str:
@@ -182,6 +186,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--group-ts", type=str, default=None,
                          help="wandb Group 타임스탬프. train.py --group-ts와 동일한 관례.")
+    parser.add_argument(
+        "--fold", type=int, default=None,
+        help="주어지면(0-based) internal train/val/test를 단일 6:2:2 대신 K-fold(data/dataset.py::"
+             "_kfold_case_split)로 배정한다 — 이 fold를 test로, 나머지를 다시 60:20으로 train/val "
+             "배정. fold=0..n_folds-1을 전부 돌려 test 예측을 pool_kfold_preds.py로 이어붙이면 "
+             "internal 표본이 코호트 전체 크기가 된다. --fold를 주면 예측을 "
+             ".logs/kfold_preds/에 CSV로 저장한다. None(기본)이면 기존 단일 split.",
+    )
+    parser.add_argument("--n-folds", type=int, default=5, help="--fold와 함께 쓰는 전체 fold 개수.")
     parser.add_argument(
         "--rna-genes", type=str, default="subtype",
         choices=["subtype", "literature_1000", "literature_1500", "literature_2000"],
@@ -347,6 +360,8 @@ def main():
         model_prefix += f"_RISKDIM{args.risk_hidden_dim}"
     if args.risk_dropout != 0.0:
         model_prefix += f"_RISKDROP{args.risk_dropout:g}"
+    if args.fold is not None:
+        model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
@@ -395,9 +410,10 @@ def main():
 
     ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids,
                       restrict_case_ids=restrict_case_ids)
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs)
-    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs)
+    split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
+    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
+    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)
+    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs, **split_kwargs)
     external_ds = (
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
@@ -410,8 +426,9 @@ def main():
     test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
 
+    split_desc = f"{args.n_folds}-fold CV, fold {args.fold}" if args.fold is not None else "6:2:2 stratified split"
     print(f"Model: {model_prefix} ({type(model).__name__}) | params={sum(p.numel() for p in model.parameters()):,}")
-    print(f"Dataset: {args.dataset}  (6:2:2 stratified split)  "
+    print(f"Dataset: {args.dataset}  ({split_desc})  "
           f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
     print(f"lr={cfg.light.lr:.1e} | weight_decay={cfg.light.weight_decay:.1e} | "
           f"epochs={cfg.light.epochs} | cox_batch_size={cfg.light.cox_batch_size}")
@@ -476,6 +493,20 @@ def main():
     )
     print(f"\n=== Internal Test (best checkpoint epoch {ckpt['epoch']}) ===")
     print(_log_line("test", test_metrics, test_td_auc))
+
+    if args.fold is not None:
+        import csv
+        pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = pred_dir / f"{args.dataset}_{model_prefix}_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+        with open(pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
+                                        test_metrics["times"], test_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> fold predictions saved: {pred_path}")
+
     if WANDB_AVAILABLE:
         wandb.run.summary["test_c_index"] = test_metrics["c_index"]
         wandb.run.summary["test_hr"] = test_metrics["hr"]

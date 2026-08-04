@@ -30,6 +30,7 @@ train.py는 건드리지 않는다 — 필요한 헬퍼(스케줄러/로그포�
 import argparse
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -58,10 +59,18 @@ from train import set_seed, _build_scheduler, _log_line, _identity_collate, eval
 
 
 def _shared_backbone_features(shared_cnn, patient_slides, tile_cache, transform, device,
-                               patch_keep_frac: float = 1.0):
+                               patch_keep_frac: float = 1.0, executor: ThreadPoolExecutor | None = None):
     """슬라이드별로 이미지를 디코딩(+실시간 augmentation)한 뒤, frozen backbone+pool까지만
     "한 번" 계산해 (N, 2048) raw pooled feature를 얻는다 — proj(embed_dim 투영)는 모델마다
     따로 학습되므로 여기서 하지 않는다(각 모델의 forward(features=...)가 자기 proj를 적용).
+
+    2026-08-03: 타일 디코딩+증강(transform(tile_cache.get(p)))이 그동안 순수 파이썬 리스트
+    컴프리헨션으로 완전 직렬 실행됐다 — train.py::_patch_tokens(models/vit_m1.py)는 이미
+    ThreadPoolExecutor로 GPU 연산과 겹쳐 돌리는데(2026-07-22), 이 스크립트(4개 모델이 backbone을
+    공유해 CPU 경합이 더 큼)에는 그 최적화가 아예 없었다. executor가 주어지면(--tile-decode-workers,
+    main()에서 학습 루프 전체에 걸쳐 한 번만 생성해 재사용 — 슬라이드/환자마다 스레드풀을 새로
+    만드는 오버헤드를 피한다) PIL/torchvision transform이 대부분 GIL을 놓아주는 C 레벨 연산이라는
+    점을 이용해 병렬로 디코딩한다. None이면(기본, 하위 호환) 기존처럼 직렬 실행.
 
     2026-07-30: patch_keep_frac<1.0이면(--patch-keep-frac, PatchDropout) 슬라이드별로 패치를
     이 비율만큼 랜덤 서브샘플한다 — train.py::_patient_risk와 동일한 관례(findings_backlog.md
@@ -87,7 +96,11 @@ def _shared_backbone_features(shared_cnn, patient_slides, tile_cache, transform,
                 coords = coords[idx]
                 patch_paths = [patch_paths[i] for i in idx.tolist()]
             coords = coords.to(device, non_blocking=True)
-            imgs = torch.stack([transform(tile_cache.get(p)) for p in patch_paths]).to(device, non_blocking=True)
+            if executor is not None:
+                decoded = list(executor.map(lambda p: transform(tile_cache.get(p)), patch_paths))
+            else:
+                decoded = [transform(tile_cache.get(p)) for p in patch_paths]
+            imgs = torch.stack(decoded).to(device, non_blocking=True)
             pooled = shared_cnn.pool(shared_cnn.backbone(imgs))  # (N, 2048) — backbone은 세 모델 다 동일(frozen)
             out.append((coords, pooled))
     return out
@@ -207,6 +220,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--external", action="store_true")
     p.add_argument("--group-ts", type=str, default=None)
     p.add_argument(
+        "--num-workers", type=int, default=0,
+        help="DataLoader 워커 개수(기본 0). __getitem__은 patch_paths/메타데이터만 반환하는 가벼운 "
+             "작업이라(실제 이미지 디코딩+증강은 여기서 안 함, --tile-decode-workers 참조) 효과가 "
+             "제한적일 수 있다(train.py --num-workers와 동일한 관례).",
+    )
+    p.add_argument(
+        "--tile-decode-workers", type=int, default=4,
+        help="--tile-augment의 실제 병목인 타일 디코딩+증강 스레드 수(기본 4) — "
+             "_shared_backbone_features()에서 학습 루프 전체에 걸쳐 재사용하는 ThreadPoolExecutor "
+             "크기(train.py --tile-decode-workers와 같은 관례, 다만 이 스크립트는 4개 모델이 "
+             "backbone forward를 공유하는 별도 경로라 여기서 직접 스레드풀을 만든다). SLURM "
+             "--cpus-per-task로 예약한 CPU 개수만큼(예: 8) 줘야 그 CPU를 실제로 다 쓴다.",
+    )
+    p.add_argument(
         "--tile-augment", action="store_true",
         help="진짜 real-time augmentation(raw image + 매 epoch flip/jitter/blur). 이게 이 스크립트의 "
              "존재 이유(CNN backbone 공유는 raw-image 모드에서만 의미가 있음 — precomputed 모드는 "
@@ -293,7 +320,7 @@ def main():
         tile_cache = TileLRUCache(maxsize=args.tile_cache_maxsize)
         tile_cache.preload(all_patch_paths)
 
-    dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0, pin_memory=True)
+    dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=args.num_workers, pin_memory=True)
     train_loader    = DataLoader(train_ds, shuffle=True, **dl_kwargs)
     val_loader      = DataLoader(val_ds, shuffle=False, **dl_kwargs)
     test_loader     = DataLoader(test_ds, shuffle=False, **dl_kwargs)
@@ -391,6 +418,9 @@ def main():
                    config={"dataset": args.dataset, "seed": args.seed, "tile_augment": args.tile_augment,
                            "models": list(models)})
 
+    # 2026-08-03: 학습 루프 전체에 걸쳐 스레드풀 하나를 재사용한다(환자/슬라이드마다 새로 만들면
+    # 스레드 생성 오버헤드가 누적된다) — _shared_backbone_features()의 타일 디코딩+증강 병렬화용.
+    tile_executor = ThreadPoolExecutor(max_workers=args.tile_decode_workers)
     epoch_times = []
     for epoch in range(cfg.train.epochs):
         t0 = time.time()
@@ -404,7 +434,8 @@ def main():
                 continue
             with amp_ctx:
                 shared_feats = _shared_backbone_features(shared_cnn, patient_slides, tile_cache, train_transform,
-                                                          device, patch_keep_frac=args.patch_keep_frac)
+                                                          device, patch_keep_frac=args.patch_keep_frac,
+                                                          executor=tile_executor)
                 time_t  = patient_slides[0]["OS_time"]
                 event_t = patient_slides[0]["OS_event"]
                 for name, m in models.items():
@@ -447,6 +478,8 @@ def main():
             log_dict |= {f"val/{name}_c_index": val_metrics[name]["c_index"] for name in models}
             log_dict["epoch_seconds"] = dt
             wandb.log(log_dict, step=epoch + 1)
+
+    tile_executor.shutdown(wait=True)
 
     print(f"\n평균 epoch 시간: {sum(epoch_times)/len(epoch_times):.1f}s "
           f"({len(models)}개 모델({model_tag}) 합계 — 독립 실행 {len(models)}회 대비 예상 절감률은 벤치마크 참조)")

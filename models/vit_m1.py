@@ -132,6 +132,7 @@ class ViT_M1(nn.Module):
         self.precomputed = precomputed
         self.backbone_name = backbone
         self.use_attn_dispersion = use_attn_dispersion
+        self.tile_decode_workers = getattr(cfg, "tile_decode_workers", 4)
         if use_attn_dispersion:
             # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
             # ~5.0, 범위 ~3.7~6.5)이라, LayerNorm/GELU를 거쳐 대체로 O(1) 스케일인 나머지
@@ -209,7 +210,7 @@ class ViT_M1(nn.Module):
         # 동시에 메모리에 올라가는 청크 수를 제한해(원래 chunk_size의 존재 이유였던 host RAM
         # 상한) 대형 WSI에서도 무한정 쌓이지 않게 한다.
         prefetch_depth = 2
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=self.tile_decode_workers) as executor:
             futures = [executor.submit(_decode, c) for c in chunks[:prefetch_depth]]
             outputs = []
             for i, _ in enumerate(chunks):

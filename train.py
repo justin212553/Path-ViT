@@ -555,6 +555,20 @@ def _parse_args() -> argparse.Namespace:
              "resnet50과 동일(2048-dim), 캐싱 파일만 다르다.",
     )
     parser.add_argument(
+        "--num-workers", type=int, default=None,
+        help="cfg.data.num_workers 덮어쓰기(기본: config.py 값 그대로, 0). DataLoader.__getitem__은 "
+             "patch_paths/메타데이터만 반환하는 가벼운 작업이라(실제 이미지 디코딩+증강은 여기서 "
+             "안 함, --tile-decode-workers 참조) precomputed=False에서도 효과가 제한적일 수 있다.",
+    )
+    parser.add_argument(
+        "--tile-decode-workers", type=int, default=None,
+        help="cfg.model.tile_decode_workers 덮어쓰기(기본: config.py 값 그대로, 4). --tile-augment"
+             "(--image, CPU에서 RandomFlip/ColorJitter/GaussianBlur를 매 forward 실시간 적용)의 "
+             "실제 병목 — models/vit_m1.py::_patch_tokens가 이 개수만큼 스레드로 타일 디코딩+증강을 "
+             "미리 돌려 GPU 연산과 겹친다(2026-07-22 도입, 그동안 4로 하드코딩되어 있었음). SLURM "
+             "--cpus-per-task로 예약한 CPU 개수만큼(예: 8) 줘야 그 CPU를 실제로 다 쓴다.",
+    )
+    parser.add_argument(
         "--patches-root-tcga", type=str, default=None,
         help="cfg.data.patches_root_tcga 덮어쓰기(기본: config.py 값 그대로, data/patches_tcga). "
              "재타일링된 패치(예: data/patches_tcga_512)로 학습/평가할 때 사용.",
@@ -904,6 +918,10 @@ def main():
     if args.seed is not None:
         cfg.data.seed  = args.seed
         cfg.train.seed = args.seed
+    if args.num_workers is not None:
+        cfg.data.num_workers = args.num_workers
+    if args.tile_decode_workers is not None:
+        cfg.model.tile_decode_workers = args.tile_decode_workers
     if args.patches_root_tcga is not None:
         cfg.data.patches_root_tcga = args.patches_root_tcga
     if args.patches_root_cptac is not None:
@@ -1468,7 +1486,8 @@ def main():
     print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
     print(
         f"AMP=bfloat16 | batch={cfg.train.cox_batch_size} patients (Cox risk set 단위) "
-        f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers}"
+        f"| cnn_chunk={cfg.train.cnn_chunk_size} | workers={cfg.data.num_workers} "
+        f"| tile_decode_workers={cfg.model.tile_decode_workers}"
     )
     ckpt_dir  = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)

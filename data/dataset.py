@@ -291,6 +291,63 @@ def _stratified_case_split(case_df: pd.DataFrame, seed: int) -> dict:
     return split_of_case
 
 
+def _stratified_kfold_assignment(case_df: pd.DataFrame, seed: int, n_folds: int) -> dict:
+    """
+    (dataset, OS_event) 조합별로 case를 n_folds개 fold에 라운드로빈으로 균등 배정한다.
+    K-fold 교차검증의 fold 번호 할당 전용 — train/val 배정은 _kfold_case_split()이 이어서 한다.
+    """
+    rng = np.random.RandomState(seed)
+    fold_of_case = {}
+    for _, group in case_df.groupby(["dataset", "OS_event"]):
+        case_ids = group.index.to_numpy().copy()
+        rng.shuffle(case_ids)
+        for i, case_id in enumerate(case_ids):
+            fold_of_case[case_id] = i % n_folds
+    return fold_of_case
+
+
+def _stratified_binary_split(case_df: pd.DataFrame, seed: int, frac: float) -> dict:
+    """(dataset, OS_event) 조합별로 case를 frac:(1-frac) 비율로 "train"/"val" 둘로 나눈다."""
+    rng = np.random.RandomState(seed)
+    split_of_case = {}
+    for _, group in case_df.groupby(["dataset", "OS_event"]):
+        case_ids = group.index.to_numpy().copy()
+        rng.shuffle(case_ids)
+        n       = len(case_ids)
+        n_train = min(round(n * frac), n)
+        for i, case_id in enumerate(case_ids):
+            split_of_case[case_id] = "train" if i < n_train else "val"
+    return split_of_case
+
+
+def _kfold_case_split(case_df: pd.DataFrame, seed: int, n_folds: int, fold_idx: int) -> dict:
+    """
+    K-fold 교차검증 split. case_df를 n_folds개로 나눠 fold_idx번째를 test로 쓰고, 나머지
+    (n_folds-1)/n_folds 풀은 TRAIN_FRAC:VAL_FRAC 비율 그대로(60:20 관례)로 다시 train/val로
+    나눈다 — 즉 fold_idx=0..n_folds-1 전부 돌리면 코호트의 모든 case가 정확히 한 번씩
+    test로 쓰이고(pooled out-of-fold 평가로 c-index를 다시 계산하면 internal 표본이 코호트
+    전체 크기로 늘어난다), 각 fold의 train 크기는 기존 단일 6:2:2 split과 거의 같다
+    (fold 1개를 test로 빼고 남은 (n_folds-1)/n_folds 풀 안에서 다시 75:25로 나누므로,
+    n_folds=5면 train=80%*0.75=60%, val=80%*0.25=20% — 기존과 동일).
+
+    Args:
+        case_df:  index=case_id, columns=["dataset", "OS_event"]
+        seed:     fold 배정과 train/val 재분할에 공통으로 쓰는 셔플 시드
+        n_folds:  fold 개수
+        fold_idx: 이번 호출에서 test로 쓸 fold 번호(0-based)
+    Returns:
+        {case_id: "train"|"val"|"test"}
+    """
+    fold_of_case = _stratified_kfold_assignment(case_df, seed, n_folds)
+    is_test = case_df.index.map(lambda cid: fold_of_case[cid] == fold_idx)
+    test_df, remaining_df = case_df[is_test], case_df[~is_test]
+
+    split_of_case = {case_id: "test" for case_id in test_df.index}
+    train_val_frac = TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)
+    split_of_case.update(_stratified_binary_split(remaining_df, seed, frac=train_val_frac))
+    return split_of_case
+
+
 class WSISurvivalDataset(Dataset):
     """
     Args:
@@ -351,6 +408,13 @@ class WSISurvivalDataset(Dataset):
                        슬라이드에 이 파일이 없으면 원래 feature_backbone 파일명으로 조용히
                        폴백한다(train.py --tile-augment가 train split에서만 이걸 쓴다 — val/
                        test/external은 항상 기본 feature_backbone).
+        fold:          주어지면(0-based) split in {"train","val","test"} 배정에 단일 6:2:2 대신
+                       K-fold(_kfold_case_split 참조)를 쓴다 — case_df를 n_folds개로 나눠 이
+                       fold를 test로, 나머지를 다시 60:20으로 train/val 배정. fold=0..n_folds-1을
+                       전부 돌려 나온 test 예측을 이어붙이면(pooled out-of-fold) internal 표본이
+                       단일 split의 20%가 아니라 코호트 전체 크기가 된다. None(기본)이면 기존
+                       단일 _stratified_case_split 그대로 동작(하위 호환).
+        n_folds:       fold 개수(기본 5). fold=None이면 무시.
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -371,6 +435,8 @@ class WSISurvivalDataset(Dataset):
         one_slide_per_case: bool = False,
         exclude_normal_slides: bool = False,
         feature_filename_override: str | None = None,
+        fold: int | None = None,
+        n_folds: int = 5,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -484,9 +550,13 @@ class WSISurvivalDataset(Dataset):
             # external test용 — 코호트 전체를 split 없이 그대로 쓴다.
             self.items = all_items.reset_index(drop=True)
         else:
-            # case 단위 6:2:2 stratified split — (dataset, OS_event) 조합별로 seed 고정 셔플 후 배정
             case_df = all_items.groupby("case_id").agg(dataset=("dataset", "first"), OS_event=("OS_event", "first"))
-            split_of_case = _stratified_case_split(case_df, seed=cfg.seed)
+            if fold is not None:
+                # K-fold — fold 번째를 test로, 나머지를 다시 60:20 비율로 train/val 배정
+                split_of_case = _kfold_case_split(case_df, seed=cfg.seed, n_folds=n_folds, fold_idx=fold)
+            else:
+                # case 단위 6:2:2 stratified split — (dataset, OS_event) 조합별로 seed 고정 셔플 후 배정
+                split_of_case = _stratified_case_split(case_df, seed=cfg.seed)
             all_items["_split"] = all_items["case_id"].map(split_of_case)
             self.items = all_items[all_items["_split"] == split].reset_index(drop=True)
 

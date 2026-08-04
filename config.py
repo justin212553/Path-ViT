@@ -21,6 +21,12 @@ class ModelConfig:
     # 대형 WSI(N 수만 패치) backward 메모리 절감용. 끄면 메모리↑ 속도↑
     # (precomputed feature 모드처럼 메모리 여유가 있을 때 끄면 학습 시간 단축 가능)
     grad_checkpoint:        bool  = False
+    # 2026-08-03: --tile-augment(--image, 진짜 real-time augmentation) 경로에서 타일 디코딩+
+    # 증강(models/vit_m1.py::_patch_tokens의 ThreadPoolExecutor)에 쓰는 스레드 수. 이 CPU 작업이
+    # DataLoader(__getitem__은 patch_paths만 반환하는 경량 작업)가 아니라 forward() 안에서 도는
+    # 것이라 DataConfig.num_workers와는 별개다 — SLURM --cpus-per-task로 예약한 CPU 개수에
+    # 맞춰야 실제로 CPU 디코딩과 GPU 연산이 겹쳐 돈다(train.py --tile-decode-workers).
+    tile_decode_workers:    int   = 4
     # 2026-07-22: 슬라이드당 패치 수 실측(TCGA train, 평균 131/중앙값 67/최대 544)이
     # num_landmarks=128보다도 작은 경우가 절반 이상 — Nystrom이 "N개를 landmark개로 근사"가
     # 아니라 오히려 패딩(zero) 토큰을 landmark에 섞어 넣는 역효과를 냈을 수 있다는 의심으로
