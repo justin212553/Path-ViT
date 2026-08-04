@@ -438,7 +438,10 @@ def main():
 
     ckpt_dir = Path(__file__).parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"survival_{args.dataset}_best_{model_prefix.lower()}_light.pt"
+    # 2026-08-03: train.py는 checkpoint 파일명에 seed를 넣는데(tag += f"_seed{...}") 이 스크립트는
+    # 안 넣고 있었다 — 같은 model_prefix로 시드만 바꿔 돌리면 서로 덮어써 앙상블(scripts/
+    # ensemble_eval.py류)에 쓸 시드별 체크포인트가 남지 않는 문제. train.py 관례에 맞춘다.
+    ckpt_path = ckpt_dir / f"survival_{args.dataset}_best_{model_prefix.lower()}_seed{cfg.light.seed}_light.pt"
 
     best_score, best_metrics = -1.0, {}
     epochs_since_improvement = 0

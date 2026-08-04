@@ -6,6 +6,7 @@ data/dataset.py(WSISurvivalDataset)와 data/extract_features.py, data/fit_cluste
 """
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PIL import Image
@@ -104,6 +105,7 @@ def build_tile_cache(
     patch_paths: list[Path],
     size: int | None = TILE_CACHE_SIZE,
     disk_cache_dir: Path | None = TILE_DISK_CACHE_DIR,
+    workers: int = 1,
 ) -> dict[Path, Image.Image]:
     """patch_paths를 전부 디코딩해 RAM에 PIL Image로 캐싱한다(학습 시작 시 1회만 호출).
 
@@ -115,28 +117,45 @@ def build_tile_cache(
     disk_cache_dir가 주어지면(기본값 TILE_DISK_CACHE_DIR) 디코딩 결과를 JPEG으로 디스크에도
     남긴다 — 이미 캐싱된 타일은 원본 PNG 대신 더 가벼운 JPEG만 읽어 로드한다. 다음 실행(다른
     seed 등)이 같은 슬라이드를 다시 쓸 때 프리로드 단계를 단축한다.
+
+    2026-08-04: workers(기본 1=기존 동작, 순차) — 이 프리로드는 models/vit_m1.py::_patch_tokens의
+    ThreadPoolExecutor(--tile-decode-workers)와 별개의 함수라, 그걸 고쳐도 이 단계는 여전히
+    한 개 스레드로 수만 개 타일을 하나씩 디코딩했다. Epoch 1 로그가 뜨기 전 딱 한 번 도는
+    단계인데, disk_cache_dir가 아직 비어있는 첫 실행(다른 머신/클러스터로 옮긴 직후 등)에는
+    파일 I/O 지연이 그대로 누적돼 여기서만 수십 분~1시간 넘게 걸릴 수 있다(train.py
+    --tile-decode-workers 값을 그대로 재사용).
     """
     cache: dict[Path, Image.Image] = {}
     disk_cache_dir = Path(disk_cache_dir) if disk_cache_dir is not None else None
+
+    def _load_one(p: Path) -> tuple[Path, Image.Image]:
+        cached_path = _disk_cache_path(p, disk_cache_dir) if disk_cache_dir is not None else None
+        if cached_path is not None and cached_path.exists():
+            with Image.open(cached_path) as img:
+                return p, img.convert("RGB")
+        with Image.open(p) as img:
+            img = img.convert("RGB")
+            if size is not None:
+                img = img.resize((size, size), resample=Image.BILINEAR)
+        if cached_path is not None:
+            cached_path.parent.mkdir(parents=True, exist_ok=True)
+            img.save(cached_path, format="JPEG", quality=92)
+        return p, img
+
     # 2026-07-30: mininterval=30 — 터미널에선 tqdm이 한 줄을 덮어써서(\r) 문제없지만, Kaggle/
     # SLURM처럼 로그를 파일·API로 그대로 받아적는 비-TTY 환경에서는 \r을 못 알아먹고 매
     # 갱신(기본 0.1초 간격)이 새 줄로 쌓여 수천~수만 줄이 된다(실측: Kaggle 로그 뷰어가
     # 그래서 렉 걸림). 30초 간격이면 터미널에서도 여전히 쓸만한 진행 상황을 보여주면서
     # 로그 폭주는 막는다.
-    for p in tqdm(patch_paths, desc="Preloading tiles", unit="tile", mininterval=30):
-        cached_path = _disk_cache_path(p, disk_cache_dir) if disk_cache_dir is not None else None
-        if cached_path is not None and cached_path.exists():
-            with Image.open(cached_path) as img:
-                cache[p] = img.convert("RGB")
-            continue
-        with Image.open(p) as img:
-            img = img.convert("RGB")
-            if size is not None:
-                img = img.resize((size, size), resample=Image.BILINEAR)
-        cache[p] = img
-        if cached_path is not None:
-            cached_path.parent.mkdir(parents=True, exist_ok=True)
-            img.save(cached_path, format="JPEG", quality=92)
+    if workers <= 1:
+        for p in tqdm(patch_paths, desc="Preloading tiles", unit="tile", mininterval=30):
+            _, img = _load_one(p)
+            cache[p] = img
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for p, img in tqdm(executor.map(_load_one, patch_paths), total=len(patch_paths),
+                                desc="Preloading tiles", unit="tile", mininterval=30):
+                cache[p] = img
     return cache
 
 

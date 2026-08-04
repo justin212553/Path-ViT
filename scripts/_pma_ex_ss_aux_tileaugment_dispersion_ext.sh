@@ -15,6 +15,12 @@ source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# 2026-08-04: 컴퓨트 노드가 외부 인터넷이 막혀/느려서 매 epoch wandb.log()가 동기화를 기다리며
+# 멈추는 것으로 의심되는 정지 현상(GPU util이 짧게 튀었다가 15~20분씩 0으로 죽는 패턴) 대응 —
+# 로그를 로컬(.wandb/)에만 쌓고 클라우드 동기화를 아예 안 한다. 결과 확인하려면 로그인 노드
+# 등 인터넷 되는 곳에서 `wandb sync .wandb/<run-dir>` (또는 `wandb sync --sync-all`)로 나중에
+# 올린다.
+export WANDB_MODE=offline
 
 # scripts/_pma_ex_ss_aux_tileaugment_ext.sh(2026-07-21, dispersion 없음) + --attn-dispersion 추가.
 # 그 스크립트는 이미 결과가 나온 실험 기록이라 그대로 두고, DISP를 더한 버전을 새로 만든다 —

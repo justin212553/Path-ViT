@@ -370,7 +370,7 @@ def train_one_epoch(
 @torch.no_grad()
 def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
     model.eval()
-    all_risks, all_times, all_events = [], [], []
+    all_risks, all_times, all_events, all_case_ids = [], [], [], []
     chunk_size = cfg.train.cnn_chunk_size
 
     for patient_slides in loader:
@@ -381,13 +381,14 @@ def evaluate(model, loader, cfg, device, amp_ctx, transform) -> dict:
         all_risks.append(risk.float().item())
         all_times.append(float(patient_slides[0]["OS_time"].item()))
         all_events.append(int(patient_slides[0]["OS_event"].item()))
+        all_case_ids.append(patient_slides[0]["case_id"])
 
     risks  = np.array(all_risks)
     times  = np.array(all_times)
     events = np.array(all_events)
     return {
         **compute_survival_metrics(risks, times, events),
-        "risks": risks, "times": times, "events": events,
+        "risks": risks, "times": times, "events": events, "case_ids": all_case_ids,
     }
 
 
@@ -403,6 +404,15 @@ def _parse_args() -> argparse.Namespace:
         help="cfg.data.seed / cfg.train.seed를 함께 덮어쓴다 (기본: config.py 값 그대로). "
              "case split 재현성과 학습 seed를 동시에 바꿔 여러 seed로 반복 실행할 때 쓴다.",
     )
+    parser.add_argument(
+        "--fold", type=int, default=None,
+        help="주어지면(0-based) internal train/val/test를 단일 6:2:2 대신 K-fold(data/dataset.py::"
+             "_kfold_case_split)로 배정한다 — 이 fold를 test로, 나머지를 다시 60:20으로 train/val "
+             "배정. fold=0..n_folds-1을 전부 돌려 test 예측을 pool_kfold_preds.py로 이어붙이면 "
+             "internal 표본이 코호트 전체 크기가 된다(train_light.py --fold와 동일한 관례). --fold를 "
+             "주면 예측을 .logs/kfold_preds/에 CSV로 저장한다. None(기본)이면 기존 단일 split.",
+    )
+    parser.add_argument("--n-folds", type=int, default=5, help="--fold와 함께 쓰는 전체 fold 개수.")
     parser.add_argument(
         "--group-ts", type=str, default=None,
         help="wandb Group 이름(<모델종류>_<group-ts>)에 쓸 타임스탬프(MMDD::HHMM 형식). "
@@ -1173,6 +1183,8 @@ def main():
             model_prefix += "_LEARNTAU"
     if args.pretrained_wsi_trunk:
         model_prefix += "_PRETRAINED"
+    if args.fold is not None:
+        model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
     # internal(main) run과 external run이 같은 학습 세션임을 알아볼 수 있도록 timestamp를 공유한다.
     run_ts = datetime.now().strftime("%m%d::%H%M")
@@ -1254,6 +1266,7 @@ def main():
         rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
+        fold=args.fold, n_folds=args.n_folds,
     )
     # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 features.pt/
     # PATCH_TRANSFORM). --image와 함께 쓰면 매 epoch 실시간 augmentation(transform 교체),
@@ -1745,6 +1758,20 @@ def main():
         )
         print("\n=== Internal Test 성능 (같은 코호트 held-out, best checkpoint, epoch %d) ===" % ckpt["epoch"])
         print(_log_line("test", test_metrics, test_td_auc))
+
+        if args.fold is not None:
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{args.dataset}_{model_prefix}_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
+                                            test_metrics["times"], test_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> fold predictions saved: {pred_path}")
+
         if WANDB_AVAILABLE:
             wandb.run.summary["test_c_index"]     = test_metrics["c_index"]
             wandb.run.summary["test_hr"]          = test_metrics["hr"]
