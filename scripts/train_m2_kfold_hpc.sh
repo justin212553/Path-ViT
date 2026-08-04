@@ -7,14 +7,15 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
-#SBATCH --array=0-4
-#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/m2_kfold_array_%a.log
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/m2_kfold.log
 
-# train_m2_hpc.sh(단일 6:2:2 split)의 K-fold 버전 — train_m1_kfold_hpc.sh와 동일한 패턴/이유.
+# train_m1_kfold_hpc.sh와 동일한 이유(GPU 5개 동시 점유가 어려워 단일 GPU 순차 실행으로 전환).
+# --time=24:00:00: free-gpu가 24시간 넘는 요청은 큐에 아예 안 올려준다 — 5-fold 실측 추정
+# ~20시간 대비 여유가 4시간뿐이라 중간에 잘릴 수 있다(잘리면 --fold N만 다시 제출).
 # SS+AUG+DISP — EX/AUX는 RNA 브랜치가 없는 M2엔 대응 항목 없어 제외.
 #
-# 완료 후 풀링:
-#   python scripts/pool_kfold_preds.py --dataset tcga --model M2_SS_AUG_DISP --seed 42 --n-folds 5
+# 완료 후 집계:
+#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model M2_SS_AUG_DISP
 #
 # 제출: sbatch scripts/train_m2_kfold_hpc.sh
 
@@ -26,12 +27,16 @@ conda activate Path-ViT
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
-FOLD=$SLURM_ARRAY_TASK_ID
-log=".logs/train_tcga_seed42_M2_SS_AUG_DISP_kfold5_fold${FOLD}.log"
+Folds=(0 1 2 3 4)
 
-echo "=== M2_SS_AUG_DISP fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-python -u ./train.py --M2 --dataset tcga --external --seed 42 \
-    --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
-    --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
-    --fold "${FOLD}" --n-folds 5 --group-ts 0804m2_kfold5_array 2>&1 | tee "${log}"
-echo "=== M2_SS_AUG_DISP fold=${FOLD}/5 Complete: $(date) ==="
+for fold in "${Folds[@]}"; do
+    log=".logs/train_tcga_seed42_M2_SS_AUG_DISP_kfold5_fold${fold}.log"
+    echo "=== M2_SS_AUG_DISP fold=${fold}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
+    python -u ./train.py --M2 --dataset tcga --external --seed 42 \
+        --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
+        --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
+        --fold "${fold}" --n-folds 5 --group-ts 0804m2_kfold5_seq 2>&1 | tee "${log}"
+    echo "=== M2_SS_AUG_DISP fold=${fold}/5 Complete: $(date) ==="
+done
+
+echo "=== ALL M2_SS_AUG_DISP K-FOLD RUNS COMPLETE: $(date) ==="

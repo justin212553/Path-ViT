@@ -1,4 +1,9 @@
 #!/bin/bash
+# 2026-08-04: DEPRECATED — free-gpu 파티션에서 A30 5개 동시 점유가 현실적으로 어려워, 단일 GPU
+# 순차 실행 버전인 scripts/_pma_ex_ss_aux_tileaugment_dispersion_kfold_ext.sh로 대체됨. 이
+# 파일은 실행 중 디스크 캐시 race condition(UnidentifiedImageError, 5개 중 3개 크래시)도
+# 겪었었다 — 그 버그 자체는 data/patch_utils.py에서 고쳐서 다시 병렬로 써도 안전하지만, GPU
+# 가용성 문제는 여전하므로 참고용으로만 남겨둔다. 병렬로 재시도하려면 이 파일을 그대로 제출.
 #SBATCH --job-name=PVT-PMA-kfold
 #SBATCH --partition=free-gpu
 #SBATCH --nodes=1
