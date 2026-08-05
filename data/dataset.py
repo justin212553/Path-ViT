@@ -61,7 +61,7 @@ FEATURES_FILENAME_BY_BACKBONE = {
     "uni":           FEATURES_UNI_FILENAME,
     "resnet50_norm": FEATURES_NORM_FILENAME,  # Macenko stain-normalized (utils/extract_features_stain_norm.py)
 }
-from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value
+from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value
 
 OS_LABEL_PATHS = {
     "tcga":  Path("data/os_labels_tcga.csv"),
@@ -491,6 +491,7 @@ class WSISurvivalDataset(Dataset):
         transform=None,
         with_clinical: bool = False,
         with_staging: bool = False,
+        with_margin: bool = False,
         with_rna: bool = False,
         feature_backbone: str = "resnet50",
         rna_gene_ids: list[str] | None = None,
@@ -514,11 +515,14 @@ class WSISurvivalDataset(Dataset):
             )
         if with_staging and not with_clinical:
             raise ValueError("with_staging=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
+        if with_margin and not with_clinical:
+            raise ValueError("with_margin=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
 
         self.transform        = transform or PATCH_TRANSFORM
         self.precomputed      = cfg.precomputed
         self.with_clinical    = with_clinical
         self.with_staging     = with_staging
+        self.with_margin      = with_margin
         self.with_rna         = with_rna
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
         self.feature_filename_override = feature_filename_override
@@ -546,6 +550,8 @@ class WSISurvivalDataset(Dataset):
                 clinical_cols = ["case_id", "age_years", "sex"]
                 if with_staging:
                     clinical_cols += list(STAGE_FIELDS)
+                if with_margin:
+                    clinical_cols += ["residual_disease"]
                 clinical_df = pd.read_csv(CLINICAL_PATHS[name])[clinical_cols]
                 merged = merged.merge(clinical_df, on="case_id", how="inner")
 
@@ -691,6 +697,9 @@ class WSISurvivalDataset(Dataset):
                 for field in STAGE_FIELDS:
                     ord_val = encode_stage_value(field, row[field])
                     item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
+            if self.with_margin:
+                ord_val = encode_margin_value(row["residual_disease"])
+                item["margin_ord"] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
 
         if self.with_rna:
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])

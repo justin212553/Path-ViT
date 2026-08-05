@@ -42,17 +42,33 @@ gene was $z$-score normalized independently within each cohort.
 The full common-gene set is far larger than what a cohort of this size can
 support without overfitting, and a subtype-classification gene panel is not
 necessarily the panel most informative for survival. A compact,
-survival-oriented gene set was therefore constructed as follows. First, 163
-genes were curated from the pancreatic ductal adenocarcinoma (PDAC) literature
-across eight functional categories (Table~\ref{tab:gene-categories}). Second,
-within the training-split cases, a univariate Cox score test was computed for
-every common gene independently in each cohort; the two cohorts' $z$-scores
-were then combined by Stouffer's method ($z_{\mathrm{meta}} = \sum_k z_k /
-\sqrt{2}$) to obtain a single survival-association ranking. Third, the final
-gene ordering places the curated literature genes first (ordered by their own
-Cox rank), with remaining slots filled by genome-wide Cox rank. The top 1,000,
-1,500, and 2,000 genes by this ordering were saved; the RNA-seq branch of all
-RNA-containing models (M3, M4, M6, M7) uses the top 1,500 genes by default.
+survival-oriented gene set was therefore constructed. First, 163 genes were
+curated from the pancreatic ductal adenocarcinoma (PDAC) literature across
+eight functional categories (Table~\ref{tab:gene-categories}).
+
+Second, for each cross-institution training direction (e.g.,
+TCGA-PAAD $\rightarrow$ CPTAC-PDAC), a univariate Cox partial-likelihood score
+test was computed for every common gene using only that direction's own
+training-split cases (91 TCGA-PAAD patients, 50 observed deaths, for the
+TCGA-PAAD $\rightarrow$ CPTAC-PDAC direction). The cohort that serves as the
+external test set for that direction is not accessed at any point during gene
+selection. This is a deliberate departure from combining both cohorts' training
+splits (e.g., by Stouffer's method) into a single ranking: because a
+substantial fraction of either cohort's patients fall within the training
+split used for such a combined ranking, reusing a combined ranking for external
+evaluation would leak survival information about patients later scored as
+external test cases.
+
+Third, the final gene ordering places the curated literature genes first
+(ordered by their own within-direction Cox rank), with the remaining ordering
+determined by genome-wide Cox score. Two criteria were used to cut this
+ordering into a final gene set, and both are evaluated in Results: (i) a fixed
+top-$N$ ($N \in \{500, 1500\}$), and (ii) a statistically derived cutoff based
+on the Benjamini--Hochberg false discovery rate (FDR), retaining the curated
+genes plus any additional gene with $q < 0.1$. Because approximately 20,000
+genes are tested, an uncorrected $p<0.05$ cutoff would retain roughly 1,000
+genes by chance alone; FDR correction is used instead of a raw $p$-value
+threshold for this reason.
 
 \begin{table}[htbp]
   \centering

@@ -34,7 +34,27 @@ single training run. Each model is trained independently across multiple random
 seeds (42, 84, 126) and, for external validation, in both training directions
 (TCGA-PAAD $\rightarrow$ CPTAC-PDAC and CPTAC-PDAC $\rightarrow$ TCGA-PAAD),
 yielding six runs per model for external comparisons; results are reported as
-mean $\pm$ SD across runs. For internal evaluation, a stratified 5-fold
-cross-validation protocol is additionally used, in which every patient is held
-out as test exactly once and internal performance is computed by pooling
-predictions across all five held-out folds.
+mean $\pm$ SD across runs.
+
+\textbf{$K$-fold cross-validation.} As a more sample-efficient and lower-variance
+alternative to repeating the single 6:2:2 split under different seeds, models
+are additionally trained under stratified 5-fold cross-validation (stratified
+jointly by cohort and event status, matching the split used elsewhere). For
+fold $k \in \{0, \dots, 4\}$, the cases assigned to fold $k$ are held out as the
+internal test set, and the remaining four folds are further split 75:25 into
+training and validation, preserving the same 60:20:20 train:validation:test
+ratio used by the single-split protocol; each fold therefore yields an
+independently trained model.
+
+Internal and external metrics are aggregated differently across folds, because
+they answer different questions. For \emph{internal} evaluation, the five folds
+partition the training cohort into five disjoint test sets, so concatenating
+each fold's held-out predictions yields exactly one risk-score estimate per
+patient in the cohort; C-index, hazard ratio, and the log-rank test are then
+computed once on this \emph{pooled} out-of-fold cohort. For \emph{external}
+evaluation, every fold is instead scored against the same, complete opposite
+cohort -- pooling is not applicable, since the same patients would be scored
+five times by five different models rather than each patient being scored once.
+External metrics are therefore reported as the mean $\pm$ SD across the five
+fold-specific models, analogous to treating each fold as an additional
+repeated run.

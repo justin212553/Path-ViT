@@ -42,7 +42,7 @@ from data.dataset import (
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
-from models.clinical_encoder import age_stats_from_csv
+from models.clinical_encoder import age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
@@ -93,9 +93,13 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
         )
     if has_rna:
         return model(p["rna"].to(device, non_blocking=True))
+    margin_kwargs = {}
+    if getattr(model.clinical_encoder, "use_margin", False):
+        margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
     return model(
         p["age_years"].to(device, non_blocking=True),
         p["sex_idx"].to(device, non_blocking=True),
+        **margin_kwargs,
     )
 
 
@@ -259,6 +263,22 @@ def _parse_args() -> argparse.Namespace:
     model_group.add_argument("--M6X", action="store_true", help="RNAOnlyExtend (RNA-seq, G->256->256 인코더).")
     model_group.add_argument("--M7", action="store_true", help="ClinicalRNAOnly (age/sex + RNA-seq).")
     parser.add_argument(
+        "--clinical-margin", action="store_true",
+        help="--M5 전용(M5_R). age/sex에 절제연 상태(residual_disease: R0=완전절제 < R1 < "
+             "R2=잔존종양)를 추가한다(data/extract_rna_clinical.py 2026-08-04 추가 필드). "
+             "TCGA/CPTAC 각각 단독 Cox 회귀로 개별 유의(HR≈1.6, p=0.04/0.01) — age(코호트 간 "
+             "방향 불일치)나 sex(개별 코호트 비유의)보다 신뢰도 높은 clinical 신호라 M5가 "
+             "노이즈 수준(null c-index 대비 <1σ)을 벗어나는지 확인하는 ablation. 켜면 wandb/"
+             "checkpoint에 _R 접미사가 자동으로 붙는다(model_prefix=M5_R).",
+    )
+    parser.add_argument(
+        "--no-age-sex", action="store_true",
+        help="--clinical-margin과 함께 사용(M5_R_ONLY). age/sex를 아예 빼고 margin만 입력으로 "
+             "쓴다 — age는 TCGA(HR=1.20/10y)와 CPTAC(HR=0.94/10y)에서 방향조차 안 맞아, margin의 "
+             "더 확실한 신호를 age/sex의 노이즈가 희석시키는 건 아닌지 확인하는 ablation. "
+             "켜면 model_prefix에 _ONLY가 추가로 붙는다(M5_R_ONLY).",
+    )
+    parser.add_argument(
         "--clinical-dim", type=int, default=None,
         help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수 16, models/"
              "clinical_rna_only.py). RNA(256)와 같은 폭(예: 64)으로 키워서 '정보(표현력)를 "
@@ -366,6 +386,19 @@ def main():
     else:
         age_mean, age_std = None, None
 
+    if args.clinical_margin:
+        if args.dataset == "both":
+            import pandas as pd
+            margin_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"])[["residual_disease"]],
+                pd.read_csv(CLINICAL_PATHS["cptac"])[["residual_disease"]],
+            ])
+            margin_stats = margin_stats_from_df(margin_df)
+        else:
+            margin_stats = margin_stats_from_csv(CLINICAL_PATHS[args.dataset])
+    else:
+        margin_stats = None
+
     rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
     if with_rna and args.rna_genes == "purist_top20_tcga_only":
         # 하이브리드: PurIST 확률(1차원, chance 수준이었음) + TCGA train split Cox-score 상위
@@ -411,6 +444,13 @@ def main():
         model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes != "subtype":
         model_prefix += "_EX"
+    if args.clinical_margin:
+        # M5_R — age/sex + 절제연 상태(residual_disease). M5(age/sex만)와 checkpoint/kfold_preds
+        # 파일명이 겹치면 안 되므로 별도 접미사.
+        model_prefix += "_R"
+        if args.no_age_sex:
+            # M5_R_ONLY — margin 단독(age/sex 제외).
+            model_prefix += "_ONLY"
     if args.lr is not None and args.lr != 1e-3:
         # _LR{lr} = cfg.light.lr(기본 1e-3) 이외 값 사용 표시 - train.py의 _EX/_SS/_AUX와 같은 관례.
         model_prefix += f"_LR{args.lr:.0e}"
@@ -438,7 +478,9 @@ def main():
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
     if args.M5:
-        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std).to(device)
+        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
+                              use_margin=args.clinical_margin, margin_stats=margin_stats,
+                              use_age_sex=not args.no_age_sex).to(device)
     elif args.M6:
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
@@ -480,8 +522,8 @@ def main():
         restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
         print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
 
-    ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids,
-                      rna_purist=rna_purist, restrict_case_ids=restrict_case_ids)
+    ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_rna=with_rna,
+                      rna_gene_ids=rna_gene_ids, rna_purist=rna_purist, restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)

@@ -44,6 +44,33 @@ _STAGE_ORDINAL_MAPS = {
 # ClinicalEncoder 버퍼 이름(짧게)과 StagePredictionHead가 참조하는 stage_stats 키를 연결.
 _STAGE_BUFFER_NAMES = {"ajcc_t": "t", "ajcc_n": "n", "ajcc_m": "m", "tumor_grade": "grade"}
 
+# 2026-08-04 추가 — 절제연 상태(residual_disease: R0=완전절제 < R1 < R2=잔존종양). STAGE_FIELDS
+# (T/N/M/grade, --clinical-staging)와 별도의 독립 플래그(--clinical-margin, M5_R)로 둔다 —
+# T/N/M/grade와 한 묶음으로 켜고 끄는 --clinical-staging에 합치면 margin 단독 효과를 격리해서
+# 볼 수 없다. RX("판정 불가")는 TX/NX/MX/GX와 같은 관례로 "미상"(encode_margin_value가 None
+# 반환) 처리.
+_MARGIN_ORDINAL_MAP = {"R0": 0, "R1": 1, "R2": 2}
+
+
+def encode_margin_value(raw) -> int | None:
+    """residual_disease 원본 문자열(예: "R1")을 순서형 정수로 변환한다. encode_stage_value와
+    동일한 "미상은 None" 관례."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    return _MARGIN_ORDINAL_MAP.get(raw)
+
+
+def margin_stats_from_df(df: pd.DataFrame) -> tuple[float, float]:
+    """residual_disease 순서형 정수의 평균/표준편차(z-score 정규화용) — stage_stats_from_df와
+    동일한 역할의 margin 전용 버전."""
+    ordinals = df["residual_disease"].map(encode_margin_value).dropna().astype(float)
+    return float(ordinals.mean()), float(ordinals.std(ddof=0))
+
+
+def margin_stats_from_csv(csv_path: str | Path) -> tuple[float, float]:
+    """clinical_{tcga,cptac}.csv 파일 하나에서 margin_stats_from_df를 계산하는 편의 함수."""
+    return margin_stats_from_df(pd.read_csv(csv_path))
+
 
 def age_stats_from_csv(csv_path: str | Path) -> tuple[float, float]:
     """clinical_{tcga,cptac}.csv의 age_years 평균/표준편차를 계산한다(z-score 정규화용)."""
@@ -105,6 +132,8 @@ class ClinicalEncoder(nn.Module):
         self, embed_dim: int, age_mean: float, age_std: float, hidden_dim: int = 64,
         use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None,
         dropout: float = 0.0, sex_onehot: bool = False,
+        use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
+        use_age_sex: bool = True,
     ):
         super().__init__()
         self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
@@ -118,7 +147,11 @@ class ClinicalEncoder(nn.Module):
         # 파라미터 하나(스칼라 가중치)를 비식별 파라미터 둘(w_male, w_female)로 표현해 초기화
         # 분산과 Adam 최적화 경로가 달라진다 — 이게 실제 성능 분산에 영향을 주는지 검증.
         self.sex_onehot = sex_onehot
-        input_dim = 3 if sex_onehot else 2
+        # 2026-08-04: age/sex를 아예 빼고 margin(또는 staging) 단독 신호만 보는 ablation
+        # (train_light.py --no-age-sex, --clinical-margin과 함께 M5_R_ONLY) — age는 코호트 간
+        # 방향이 안 맞고(TCGA HR>1, CPTAC HR<1) margin 신호를 오히려 희석시킬 수 있다는 가설 검증.
+        self.use_age_sex = use_age_sex
+        input_dim = (3 if sex_onehot else 2) if use_age_sex else 0
         if use_staging:
             if stage_stats is None:
                 raise ValueError("use_staging=True면 stage_stats가 필요합니다 (stage_stats_from_csv 참조).")
@@ -129,7 +162,17 @@ class ClinicalEncoder(nn.Module):
                 self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
             input_dim += 2 * len(STAGE_FIELDS)  # 필드당 (z_score, known_flag)
 
-        # 입력 (age_z, sex_bin[, T/N/M/grade z_score+known 8차원]) → 임베딩 (D,): 두 층 MLP
+        self.use_margin = use_margin
+        if use_margin:
+            if margin_stats is None:
+                raise ValueError("use_margin=True면 margin_stats가 필요합니다 (margin_stats_from_csv 참조).")
+            mean, std = margin_stats
+            self.register_buffer("margin_mean", torch.tensor(mean, dtype=torch.float32))
+            self.register_buffer("margin_std", torch.tensor(std, dtype=torch.float32))
+            input_dim += 2  # (z_score, known_flag)
+
+        # 입력 (age_z, sex_bin[, T/N/M/grade z_score+known 8차원][, margin z_score+known 2차원])
+        # → 임베딩 (D,): 두 층 MLP
         # 2026-07-29: dropout(기본 0.0=기존 동작 보존) — 레퍼런스(tabular_survival.py::
         # ClinicalEmbedding)는 clinical 브랜치 안에 Dropout(0.25)이 있는데 우리는 없었다는
         # 차이를 검증하기 위한 ablation(train_light.py --clinical-dropout, --M7 전용).
@@ -144,21 +187,26 @@ class ClinicalEncoder(nn.Module):
     def forward(
         self, age_years: torch.Tensor, sex_idx: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
+        margin_ord: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
-            age_years : (N,) float — 원본 나이(연 단위)
-            sex_idx   : (N,) long  — encode_sex()로 만든 0(male)/1(female) 인덱스
-            stage_ord : use_staging=True일 때 필수. {field: (N,) long} — encode_stage_value()로
-                        만든 순서형 정수, "미상"은 -1(data/dataset.py가 이 규약으로 저장한다).
+            age_years  : (N,) float — 원본 나이(연 단위)
+            sex_idx    : (N,) long  — encode_sex()로 만든 0(male)/1(female) 인덱스
+            stage_ord  : use_staging=True일 때 필수. {field: (N,) long} — encode_stage_value()로
+                         만든 순서형 정수, "미상"은 -1(data/dataset.py가 이 규약으로 저장한다).
+            margin_ord : use_margin=True일 때 필수. (N,) long — encode_margin_value()로 만든
+                         순서형 정수(R0=0/R1=1/R2=2), "미상"은 -1(stage_ord와 동일 규약).
         Returns:
             z_clinical: (N, D) — 임상 정보 임베딩
         """
-        age_z = (age_years.float() - self.age_mean) / self.age_std
-        if self.sex_onehot:
-            feats = [age_z, (sex_idx == 0).float(), (sex_idx == 1).float()]
-        else:
-            feats = [age_z, sex_idx.float()]
+        feats = []
+        if self.use_age_sex:
+            age_z = (age_years.float() - self.age_mean) / self.age_std
+            if self.sex_onehot:
+                feats += [age_z, (sex_idx == 0).float(), (sex_idx == 1).float()]
+            else:
+                feats += [age_z, sex_idx.float()]
         if self.use_staging:
             for field in STAGE_FIELDS:
                 short = _STAGE_BUFFER_NAMES[field]
@@ -169,5 +217,11 @@ class ClinicalEncoder(nn.Module):
                 z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
                 feats.append(z)
                 feats.append(known)
-        x = torch.stack(feats, dim=-1)  # (N, 2) 또는 (N, 10)
+        if self.use_margin:
+            ordv  = margin_ord.float()
+            known = (ordv >= 0).float()
+            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+            feats.append(z)
+            feats.append(known)
+        x = torch.stack(feats, dim=-1)  # (N, 2) / (N, 10) / (N, 4) / (N, 12)
         return self.mlp(x)

@@ -192,6 +192,11 @@ _STAGING_COLUMNS = {
     "diagnoses.ajcc_pathologic_n":     "ajcc_n",
     "diagnoses.ajcc_pathologic_m":     "ajcc_m",
     "diagnoses.tumor_grade":           "tumor_grade",
+    # 2026-08-04 추가 — 절제연 상태(R0=완전절제/R1,R2=잔존종양). TCGA/CPTAC 각각 94%/95%
+    # case에서 확인 가능하고, 단독 Cox 회귀로 두 코호트 모두에서 개별적으로 유의(HR≈1.6,
+    # p=0.04/0.01) — age(코호트 간 방향 불일치)나 sex(개별 코호트 비유의)보다 훨씬 신뢰도
+    # 높은 clinical 신호였다. --clinical-margin(M5_R)에서 사용.
+    "diagnoses.residual_disease":     "residual_disease",
 }
 
 
