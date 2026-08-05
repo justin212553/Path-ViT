@@ -45,7 +45,7 @@ except ImportError:
 from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
-    pathway_category_gene_ids,
+    resolve_tcga_only_rna_genes, pathway_category_gene_ids,
 )
 from data.patch_utils import (
     FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
@@ -436,12 +436,25 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--rna-genes", type=str, default="subtype",
-        choices=["subtype", "literature_1000", "literature_1500", "literature_2000", "pathway8"],
+        choices=[
+            "subtype", "literature_1000", "literature_1500", "literature_2000", "pathway8",
+            "literature_500_tcga_only", "literature_1500_tcga_only",
+            "literature_fdr0.1_tcga_only",
+        ],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
              "literature_{1000,1500,2000}: data/select_rnaseq_genes.py 산출물 — 문헌 큐레이션 "
              "PDAC 유전자를 train split 내부 Cox score test 순위로 우선 배치하고 나머지를 "
              "Cox 순위로 채운, 생존 예측에 직접 최적화된 유전자셋(레퍼런스 방법론 이식). "
+             "**주의**: 이 4개(subtype 제외 literature_*)는 TCGA+CPTAC train split을 Stouffer로 "
+             "결합해 뽑은 것이라, --dataset tcga --external처럼 반대 코호트를 external test로 "
+             "쓰는 실행에는 leakage가 있다(그 test case 중 상당수의 생존 라벨이 이미 유전자 "
+             "선정에 쓰였음, findings_backlog.md) — --dataset both 비교에만 쓸 것. "
+             "literature_{500,1500}_tcga_only: data/select_rnaseq_genes.py --single-cohort tcga "
+             "산출물 — TCGA train split만 사용(CPTAC 데이터 자체를 로드하지 않음), Stouffer 결합 "
+             "없음. --dataset tcga --external(TCGA로 학습 -> CPTAC 전체 external test) 전용, "
+             "leakage 없음. 500은 같은 TCGA-only 순위에서 상위 500개만 자른 더 좁은 버전(EXT_500) "
+             "— 1500 대비 입력 차원을 줄여 91명 train 표본 대비 과적합을 낮추려는 시도. "
              "pathway8: 개별 유전자 대신 문헌 큐레이션 8개 생물학적 카테고리의 평균 z-score "
              "(카테고리당 1개, 총 8차원) - SurvPath의 pathway token 방식. 표본 대비 차원을 "
              "크게 줄인다. 미리 `python -m data.select_rnaseq_genes`로 뽑아둬야 한다.",
@@ -1054,6 +1067,14 @@ def main():
             )
         external_dataset = {"tcga": "cptac", "cptac": "tcga"}[args.dataset]
 
+    if args.rna_genes.endswith("_tcga_only") and not (args.dataset == "tcga" and args.external):
+        raise ValueError(
+            f"--rna-genes {args.rna_genes}는 --dataset tcga --external(TCGA로 학습 -> "
+            "CPTAC 전체를 external test)에서만 의미가 있습니다 — 이 유전자셋은 TCGA train "
+            "split만으로 뽑혀 다른 조합(특히 --dataset cptac이나 --dataset both)에서 쓰면 "
+            "코호트 불일치로 결과 해석이 잘못됩니다."
+        )
+
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
     # 정규화" 관례와 동일). dataset="both"면 두 코호트 clinical.csv를 합쳐 통계를 계산한다.
@@ -1098,6 +1119,12 @@ def main():
             rna_pathway_categories = pathway_category_gene_ids()
             rna_gene_ids  = None
             rna_input_dim = len(rna_pathway_categories)
+        elif args.rna_genes.endswith("_tcga_only"):
+            # 이 분기를 먼저 안 걸러 아래 일반 분기로 흘려보내면 leaky한 both-결합
+            # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서
+            # single-cohort/FDR 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes).
+            rna_gene_ids  = resolve_tcga_only_rna_genes(args.rna_genes)
+            rna_input_dim = len(rna_gene_ids)
         else:
             rna_gene_ids = (
                 pdac_subtype_gene_ids() if args.rna_genes == "subtype"
@@ -1152,6 +1179,12 @@ def main():
         # _PW8 = 카테고리 평균 pathway 집계(8차원) 사용 표시 — literature_1500(_EX)과는
         # 다른 압축 방식이라 섞이지 않게 별도 접미사를 쓴다.
         model_prefix += "_PW8"
+    elif args.rna_genes.endswith("_tcga_only"):
+        # _EXT{N} = literature_guided_gene_ids_single_cohort("tcga", N) 사용 표시. 기존 _EX(both
+        # 결합, leakage 있음)와 절대 같은 태그를 쓰면 안 된다 — wandb/checkpoint에서 섞이면
+        # leaky 버전과 leakage-free 버전 결과를 구분할 수 없게 된다. N까지 태그에 넣어
+        # EXT500/EXT1500처럼 서로 다른 크기도 섞이지 않게 한다.
+        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
         # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
@@ -1564,6 +1597,9 @@ def main():
     tag += f"_seed{cfg.train.seed}"
     if args.rna_genes == "pathway8":
         tag += "_PW8"
+    elif args.rna_genes.endswith("_tcga_only"):
+        # model_prefix와 동일한 이유로 _EX(leaky, both-결합)와 절대 섞이면 안 됨.
+        tag += f"_EXT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
         # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.

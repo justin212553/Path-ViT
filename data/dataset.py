@@ -134,6 +134,59 @@ def literature_guided_gene_ids(top_n: int = 1500) -> list[str]:
     return sorted(pd.read_csv(path)["gene_id"].tolist())
 
 
+@lru_cache(maxsize=None)
+def literature_guided_gene_ids_single_cohort(cohort: str, top_n: int = 1500) -> list[str]:
+    """
+    literature_guided_gene_ids()의 external 프로토콜 전용 버전 — data/select_rnaseq_genes.py
+    --single-cohort {cohort} 산출물(data/rna_gene_selection_{cohort}only/)만 무조건 로드한다.
+    both-결합 산출물(data/rna_gene_selection/)로는 절대 폴백하지 않는다.
+
+    [왜 필요한가] literature_guided_gene_ids()는 TCGA+CPTAC 두 코호트의 train split을 Stouffer로
+    결합해 유전자를 뽑는데, 이 결합 과정에 쓰인 각 코호트의 train case가 그 코호트를 학습에 전혀
+    안 쓴 반대쪽 external 프로토콜(--dataset {cohort} --external)의 external test case와 겹친다
+    (실측 약 60%, findings_backlog.md). "{cohort}로 학습 -> 반대 코호트 전체를 external test"인
+    실행에서는 이 함수로 뽑은, {cohort} train split만 사용한(반대 코호트 데이터 자체를 로드하지
+    않는) 유전자셋을 써야 external test의 완전 미노출 전제가 실제로 성립한다.
+    """
+    path = Path(f"data/rna_gene_selection_{cohort}only/selected_genes_top_{top_n}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: "
+            f"python -m data.select_rnaseq_genes --single-cohort {cohort} --n-genes {top_n}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
+@lru_cache(maxsize=None)
+def literature_guided_gene_ids_fdr_threshold(cohort: str, q_threshold: float = 0.1) -> list[str]:
+    """
+    literature_guided_gene_ids_single_cohort()의 threshold 기반 버전 — 임의의 고정 개수(top-N)
+    대신 data/select_rnaseq_genes.py --fdr-threshold 산출물(문헌 curated 163개 + BH-FDR q <
+    q_threshold를 만족하는 유전자)을 로드한다. 최종 유전자 수는 고정되지 않고 그 코호트의 실제
+    신호 강도로 결정된다. single-cohort 전용(반대 코호트 미참조)이라 leakage 없음.
+    """
+    path = Path(f"data/rna_gene_selection_{cohort}only/selected_genes_fdr{q_threshold:g}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: "
+            f"python -m data.select_rnaseq_genes --single-cohort {cohort} --fdr-threshold {q_threshold:g}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
+def resolve_tcga_only_rna_genes(rna_genes_arg: str) -> list[str]:
+    """train.py/train_light.py --rna-genes "literature_{spec}_tcga_only" 문자열을 파싱해
+    single-cohort 로더 중 맞는 쪽으로 dispatch한다 — spec이 정수면 top-N
+    (literature_guided_gene_ids_single_cohort), "fdr{q}"면 FDR threshold
+    (literature_guided_gene_ids_fdr_threshold). 이 파싱을 train.py/train_light.py 양쪽에
+    각각 두면 하나만 고치고 다른 쪽을 놓치는 사고가 나기 쉬워 여기 한 곳에만 둔다.
+    """
+    spec = rna_genes_arg.split("_")[1]
+    if spec.startswith("fdr"):
+        return literature_guided_gene_ids_fdr_threshold("tcga", float(spec[3:]))
+    return literature_guided_gene_ids_single_cohort("tcga", int(spec))
+
+
 def pathway_category_gene_ids() -> dict[str, list[str]]:
     """
     literature_guided_gene_ids()의 대안 — 개별 유전자 1500개 대신, 문헌 큐레이션 PDAC 유전자

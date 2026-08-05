@@ -37,7 +37,10 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids
+from data.dataset import (
+    WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
+    resolve_tcga_only_rna_genes,
+)
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
 from models.clinical_encoder import age_stats_from_csv
 from utils import load_env, send_slack
@@ -197,9 +200,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-folds", type=int, default=5, help="--fold와 함께 쓰는 전체 fold 개수.")
     parser.add_argument(
         "--rna-genes", type=str, default="subtype",
-        choices=["subtype", "literature_1000", "literature_1500", "literature_2000"],
+        choices=[
+            "subtype", "literature_1000", "literature_1500", "literature_2000",
+            "literature_500_tcga_only", "literature_1500_tcga_only",
+            "literature_fdr0.1_tcga_only",
+        ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. train.py --rna-genes와 동일한 관례 "
-             "(subtype 외 선택 시 wandb/checkpoint에 _EX 접미사 자동 부착).",
+             "(subtype 외 선택 시 wandb/checkpoint에 _EX 접미사 자동 부착). **주의**: literature_"
+             "{1000,1500,2000}은 TCGA+CPTAC train split을 Stouffer로 결합해 뽑은 것이라 --dataset "
+             "tcga --external처럼 반대 코호트를 external test로 쓰는 실행에는 leakage가 있다 "
+             "(findings_backlog.md) — --dataset both 비교에만 쓸 것. literature_{500,1500}_tcga_only, "
+             "literature_fdr0.1_tcga_only는 TCGA train split만 사용(CPTAC 미참조)한 leakage-free "
+             "버전(뒤의 fdr0.1은 top-N 대신 BH-FDR q<0.1 통계적 컷오프, data/select_rnaseq_genes.py "
+             "--fdr-threshold) — --dataset tcga --external 전용(다른 조합이면 에러).",
     )
     parser.add_argument(
         "--lr", type=float, default=None,
@@ -311,6 +324,13 @@ def main():
             raise ValueError("--external은 --dataset both와 함께 쓸 수 없습니다.")
         external_dataset = {"tcga": "cptac", "cptac": "tcga"}[args.dataset]
 
+    if args.rna_genes.endswith("_tcga_only") and not (args.dataset == "tcga" and args.external):
+        raise ValueError(
+            f"--rna-genes {args.rna_genes}는 --dataset tcga --external(TCGA로 학습 -> "
+            "CPTAC 전체를 external test)에서만 의미가 있습니다 — TCGA train split만으로 뽑힌 "
+            "유전자셋이라 다른 조합에서 쓰면 코호트 불일치로 결과 해석이 잘못됩니다."
+        )
+
     with_clinical = args.M5 or args.M7
     with_rna = args.M6 or args.M6X or args.M7
 
@@ -328,16 +348,26 @@ def main():
         age_mean, age_std = None, None
 
     if with_rna:
-        rna_gene_ids = (
-            pdac_subtype_gene_ids() if args.rna_genes == "subtype"
-            else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
-        )
+        if args.rna_genes.endswith("_tcga_only"):
+            # 이 분기를 먼저 안 걸러 아래 일반 분기로 흘려보내면 leaky한 both-결합
+            # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서 single-cohort/FDR
+            # 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes, train.py와 동일한 관례).
+            rna_gene_ids = resolve_tcga_only_rna_genes(args.rna_genes)
+        else:
+            rna_gene_ids = (
+                pdac_subtype_gene_ids() if args.rna_genes == "subtype"
+                else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
+            )
         rna_input_dim = len(rna_gene_ids)
     else:
         rna_gene_ids, rna_input_dim = None, None
 
     model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7"
-    if args.rna_genes != "subtype":
+    if args.rna_genes.endswith("_tcga_only"):
+        # train.py와 동일한 관례 — 기존 _EX(leaky, both-결합)와 절대 섞이면 안 된다. N까지
+        # 태그에 넣어 EXT500/EXT1500처럼 서로 다른 크기도 섞이지 않게 한다.
+        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes != "subtype":
         model_prefix += "_EX"
     if args.lr is not None and args.lr != 1e-3:
         # _LR{lr} = cfg.light.lr(기본 1e-3) 이외 값 사용 표시 - train.py의 _EX/_SS/_AUX와 같은 관례.

@@ -1,0 +1,79 @@
+% !TEX root = ../main.tex
+%
+% Methods subsection -- Data Preprocessing
+% Requires (in preamble of main.tex): booktabs
+
+\subsection{Data Preprocessing}
+\label{subsec:preprocessing}
+
+\subsubsection{Whole-Slide Image Tiling}
+
+Whole-slide images were tiled at a target resolution of 1.0 micron per pixel
+(MPP) into $1024 \times 1024$ pixel patches. Native slide MPP was read from
+scanner metadata and validated to fall within a plausible range (0.05--5.0
+$\mu$m/pixel) to catch corrupted or mislabeled metadata before tiling.
+Background regions were excluded using a tissue mask computed by Otsu
+thresholding the saturation channel of a low-resolution slide thumbnail; a
+candidate tile was kept only if at least 15\% of its area fell within the
+tissue mask. Retained tiles were passed to the frozen patch encoder at their
+native $1024\times1024$ resolution, normalized with standard ImageNet channel
+statistics.
+
+\subsubsection{Clinical Data Harmonization}
+
+TCGA and CPTAC clinical variables were mapped to a common schema. Overall
+survival time was defined from diagnosis to death (event = 1) or to last
+follow-up (censored, event = 0). Pathologic stage, TNM classification, and
+tumor grade were deliberately excluded from all model inputs, since these are
+summary variables already strongly associated with prognosis and would act as
+shortcut features that bypass the imaging and transcriptomic signal being
+evaluated; only age and sex are used as the clinical input.
+
+\subsubsection{RNA-seq Processing}
+
+TCGA-PAAD expression values (STAR-Counts) were transformed as
+$\log_2(\text{FPKM-UQ} + 1)$; CPTAC-PDAC expression values were used as
+provided (RSEM upper-quartile normalized, already on a $\log_2$ scale). Genes
+were restricted to those common to both cohorts' processed matrices, and each
+gene was $z$-score normalized independently within each cohort.
+
+\subsubsection{Literature-Guided Gene Selection}
+
+The full common-gene set is far larger than what a cohort of this size can
+support without overfitting, and a subtype-classification gene panel is not
+necessarily the panel most informative for survival. A compact,
+survival-oriented gene set was therefore constructed as follows. First, 163
+genes were curated from the pancreatic ductal adenocarcinoma (PDAC) literature
+across eight functional categories (Table~\ref{tab:gene-categories}). Second,
+within the training-split cases, a univariate Cox score test was computed for
+every common gene independently in each cohort; the two cohorts' $z$-scores
+were then combined by Stouffer's method ($z_{\mathrm{meta}} = \sum_k z_k /
+\sqrt{2}$) to obtain a single survival-association ranking. Third, the final
+gene ordering places the curated literature genes first (ordered by their own
+Cox rank), with remaining slots filled by genome-wide Cox rank. The top 1,000,
+1,500, and 2,000 genes by this ordering were saved; the RNA-seq branch of all
+RNA-containing models (M3, M4, M6, M7) uses the top 1,500 genes by default.
+
+\begin{table}[htbp]
+  \centering
+  \begin{tabular}{@{}l c@{}}
+    \toprule
+    \textbf{Category} & \textbf{Genes} \\
+    \midrule
+    Core driver / tumor suppressor            & 16 \\
+    DNA damage repair / therapy response       & 13 \\
+    Classical / pancreatic progenitor          & 22 \\
+    Basal-like / squamous / mesenchymal        & 21 \\
+    Stroma / ECM / invasion                    & 30 \\
+    Immune / inflammation / TGF-$\beta$        & 25 \\
+    Proliferation / cell cycle / apoptosis     & 18 \\
+    Hypoxia / metabolism / acinar program      & 18 \\
+    \midrule
+    Total curated genes                        & 163 \\
+    \bottomrule
+  \end{tabular}
+  \caption{Literature-curated PDAC gene categories used to seed the
+    survival-guided gene ranking. Individual gene symbols are listed in the
+    Supplementary Information.}
+  \label{tab:gene-categories}
+\end{table}

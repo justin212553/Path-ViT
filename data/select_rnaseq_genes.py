@@ -23,9 +23,22 @@ Cox score test는 lifelines로 유전자 18,879개를 하나씩 fitting하면 �
 동일하게 벡터화된 score test(효율적 점수 U, Fisher 정보 I, z = U/sqrt(I))로 전체 유전자를
 한 번에 계산한다 — 결과는 표준 Cox partial likelihood의 score test와 동일하다.
 
+[2026-08-04, --single-cohort 추가 — leakage 수정] 위 기본 경로(Stouffer로 TCGA+CPTAC 둘 다
+결합)는 "--dataset both"(내부 비교) 전용으로만 써야 한다. external 프로토콜(예: --dataset tcga
+--external, 학습에 전혀 안 쓴 CPTAC 전체를 external test로 평가)에 이 both-결합 리스트를
+그대로 재사용하면, external test로 쓰이는 반대 코호트 환자 중 상당수(실측 약 60%)가 이미 유전자
+선정 단계에서 생존 라벨이 쓰인 상태가 된다 — external "완전 미노출" 전제가 깨지는 명백한 data
+leakage(findings_backlog.md 참조). --single-cohort {tcga,cptac}를 주면 그 코호트의 train
+split(--dataset {tcga,cptac} --external이 실제로 쓰는 것과 동일한 split)만으로, 반대 코호트
+데이터는 아예 로드하지 않고 유전자를 선정한다(Stouffer 결합 없음 — 단일 코호트 z-score 그대로).
+출력은 기존 both-결합 산출물과 겹치지 않게 별도 디렉토리(data/rna_gene_selection_{cohort}only/)에
+저장된다.
+
 사용법:
-    python -m data.select_rnaseq_genes                      # 기본: 1000/1500/2000 저장
+    python -m data.select_rnaseq_genes                      # 기본: both 결합, 1000/1500/2000 저장
     python -m data.select_rnaseq_genes --n-genes 1500
+    python -m data.select_rnaseq_genes --single-cohort tcga --n-genes 1500   # TCGA->CPTAC external용
+    python -m data.select_rnaseq_genes --single-cohort cptac --n-genes 1500  # CPTAC->TCGA external용
 """
 import argparse
 from pathlib import Path
@@ -124,22 +137,42 @@ def _train_case_ids_by_dataset(cfg: DataConfig) -> dict[str, list[str]]:
 
     실제 학습에 쓰이는 split과 완전히 동일한 기준(WSISurvivalDataset)을 재사용해,
     유전자 선정이 val/test case의 생존 라벨을 보지 않게 한다(레퍼런스와 동일 원칙).
+    both 프로토콜 전용 — external 프로토콜에는 쓰지 말 것(모듈 docstring 참조).
     """
     ds = WSISurvivalDataset(cfg, dataset="both", split="train", with_rna=True)
     cases = ds.items[["case_id", "dataset"]].drop_duplicates()
     return {name: cases.loc[cases["dataset"] == name, "case_id"].tolist() for name in DATASETS}
 
 
-def rank_genes_by_train_cox(cfg: DataConfig) -> pd.DataFrame:
-    rna = {name: pd.read_csv(RNA_PATHS[name]).set_index("case_id") for name in DATASETS}
-    os_labels = {name: pd.read_csv(OS_LABEL_PATHS[name]).set_index("case_id") for name in DATASETS}
-    train_cases = _train_case_ids_by_dataset(cfg)
+def _train_case_ids_single(cfg: DataConfig, cohort: str) -> list[str]:
+    """--dataset {cohort} --external이 실제로 쓰는 train split(그 코호트 단독 6:2:2)과
+    동일한 case 집합을 반환한다 — 반대 코호트는 이 함수 호출 전체에서 아예 참조되지 않는다."""
+    ds = WSISurvivalDataset(cfg, dataset=cohort, split="train", with_rna=True)
+    return ds.items["case_id"].drop_duplicates().tolist()
+
+
+def rank_genes_by_train_cox(cfg: DataConfig, single_cohort: str | None = None) -> pd.DataFrame:
+    """
+    Args:
+        single_cohort: None(기본)이면 기존 both-결합(Stouffer) 동작. "tcga" 또는 "cptac"을
+            주면 그 코호트의 train split만 사용하고(반대 코호트 파일은 로드조차 하지 않음),
+            Stouffer 결합 없이 그 코호트 자신의 Cox z-score를 그대로 순위 기준으로 쓴다 —
+            external 프로토콜(그 코호트로 학습 -> 반대 코호트 전체를 external test)에서 쓸
+            유전자 리스트 전용.
+    """
+    datasets = (single_cohort,) if single_cohort else DATASETS
+    rna = {name: pd.read_csv(RNA_PATHS[name]).set_index("case_id") for name in datasets}
+    os_labels = {name: pd.read_csv(OS_LABEL_PATHS[name]).set_index("case_id") for name in datasets}
+    train_cases = (
+        {single_cohort: _train_case_ids_single(cfg, single_cohort)}
+        if single_cohort else _train_case_ids_by_dataset(cfg)
+    )
 
     common_genes = sorted(set.intersection(*(set(df.columns) for df in rna.values())))
     rows = pd.DataFrame({"gene_id": common_genes})
     z_cols = []
 
-    for name in DATASETS:
+    for name in datasets:
         cases = [c for c in train_cases[name] if c in rna[name].index and c in os_labels[name].index]
         x = rna[name].loc[cases, common_genes].to_numpy(dtype=np.float64)
         time = os_labels[name].loc[cases, "OS_time"].to_numpy(dtype=np.float64)
@@ -153,7 +186,9 @@ def rank_genes_by_train_cox(cfg: DataConfig) -> pd.DataFrame:
         z_cols.append(f"{name}_cox_z")
         print(f"  {name}: train n={len(cases)}, events={int(event.sum())}")
 
-    # Stouffer meta-analysis: meta_z = sum(z) / sqrt(코호트 수) — 레퍼런스와 동일한 단순 결합
+    # single_cohort=None: Stouffer meta-analysis(meta_z = sum(z)/sqrt(코호트 수), 레퍼런스와
+    # 동일한 단순 결합). single_cohort 지정 시 z_cols에 컬럼이 1개뿐이라 그 코호트 자신의
+    # z-score가 그대로 meta_cox_z가 된다(sqrt(1)로 나누는 것과 동일 — 결합이 아니라 통과).
     z_matrix = rows[z_cols].to_numpy(dtype=np.float64)
     rows["meta_cox_z"] = z_matrix.sum(axis=1) / np.sqrt(z_matrix.shape[1])
     rows["meta_cox_p"] = 2.0 * norm.sf(np.abs(rows["meta_cox_z"]))
@@ -202,34 +237,99 @@ def build_literature_guided_ranking(ranked: pd.DataFrame, literature_table: pd.D
     return guided
 
 
+def benjamini_hochberg_qvalues(p: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg FDR 보정. raw p-value를 그대로 유전자 ~2만 개에 threshold로 쓰면
+    순수 우연만으로도 (2만 * alpha)개가 "유의"하게 걸린다(예: p<0.05 -> ~1000개) — 다중검정
+    보정 없이는 hard threshold가 top-N보다 오히려 더 노이즈에 취약하다. statsmodels 의존성을
+    피하기 위해 표준 BH 절차를 직접 구현(정렬 -> q_(i) = min_{j>=i}(p_(j)*m/j), 뒤에서부터
+    누적 최소로 단조성 강제).
+    """
+    m = len(p)
+    order = np.argsort(p)
+    sorted_p = p[order]
+    ranks = np.arange(1, m + 1)
+    q_sorted = np.minimum.accumulate((sorted_p * m / ranks)[::-1])[::-1]
+    q_sorted = np.clip(q_sorted, 0, 1)
+    q = np.empty(m)
+    q[order] = q_sorted
+    return q
+
+
+def build_fdr_threshold_ranking(
+    ranked: pd.DataFrame, literature_table: pd.DataFrame, q_threshold: float
+) -> pd.DataFrame:
+    """top-N(임의의 고정 개수) 대신, 통계적으로 정당화되는 컷오프로 유전자를 고른다.
+
+    문헌 curated 유전자(163개)는 top-N 방식과 동일하게 개별 유의성과 무관하게 항상 포함한다
+    (문헌 근거 자체가 포함 사유). 나머지는 BH-FDR q < q_threshold를 만족하는 유전자만 추가한다
+    — raw p 대신 FDR로 다중검정을 보정한다(위 benjamini_hochberg_qvalues 참조). 최종 개수는
+    고정되지 않고 그 코호트의 실제 신호 강도에 따라 결정된다(top-N과의 핵심 차이).
+    """
+    guided = build_literature_guided_ranking(ranked, literature_table)
+    guided = guided.merge(ranked[["gene_id", "meta_cox_p"]], on="gene_id", how="left", suffixes=("", "_dup"))
+    guided["fdr_q"] = benjamini_hochberg_qvalues(guided["meta_cox_p"].to_numpy())
+    selected = guided[guided["is_literature_curated"] | (guided["fdr_q"] < q_threshold)].copy()
+    return selected.sort_values("rank").reset_index(drop=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-genes", nargs="+", type=int, default=[1000, 1500, 2000])
+    parser.add_argument(
+        "--single-cohort", type=str, default=None, choices=["tcga", "cptac"],
+        help="지정하면 그 코호트의 train split만으로(반대 코호트 미참조, Stouffer 결합 없음) "
+             "유전자를 선정한다 — external 프로토콜(그 코호트로 학습 -> 반대 코호트 전체 "
+             "external test) 전용. 출력은 data/rna_gene_selection_{cohort}only/에 저장되어 "
+             "기존 both-결합 산출물(data/rna_gene_selection/)과 분리된다.",
+    )
+    parser.add_argument(
+        "--fdr-threshold", type=float, default=None,
+        help="주어지면 --n-genes(임의의 고정 개수) 대신, BH-FDR q < 이 값을 만족하는 유전자만 "
+             "고른다(문헌 curated 163개는 항상 포함). raw p-value를 그대로 threshold로 쓰면 "
+             "유전자 ~2만 개 중 다중검정 보정 없이 우연만으로도 p<0.05가 ~1000개 나오므로 "
+             "FDR 보정을 강제한다. 최종 유전자 수는 고정되지 않고 실제 신호 강도에 따라 "
+             "달라진다 — 출력 파일명 selected_genes_fdr{threshold}.csv.",
+    )
     args = parser.parse_args()
 
     cfg = DataConfig()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(f"data/rna_gene_selection_{args.single_cohort}only") if args.single_cohort else OUT_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Ranking genes by train-split univariate Cox score test (TCGA/CPTAC separately)...")
-    ranked = rank_genes_by_train_cox(cfg)
-    ranked.to_csv(OUT_DIR / "gene_cox_ranking.csv", index=False)
-    print(f"  -> {OUT_DIR / 'gene_cox_ranking.csv'} ({len(ranked)} genes)")
+    if args.single_cohort:
+        opposite = "cptac" if args.single_cohort == "tcga" else "tcga"
+        print(f"Ranking genes by {args.single_cohort}-only train-split Cox score test "
+              f"({opposite} not loaded at all — external-protocol gene list)...")
+    else:
+        print("Ranking genes by train-split univariate Cox score test (TCGA/CPTAC separately, "
+              "Stouffer-combined; both-protocol only)...")
+    ranked = rank_genes_by_train_cox(cfg, single_cohort=args.single_cohort)
+    ranked.to_csv(out_dir / "gene_cox_ranking.csv", index=False)
+    print(f"  -> {out_dir / 'gene_cox_ranking.csv'} ({len(ranked)} genes)")
 
     literature_table = build_literature_table(ranked)
-    literature_table.to_csv(OUT_DIR / "literature_curated_genes.csv", index=False)
+    literature_table.to_csv(out_dir / "literature_curated_genes.csv", index=False)
     n_available = int(literature_table["available"].sum())
     print(f"  -> literature curated genes: {len(literature_table)} total, {n_available} found in common RNA-seq")
 
     guided = build_literature_guided_ranking(ranked, literature_table)
-    guided.to_csv(OUT_DIR / "literature_guided_ranking.csv", index=False)
-    print(f"  -> {OUT_DIR / 'literature_guided_ranking.csv'}")
+    guided.to_csv(out_dir / "literature_guided_ranking.csv", index=False)
+    print(f"  -> {out_dir / 'literature_guided_ranking.csv'}")
 
-    for n in args.n_genes:
-        selected = guided.head(n)[["rank", "gene_id", "is_literature_curated"]]
-        out_path = OUT_DIR / f"selected_genes_top_{n}.csv"
-        selected.to_csv(out_path, index=False)
-        n_curated_in_top = int(selected["is_literature_curated"].sum())
-        print(f"  -> {out_path} (top {n}, {n_curated_in_top} literature-curated)")
+    if args.fdr_threshold is not None:
+        fdr_selected = build_fdr_threshold_ranking(ranked, literature_table, args.fdr_threshold)
+        out_path = out_dir / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
+        fdr_selected[["rank", "gene_id", "is_literature_curated", "fdr_q"]].to_csv(out_path, index=False)
+        n_curated_in_sel = int(fdr_selected["is_literature_curated"].sum())
+        print(f"  -> {out_path} (q<{args.fdr_threshold:g}: {len(fdr_selected)} genes total, "
+              f"{n_curated_in_sel} literature-curated + {len(fdr_selected) - n_curated_in_sel} FDR-passing)")
+    else:
+        for n in args.n_genes:
+            selected = guided.head(n)[["rank", "gene_id", "is_literature_curated"]]
+            out_path = out_dir / f"selected_genes_top_{n}.csv"
+            selected.to_csv(out_path, index=False)
+            n_curated_in_top = int(selected["is_literature_curated"].sum())
+            print(f"  -> {out_path} (top {n}, {n_curated_in_top} literature-curated)")
 
 
 if __name__ == "__main__":
