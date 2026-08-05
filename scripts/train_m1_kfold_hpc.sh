@@ -26,7 +26,7 @@
 # 브랜치가 없는 M1엔 대응 항목 없어 제외(train_m1_hpc.sh와 동일한 이유).
 #
 # 완료 후 5개 fold 예측 집계(internal pooled + external 평균, 로그인 노드에서 인터넷 불필요):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model M1_SS_AUG_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model M1_SS_AUG_DISP
 #
 # 제출: sbatch scripts/train_m1_kfold_hpc.sh
 
@@ -41,7 +41,7 @@ export WANDB_MODE=offline
 Folds=(0 1 2 3 4)
 
 for fold in "${Folds[@]}"; do
-    log=".logs/train_tcga_seed42_M1_SS_AUG_DISP_kfold5_fold${fold}.log"
+    log=".logs/train_tcga_seed84_M1_SS_AUG_DISP_kfold5_fold${fold}.log"
     echo "=== M1_SS_AUG_DISP fold=${fold}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
     python -u ./train.py --M1 --dataset tcga --external --seed 84 \
         --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \

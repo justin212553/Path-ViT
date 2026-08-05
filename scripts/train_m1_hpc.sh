@@ -35,6 +35,6 @@ export WANDB_MODE=offline
 # --cache-val-tiles: evaluate()가 train_eval/val을 매 epoch 디스크에서 새로 디코딩하던 게 이
 # 클러스터에서 epoch 1도 못 넘기는 병목이었다(train_eval은 train_ds의 캐시를 재사용하도록 이미
 # 고쳤고, val은 이 플래그로 별도 캐시를 만든다 — 128GB 예산이면 여유 충분).
-python -u ./train.py --M1 --dataset tcga --external --seed 42 \
+python -u ./train.py --M1 --dataset tcga --external --seed 84 \
     --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
     --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles "$@"

@@ -15,7 +15,7 @@
 # SS+AUG+DISP — EX/AUX는 RNA 브랜치가 없는 M2엔 대응 항목 없어 제외.
 #
 # 완료 후 집계:
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model M2_SS_AUG_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model M2_SS_AUG_DISP
 #
 # 제출: sbatch scripts/train_m2_kfold_hpc.sh
 
@@ -30,9 +30,9 @@ export WANDB_MODE=offline
 Folds=(0 1 2 3 4)
 
 for fold in "${Folds[@]}"; do
-    log=".logs/train_tcga_seed42_M2_SS_AUG_DISP_kfold5_fold${fold}.log"
+    log=".logs/train_tcga_seed84_M2_SS_AUG_DISP_kfold5_fold${fold}.log"
     echo "=== M2_SS_AUG_DISP fold=${fold}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-    python -u ./train.py --M2 --dataset tcga --external --seed 42 \
+    python -u ./train.py --M2 --dataset tcga --external --seed 84 \
         --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
         --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
         --fold "${fold}" --n-folds 5 --group-ts 0804m2_kfold5_seq 2>&1 | tee "${log}"

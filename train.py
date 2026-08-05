@@ -240,9 +240,15 @@ def _patient_risk(
                 _stage_ord_from_patient(patient_slides, device)
                 if _clinical_enc is not None and _clinical_enc.use_staging else None
             )
+            # 2026-08-05: model.combine_mode="cox_add"(ViT_PMA, train.py --combine-mode)면
+            # clinical_encoder 자체가 없다 — models/clinical_rna_only.py에서 겪은 것과 같은 버그
+            # (_clinical_enc.use_margin으로만 판단하면 cox_add에서 margin_ord가 항상 None이 됨)를
+            # 피하려 model 최상위 use_margin(combine_mode 무관하게 항상 있음)을 우선 본다.
             margin_ord = (
                 _margin_ord_from_patient(patient_slides, device)
-                if _clinical_enc is not None and getattr(_clinical_enc, "use_margin", False) else None
+                if getattr(model, "use_margin", False) or
+                   (_clinical_enc is not None and getattr(_clinical_enc, "use_margin", False))
+                else None
             )
             patient_embed = model.combine_with_clinical_rna(
                 patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord, margin_ord=margin_ord,
@@ -265,6 +271,12 @@ def _patient_risk(
             patient_embed = torch.cat([patient_embed, patient_spatial_feat], dim=-1)
 
         risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)  # (1,)
+        if getattr(model, "combine_mode", "concat") == "cox_add":
+            # models/vit_pma.py::ViT_PMA combine_mode="cox_add" — clinical은 위 patient_embed에
+            # 안 섞여 있고(combine_with_clinical_rna가 concat 안 함), 여기서 고전적 Cox 가산항으로
+            # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
+            clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord)
+            risk = risk + model.clinical_linear(clin_raw).view(1)
     return risk, aux_loss, stage_aux_loss
 
 
@@ -573,6 +585,16 @@ def _parse_args() -> argparse.Namespace:
         "--no-age-sex", action="store_true",
         help="train_light.py --no-age-sex와 동일 — --clinical-margin과 함께 사용, age/sex를 빼고 "
              "margin(/staging)만 입력으로 쓴다. 켜면 model_prefix에 _ONLY가 추가로 붙는다.",
+    )
+    parser.add_argument(
+        "--combine-mode", type=str, default="concat", choices=["concat", "cox_add"],
+        help="--PMA 전용(models/vit_pma.py::ViT_PMA). train_light.py --M7 --combine-mode의 "
+             "cox_add를 PMA에 이식 — clinical(age/sex/margin)을 z_clinical 임베딩으로 concat하지 "
+             "않고, risk_head(z_wsi+z_rna)에 고전적 Cox 가산항(clinical_linear, 파라미터 "
+             "raw_dim개, zero-init이라 학습 시작 시점엔 clinical 없는 PMA와 동일)으로 직접 더한다. "
+             "PMA_INT1500_SS_AUX_R_DISP(no-aug, concat)가 external에서 M6/M7보다도 나은 걸 보고, "
+             "M7에서 cox_add가 R_ONLY(margin만)의 internal을 크게 끌어올렸던 효과가 PMA에도 "
+             "재현되는지 확인하는 ablation. 켜면 model_prefix에 _COX_ADD 접미사가 붙는다.",
     )
     parser.add_argument(
         "--stage-aux-weight", type=float, default=0.0,
@@ -1313,6 +1335,9 @@ def main():
             model_prefix += "_LEARNTAU"
     if args.pretrained_wsi_trunk:
         model_prefix += "_PRETRAINED"
+    if args.combine_mode != "concat":
+        # _COX_ADD = train_light.py --M7 --combine-mode와 동일 관례.
+        model_prefix += f"_{args.combine_mode.upper()}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1525,6 +1550,7 @@ def main():
                          precomputed=cfg.data.precomputed, backbone=args.backbone,
                          rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
                          rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
+                         combine_mode=args.combine_mode,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,

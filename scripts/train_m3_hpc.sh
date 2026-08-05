@@ -24,6 +24,6 @@ export WANDB_MODE=offline
 # --tile-decode-workers 8 / --cache-val-tiles: train_m1_hpc.sh와 동일한 이유(epoch 1도 못 넘기던
 # 진짜 병목 — 타일 디코딩 스레드풀 하드코딩 + evaluate()가 train_eval/val을 캐시 없이 디스크에서
 # 매 epoch 새로 디코딩).
-python -u ./train.py --PMA --no-clinical --rna-genes literature_1500 --dataset tcga --external --seed 42 \
+python -u ./train.py --PMA --no-clinical --rna-genes literature_1500 --dataset tcga --external --seed 84 \
     --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
     --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles "$@"

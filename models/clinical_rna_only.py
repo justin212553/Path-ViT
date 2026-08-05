@@ -59,8 +59,15 @@ class ClinicalRNAOnly(nn.Module):
       항등(identity) 근처로 초기화해 학습 시작 시점엔 사실상 M6와 동일하게 동작하고,
       clinical이 실제로 유용해야만 gradient가 항등에서 밀어낸다.
     - "cox_add": clinical을 임베딩하지 않고 고전적 Cox 비례위험모형처럼 최종 risk 스칼라에
-      직접 선형항으로 더한다: risk = risk_head(z_rna) + β_age·age_z + β_sex·sex_idx.
-      파라미터 딱 2개(β_age, β_sex)뿐 — 세 방식 중 자유도가 가장 작다.
+      직접 선형항으로 더한다: risk = risk_head(z_rna) + β_age·age_z + β_sex·sex_idx
+      (+ β_margin·margin_z, --clinical-margin일 때). age/sex 둘뿐일 때 파라미터 2개로 세 방식
+      중 자유도가 가장 작다.
+
+    2026-08-05: film/cox_add에도 margin(--clinical-margin, use_age_sex=False로 age/sex 제외
+    가능) 지원을 추가했다 — M7이 concat 방식으로는 M6(RNA만)의 internal을 못 넘는 걸 보고,
+    margin의 "약하지만 진짜인"(단독 Cox HR≈1.6, 양쪽 코호트 유의) 신호가 RNA와 같은 선형층에서
+    직접 경쟁하는 구조 자체가 문제일 수 있다는 가설 검증용 — cox_add는 margin을 고전적 Cox
+    공변량처럼 최종 스칼라에만 더해 RNA 임베딩 표현 자체를 전혀 건드리지 않는다.
     """
 
     def __init__(self, cfg: ModelConfig, age_mean: float, age_std: float, rna_input_dim: int,
@@ -73,9 +80,11 @@ class ClinicalRNAOnly(nn.Module):
         super().__init__()
         if combine_mode not in ("concat", "film", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
-        if use_margin and combine_mode != "concat":
-            raise ValueError("use_margin=True는 combine_mode='concat'에서만 지원합니다.")
+        if use_margin and margin_stats is None:
+            raise ValueError("use_margin=True면 margin_stats가 필요합니다.")
         self.combine_mode = combine_mode
+        self.use_margin = use_margin
+        self.use_age_sex = use_age_sex
         # 2026-07-28: clinical_dim을 키워서(레퍼런스 비대칭 16 대신 RNA와 같은 폭) "정보를 더
         # 주면(표현력을 늘리면) 오히려 나빠지는지" 검증하기 위한 ablation(train_light.py
         # --clinical-dim/--rna-dim). 기본값(None)이면 기존 동작(모듈 상수 256/16) 그대로 보존.
@@ -116,24 +125,41 @@ class ClinicalRNAOnly(nn.Module):
         else:
             self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
             self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+            if use_margin:
+                m_mean, m_std = margin_stats
+                self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
+                self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
             self.risk_head = nn.Sequential(
                 nn.LayerNorm(rna_dim),
                 nn.Linear(rna_dim, 1),
             )
+            # raw_dim: age/sex 2차원(둘 다 쓸 때) + margin (z_score, known_flag) 2차원(쓸 때).
+            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0)
+            if raw_dim == 0:
+                raise ValueError("use_age_sex=False이고 use_margin=False면 clinical 입력이 없습니다.")
             if combine_mode == "film":
-                self.film_gamma = nn.Linear(2, 1)
-                self.film_beta = nn.Linear(2, 1)
+                self.film_gamma = nn.Linear(raw_dim, 1)
+                self.film_beta = nn.Linear(raw_dim, 1)
                 nn.init.zeros_(self.film_gamma.weight)
                 nn.init.constant_(self.film_gamma.bias, 1.0)  # γ≈1(항등) 근처에서 시작
                 nn.init.zeros_(self.film_beta.weight)
                 nn.init.zeros_(self.film_beta.bias)            # β≈0(항등) 근처에서 시작
             else:  # cox_add
-                self.clinical_linear = nn.Linear(2, 1, bias=False)  # β_age, β_sex 딱 2개
+                self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
                 nn.init.zeros_(self.clinical_linear.weight)          # 초기엔 risk_head(z_rna)와 동일
 
-    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor) -> torch.Tensor:
-        age_z = (age_years.float() - self.age_mean) / self.age_std
-        return torch.stack([age_z, sex_idx.float()], dim=-1).unsqueeze(0)  # (1, 2)
+    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
+                       margin_ord: torch.Tensor | None = None) -> torch.Tensor:
+        feats = []
+        if self.use_age_sex:
+            age_z = (age_years.float() - self.age_mean) / self.age_std
+            feats += [age_z, sex_idx.float()]
+        if self.use_margin:
+            ordv = margin_ord.float()
+            known = (ordv >= 0).float()
+            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+            feats += [z, known]
+        return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)
 
     def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor,
                 margin_ord: torch.Tensor | None = None) -> torch.Tensor:
@@ -142,9 +168,8 @@ class ClinicalRNAOnly(nn.Module):
             age_years:  () — 환자 나이(연 단위) 스칼라 텐서
             sex_idx:    () — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
             rna:        (G,) — 코호트 내부 z-score 정규화된 유전자 발현 벡터
-            margin_ord: self.clinical_encoder.use_margin=True(--clinical-margin, M7_R)일 때만
-                        필요. () 스칼라 long — encode_margin_value() 규약. combine_mode="concat"
-                        전용.
+            margin_ord: self.use_margin=True(--clinical-margin)일 때만 필요. () 스칼라 long —
+                        encode_margin_value() 규약. combine_mode 무관하게 지원.
         Returns:
             risk: (1,)
         """
@@ -158,7 +183,7 @@ class ClinicalRNAOnly(nn.Module):
             fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
             return self.risk_head(fused.unsqueeze(0)).view(1)
 
-        clin_raw = self._clinical_raw(age_years, sex_idx)  # (1, 2)
+        clin_raw = self._clinical_raw(age_years, sex_idx, margin_ord)  # (1, raw_dim)
         if self.combine_mode == "film":
             gamma = self.film_gamma(clin_raw).view(1)  # (1,)
             beta = self.film_beta(clin_raw).view(1)    # (1,)

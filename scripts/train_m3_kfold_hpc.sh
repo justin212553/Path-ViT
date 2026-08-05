@@ -15,7 +15,7 @@
 # M3(WSI+RNA, clinical 제외, ViT_PMA --no-clinical) — RNA가 있으니 EX+SS+AUX+AUG+DISP 전부.
 #
 # 완료 후 집계(model_prefix에 --no-clinical의 _NOCLINICAL 태그가 들어간다는 점 주의):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP
 #
 # 제출: sbatch scripts/train_m3_kfold_hpc.sh
 
@@ -30,9 +30,9 @@ export WANDB_MODE=offline
 Folds=(0 1 2 3 4)
 
 for fold in "${Folds[@]}"; do
-    log=".logs/train_tcga_seed42_PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP_kfold5_fold${fold}.log"
+    log=".logs/train_tcga_seed84_PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP_kfold5_fold${fold}.log"
     echo "=== M3(PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP) fold=${fold}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-    python -u ./train.py --PMA --no-clinical --rna-genes literature_1500 --dataset tcga --external --seed 42 \
+    python -u ./train.py --PMA --no-clinical --rna-genes literature_1500 --dataset tcga --external --seed 84 \
         --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
         --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
         --fold "${fold}" --n-folds 5 --group-ts 0804m3_kfold5_seq 2>&1 | tee "${log}"

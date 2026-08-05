@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=06:00:00
+#SBATCH --time=24:00:00
 #SBATCH --array=0-4
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/m1_kfold_array_%a.log
 
@@ -22,14 +22,14 @@
 # os.replace) + 읽기 실패 시 자동 복구(깨진 캐시를 원본부터 다시 디코딩)를 넣어 고쳤다. 지금은
 # 병렬로 돌려도 안전하다.
 #
-# --time=6h: array 태스크 1개당 fold 1개(~4시간 실측)만 하면 되므로 순차 버전(24h)보다 훨씬
-# 짧게 잡아도 된다 — 짧은 --time이 스케줄러 backfill에서 우선순위/여유 슬롯을 더 잘 찾는 경향이
-# 있어 유휴 시간대 노리는 전략과도 맞는다.
+# 2026-08-05: --time을 6h->24h로 늘렸다 — 실제로 이 스크립트가 fold 도중 6h 타임아웃으로
+# 끊기는 걸 확인(사용자 보고). fold 1개 실측이 예상(~4h)보다 오래 걸릴 수 있다는 뜻이라, 다른
+# M1/M2/M3/PMA array 스크립트도 전부 24h로 맞춰 안전 마진을 크게 가져간다.
 #
 # SS+AUG+DISP — EX/AUX는 RNA 브랜치가 없는 M1엔 대응 항목 없어 제외.
 #
 # 완료 후 집계(5개 다 끝난 걸 확인하고, 로그인 노드에서 인터넷 불필요):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model M1_SS_AUG_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model M1_SS_AUG_DISP
 #
 # 제출: sbatch scripts/train_m1_kfold_array_hpc.sh
 # 진행 확인: squeue -u $USER  (JobID_0 ~ JobID_4로 5줄, ST 컬럼이 R인지 PD인지로 실제 동시성 확인)
@@ -43,7 +43,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
 FOLD=$SLURM_ARRAY_TASK_ID
-log=".logs/train_tcga_seed42_M1_SS_AUG_DISP_kfold5_fold${FOLD}.log"
+log=".logs/train_tcga_seed84_M1_SS_AUG_DISP_kfold5_fold${FOLD}.log"
 
 echo "=== M1_SS_AUG_DISP fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
 python -u ./train.py --M1 --dataset tcga --external --seed 84 \

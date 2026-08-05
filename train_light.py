@@ -88,8 +88,10 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
     has_rna = hasattr(model, "rna_encoder")
     if is_m7:
         m7_margin_kwargs = {}
-        clinical_encoder = getattr(model, "clinical_encoder", None)  # film/cox_add엔 없음
-        if clinical_encoder is not None and getattr(clinical_encoder, "use_margin", False):
+        # 2026-08-05: use_margin은 이제 combine_mode 무관하게 model 자체에 있다(film/cox_add도
+        # margin 지원) — model.clinical_encoder(concat 전용, film/cox_add엔 없음)가 아니라
+        # model.use_margin을 직접 봐야 film/cox_add에서도 margin_ord가 전달된다.
+        if getattr(model, "use_margin", False):
             m7_margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         return model(
             p["age_years"].to(device, non_blocking=True),

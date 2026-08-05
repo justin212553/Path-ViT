@@ -32,7 +32,7 @@ export WANDB_MODE=offline
 # 기존 단일 실행 스크립트의 8보다 낮춤 - 5개가 동시에 8씩 쓰면 CPU 40개를 요구해 오히려
 # 컨텍스트 스위칭으로 느려진다).
 for fold in 0 1 2 3 4; do
-    python -u ./train.py --PMA --dataset tcga --external --seed 42 \
+    python -u ./train.py --PMA --dataset tcga --external --seed 84 \
         --rna-genes literature_fdr0.1_tcga_only \
         --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
         --tile-decode-workers 4 --cache-val-tiles --cache-external-tiles \

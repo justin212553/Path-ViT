@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
-#SBATCH --time=06:00:00
+#SBATCH --time=24:00:00
 #SBATCH --array=0-4
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/pma_kfold_array_%a.log
 
@@ -25,8 +25,11 @@
 #
 # PMA(clinical 포함, M4 슬롯) — EX+SS+AUX+AUG+DISP 전부.
 #
+# 2026-08-05: --time을 6h->24h로 늘렸다 — M1 array 작업이 fold 도중 6h 타임아웃으로 끊긴 걸
+# 확인(사용자 보고), array 스크립트 전부 안전 마진을 키운다. seed도 42->84로 변경.
+#
 # 완료 후 집계(5개 다 끝난 걸 확인하고, 로그인 노드에서 인터넷 불필요):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model PMA_EX_SS_AUX_AUG_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model PMA_EX_SS_AUX_AUG_DISP
 #
 # 제출: sbatch scripts/train_pma_kfold_array_hpc.sh
 # 진행 확인: squeue -u $USER  (JobID_0 ~ JobID_4로 5줄, ST 컬럼이 R인지 PD인지로 실제 동시성 확인)
@@ -40,12 +43,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
 FOLD=$SLURM_ARRAY_TASK_ID
-log=".logs/train_tcga_seed42_PMA_EX_SS_AUX_AUG_DISP_kfold5_fold${FOLD}.log"
+log=".logs/train_tcga_seed84_PMA_EX_SS_AUX_AUG_DISP_kfold5_fold${FOLD}.log"
 
 echo "=== PMA_EX_SS_AUX_AUG_DISP fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-python -u ./train.py --dataset tcga --seed 42 --PMA --rna-genes literature_1500 \
+python -u ./train.py --dataset tcga --seed 84 --PMA --rna-genes literature_1500 \
     --patch-keep-frac 0.8 --rna-aux-weight 1.0 --image --tile-augment --attn-dispersion \
     --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
     --fold "${FOLD}" --n-folds 5 \
-    --external --group-ts 0804pma_kfold5_array 2>&1 | tee "${log}"
+    --external --group-ts 0805pma_kfold5_array_seed84 2>&1 | tee "${log}"
 echo "=== PMA_EX_SS_AUX_AUG_DISP fold=${FOLD}/5 Complete: $(date) ==="
