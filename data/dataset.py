@@ -75,6 +75,12 @@ RNA_PATHS = {
     "tcga":  Path("data/rna_tcga.csv"),
     "cptac": Path("data/rna_cptac.csv"),
 }
+# data/compute_purist_subtype.py 산출물 — PurIST(Rashid et al. 2020) basal-like 확률 1차원.
+# 어떤 코호트에도 fit하지 않는 고정 계수 분류기라 --rna-genes purist에서만 사용.
+RNA_PURIST_PATHS = {
+    "tcga":  Path("data/rna_purist_tcga.csv"),
+    "cptac": Path("data/rna_purist_cptac.csv"),
+}
 COMMON_GENES_PATH         = Path("data/common_genes.csv")
 BAILEY_SUBTYPE_GENES_PATH  = Path("data/bailey_subtype_genes.tsv")
 MOFFITT_SUBTYPE_GENES_PATH = Path("data/moffitt_subtype_genes.tsv")
@@ -175,16 +181,21 @@ def literature_guided_gene_ids_fdr_threshold(cohort: str, q_threshold: float = 0
 
 
 def resolve_tcga_only_rna_genes(rna_genes_arg: str) -> list[str]:
-    """train.py/train_light.py --rna-genes "literature_{spec}_tcga_only" 문자열을 파싱해
+    """train.py/train_light.py --rna-genes "literature_{spec}_{cohort}_only" 문자열을 파싱해
     single-cohort 로더 중 맞는 쪽으로 dispatch한다 — spec이 정수면 top-N
     (literature_guided_gene_ids_single_cohort), "fdr{q}"면 FDR threshold
     (literature_guided_gene_ids_fdr_threshold). 이 파싱을 train.py/train_light.py 양쪽에
     각각 두면 하나만 고치고 다른 쪽을 놓치는 사고가 나기 쉬워 여기 한 곳에만 둔다.
+
+    2026-08-04: cohort를 "tcga"로 하드코딩했던 버그를 고쳤다 — "literature_fdr0.1_cptac_only"처럼
+    반대 코호트를 단일 코호트로 쓰는 문자열도 받아야 하므로, 문자열 끝에서 두 번째 토큰
+    ("_only" 바로 앞)을 실제 cohort로 파싱한다(함수명은 하위 호환을 위해 유지).
     """
-    spec = rna_genes_arg.split("_")[1]
+    parts = rna_genes_arg.split("_")
+    spec, cohort = parts[1], parts[-2]
     if spec.startswith("fdr"):
-        return literature_guided_gene_ids_fdr_threshold("tcga", float(spec[3:]))
-    return literature_guided_gene_ids_single_cohort("tcga", int(spec))
+        return literature_guided_gene_ids_fdr_threshold(cohort, float(spec[3:]))
+    return literature_guided_gene_ids_single_cohort(cohort, int(spec))
 
 
 def pathway_category_gene_ids() -> dict[str, list[str]]:
@@ -484,6 +495,7 @@ class WSISurvivalDataset(Dataset):
         feature_backbone: str = "resnet50",
         rna_gene_ids: list[str] | None = None,
         rna_pathway_categories: dict[str, list[str]] | None = None,
+        rna_purist: bool = False,
         restrict_case_ids: set[str] | None = None,
         one_slide_per_case: bool = False,
         exclude_normal_slides: bool = False,
@@ -512,6 +524,7 @@ class WSISurvivalDataset(Dataset):
         self.feature_filename_override = feature_filename_override
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
+        self.rna_purist       = rna_purist
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -536,7 +549,34 @@ class WSISurvivalDataset(Dataset):
                 clinical_df = pd.read_csv(CLINICAL_PATHS[name])[clinical_cols]
                 merged = merged.merge(clinical_df, on="case_id", how="inner")
 
-            if with_rna:
+            if with_rna and self.rna_purist and self.rna_gene_ids is not None:
+                # 하이브리드: PurIST 확률(1차원, 고정 계수) + 개별 유전자(z-score, 보통 TCGA/CPTAC
+                # single-cohort top-N) concat. purist 단독(chance 수준이었음)과 개별 유전자 다수
+                # (과적합 경향)의 절충 — case_id 기준 inner join으로 두 소스를 이어붙인다.
+                purist_df = pd.read_csv(RNA_PURIST_PATHS[name]).set_index("case_id")
+                rna_df    = pd.read_csv(RNA_PATHS[name]).set_index("case_id")
+                gene_cols = [c for c in rna_df.columns if c in set(self.rna_gene_ids)]
+                combined  = purist_df[["purist_basal_prob"]].join(rna_df[gene_cols], how="inner")
+                if self.rna_gene_cols is None:
+                    self.rna_gene_cols = list(combined.columns)
+                elif list(combined.columns) != self.rna_gene_cols:
+                    raise ValueError(
+                        f"[{name}] PurIST+유전자 하이브리드 컬럼이 다른 코호트와 다릅니다."
+                    )
+                rna_matrix = combined.to_numpy(dtype="float32")
+                self.rna_lookup.update(zip(combined.index, rna_matrix))
+                merged = merged.merge(combined.reset_index()[["case_id"]], on="case_id", how="inner")
+            elif with_rna and self.rna_purist:
+                # PurIST(data/compute_purist_subtype.py) basal-like 확률 1차원 — 개별 유전자
+                # 컬럼이 아니라 이미 계산된 단일 스코어라 아래 gene_cols/rna_matrix 분기와
+                # 완전히 별개 경로로 처리한다. rna_tcga.csv/rna_cptac.csv(z-scored literature
+                # 유전자 행렬)는 아예 읽지 않는다.
+                purist_df = pd.read_csv(RNA_PURIST_PATHS[name])
+                rna_matrix = purist_df[["purist_basal_prob"]].to_numpy(dtype="float32")
+                self.rna_gene_cols = ["purist_basal_prob"]
+                self.rna_lookup.update(zip(purist_df["case_id"], rna_matrix))
+                merged = merged.merge(purist_df[["case_id"]], on="case_id", how="inner")
+            elif with_rna:
                 rna_df = pd.read_csv(RNA_PATHS[name])
                 if self.rna_pathway_categories is not None:
                     # --rna-genes pathway8: 개별 유전자가 아니라 카테고리 평균 z-score를 쓴다 —

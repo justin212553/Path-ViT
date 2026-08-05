@@ -39,7 +39,7 @@ except ImportError:
 from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
-    resolve_tcga_only_rna_genes,
+    resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
 from models.clinical_encoder import age_stats_from_csv
@@ -202,17 +202,27 @@ def _parse_args() -> argparse.Namespace:
         "--rna-genes", type=str, default="subtype",
         choices=[
             "subtype", "literature_1000", "literature_1500", "literature_2000",
-            "literature_500_tcga_only", "literature_1500_tcga_only",
-            "literature_fdr0.1_tcga_only",
+            "literature_500_tcga_only", "literature_1000_tcga_only",
+            "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
+            "literature_fdr0.1_cptac_only", "purist", "purist_top20_tcga_only",
         ],
-        help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. train.py --rna-genes와 동일한 관례 "
+        help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
+             "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
+             "계수 분류기라 leakage 원천 차단, gene-selection 자체가 없어 표본 크기(n=91)에 "
+             "흔들리지 않음. train.py --rna-genes와 동일한 관례 "
              "(subtype 외 선택 시 wandb/checkpoint에 _EX 접미사 자동 부착). **주의**: literature_"
              "{1000,1500,2000}은 TCGA+CPTAC train split을 Stouffer로 결합해 뽑은 것이라 --dataset "
              "tcga --external처럼 반대 코호트를 external test로 쓰는 실행에는 leakage가 있다 "
              "(findings_backlog.md) — --dataset both 비교에만 쓸 것. literature_{500,1500}_tcga_only, "
              "literature_fdr0.1_tcga_only는 TCGA train split만 사용(CPTAC 미참조)한 leakage-free "
              "버전(뒤의 fdr0.1은 top-N 대신 BH-FDR q<0.1 통계적 컷오프, data/select_rnaseq_genes.py "
-             "--fdr-threshold) — --dataset tcga --external 전용(다른 조합이면 에러).",
+             "--fdr-threshold) — --dataset tcga --external 전용(다른 조합이면 에러). "
+             "literature_fdr0.1_cptac_only는 반대 방향(CPTAC train split만 사용, --dataset cptac "
+             "--external 전용) — CPTAC이 TCGA보다 train event 비율이 훨씬 높아(87명 중 70 events "
+             "vs TCGA 91명 중 50) 이 방향이 더 잘 되는지 비교하려는 용도. purist_top20_tcga_only: "
+             "purist(1차원, chance 수준이었음)와 literature_500_tcga_only 계열(과적합 경향)의 "
+             "절충 — PurIST 확률 1차원 + TCGA train split Cox-score 상위 20개 개별 유전자를 "
+             "concat(총 21차원). --dataset tcga --external 전용.",
     )
     parser.add_argument(
         "--lr", type=float, default=None,
@@ -330,6 +340,15 @@ def main():
             "CPTAC 전체를 external test)에서만 의미가 있습니다 — TCGA train split만으로 뽑힌 "
             "유전자셋이라 다른 조합에서 쓰면 코호트 불일치로 결과 해석이 잘못됩니다."
         )
+    if args.rna_genes.endswith("_cptac_only") and not (args.dataset == "cptac" and args.external):
+        # 위 _tcga_only 가드의 반대 방향 버전 — 2026-08-04 추가. CPTAC train split만으로 뽑힌
+        # 유전자셋이므로 --dataset cptac --external(CPTAC로 학습 -> TCGA 전체 external test)
+        # 조합에서만 leakage-free 전제가 성립한다.
+        raise ValueError(
+            f"--rna-genes {args.rna_genes}는 --dataset cptac --external(CPTAC로 학습 -> "
+            "TCGA 전체를 external test)에서만 의미가 있습니다 — CPTAC train split만으로 뽑힌 "
+            "유전자셋이라 다른 조합에서 쓰면 코호트 불일치로 결과 해석이 잘못됩니다."
+        )
 
     with_clinical = args.M5 or args.M7
     with_rna = args.M6 or args.M6X or args.M7
@@ -347,8 +366,18 @@ def main():
     else:
         age_mean, age_std = None, None
 
-    if with_rna:
-        if args.rna_genes.endswith("_tcga_only"):
+    rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
+    if with_rna and args.rna_genes == "purist_top20_tcga_only":
+        # 하이브리드: PurIST 확률(1차원, chance 수준이었음) + TCGA train split Cox-score 상위
+        # 20개 개별 유전자(leakage-free) concat. data/dataset.py가 rna_purist=True와
+        # rna_gene_ids가 동시에 주어지면 두 feature를 이어붙이도록 처리한다.
+        rna_gene_ids = literature_guided_gene_ids_single_cohort("tcga", 20)
+        rna_input_dim = 1 + len(rna_gene_ids)
+    elif with_rna and rna_purist:
+        rna_gene_ids = None
+        rna_input_dim = 1
+    elif with_rna:
+        if args.rna_genes.endswith("_tcga_only") or args.rna_genes.endswith("_cptac_only"):
             # 이 분기를 먼저 안 걸러 아래 일반 분기로 흘려보내면 leaky한 both-결합
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서 single-cohort/FDR
             # 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes, train.py와 동일한 관례).
@@ -363,10 +392,23 @@ def main():
         rna_gene_ids, rna_input_dim = None, None
 
     model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7"
-    if args.rna_genes.endswith("_tcga_only"):
+    if args.rna_genes == "purist_top20_tcga_only":
+        # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
+        # 파일명이 겹치면 안 되므로 별도 접미사.
+        model_prefix += "_D20"
+    elif rna_purist:
+        # _D = deterministic RNA pool(PurIST) — gene-selection 없이 고정 계수 분류기 1차원.
+        # _EXT{n}/_EX(gene-selection 기반)와 계보가 완전히 다르므로 별도 접미사로 구분한다.
+        model_prefix += "_D"
+    elif args.rna_genes.endswith("_tcga_only"):
         # train.py와 동일한 관례 — 기존 _EX(leaky, both-결합)와 절대 섞이면 안 된다. N까지
         # 태그에 넣어 EXT500/EXT1500처럼 서로 다른 크기도 섞이지 않게 한다.
         model_prefix += f"_EXT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes.endswith("_cptac_only"):
+        # _tcga_only와 같은 spec(예: fdr0.1)이어도 반대 코호트에서 뽑힌 다른 유전자셋이라
+        # CPTAC 접미사로 명시적으로 구분한다 — 안 붙이면 "M7_EXTfdr0.1"이 tcga_only 결과와
+        # 파일명이 겹쳐 checkpoint/kfold_preds가 서로 덮어써진다.
+        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes != "subtype":
         model_prefix += "_EX"
     if args.lr is not None and args.lr != 1e-3:
@@ -439,7 +481,7 @@ def main():
         print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
 
     ds_kwargs = dict(with_clinical=with_clinical, with_rna=with_rna, rna_gene_ids=rna_gene_ids,
-                      restrict_case_ids=restrict_case_ids)
+                      rna_purist=rna_purist, restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)

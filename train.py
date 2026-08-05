@@ -438,8 +438,9 @@ def _parse_args() -> argparse.Namespace:
         "--rna-genes", type=str, default="subtype",
         choices=[
             "subtype", "literature_1000", "literature_1500", "literature_2000", "pathway8",
-            "literature_500_tcga_only", "literature_1500_tcga_only",
-            "literature_fdr0.1_tcga_only",
+            "literature_500_tcga_only", "literature_1000_tcga_only",
+            "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
+            "literature_fdr0.1_cptac_only",
         ],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
@@ -1074,6 +1075,13 @@ def main():
             "split만으로 뽑혀 다른 조합(특히 --dataset cptac이나 --dataset both)에서 쓰면 "
             "코호트 불일치로 결과 해석이 잘못됩니다."
         )
+    if args.rna_genes.endswith("_cptac_only") and not (args.dataset == "cptac" and args.external):
+        # 위 _tcga_only 가드의 반대 방향 버전(2026-08-04, train_light.py와 동일하게 추가).
+        raise ValueError(
+            f"--rna-genes {args.rna_genes}는 --dataset cptac --external(CPTAC로 학습 -> "
+            "TCGA 전체를 external test)에서만 의미가 있습니다 — 이 유전자셋은 CPTAC train "
+            "split만으로 뽑혀 다른 조합에서 쓰면 코호트 불일치로 결과 해석이 잘못됩니다."
+        )
 
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
@@ -1119,7 +1127,7 @@ def main():
             rna_pathway_categories = pathway_category_gene_ids()
             rna_gene_ids  = None
             rna_input_dim = len(rna_pathway_categories)
-        elif args.rna_genes.endswith("_tcga_only"):
+        elif args.rna_genes.endswith("_tcga_only") or args.rna_genes.endswith("_cptac_only"):
             # 이 분기를 먼저 안 걸러 아래 일반 분기로 흘려보내면 leaky한 both-결합
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서
             # single-cohort/FDR 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes).
@@ -1185,6 +1193,10 @@ def main():
         # leaky 버전과 leakage-free 버전 결과를 구분할 수 없게 된다. N까지 태그에 넣어
         # EXT500/EXT1500처럼 서로 다른 크기도 섞이지 않게 한다.
         model_prefix += f"_EXT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes.endswith("_cptac_only"):
+        # _tcga_only의 반대 방향 — 같은 spec(예: fdr0.1)이어도 반대 코호트에서 뽑힌 다른
+        # 유전자셋이라 CPTAC 접미사로 명시적으로 구분한다(train_light.py와 동일한 관례).
+        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes != "subtype":
         # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
         # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
@@ -1600,6 +1612,9 @@ def main():
     elif args.rna_genes.endswith("_tcga_only"):
         # model_prefix와 동일한 이유로 _EX(leaky, both-결합)와 절대 섞이면 안 됨.
         tag += f"_EXT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes.endswith("_cptac_only"):
+        # model_prefix와 동일한 이유로 tcga_only 버전과도 섞이면 안 됨.
+        tag += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes != "subtype":
         # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
         # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.
