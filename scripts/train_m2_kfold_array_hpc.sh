@@ -31,7 +31,7 @@ FOLD=$SLURM_ARRAY_TASK_ID
 log=".logs/train_tcga_seed42_M2_SS_AUG_DISP_kfold5_fold${FOLD}.log"
 
 echo "=== M2_SS_AUG_DISP fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-python -u ./train.py --M2 --dataset tcga --external --seed 42 \
+python -u ./train.py --M2 --dataset tcga --external --seed 84 \
     --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
     --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
     --fold "${FOLD}" --n-folds 5 --group-ts 0804m2_kfold5_array 2>&1 | tee "${log}"

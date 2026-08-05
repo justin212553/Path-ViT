@@ -43,7 +43,7 @@ Folds=(0 1 2 3 4)
 for fold in "${Folds[@]}"; do
     log=".logs/train_tcga_seed42_M1_SS_AUG_DISP_kfold5_fold${fold}.log"
     echo "=== M1_SS_AUG_DISP fold=${fold}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-    python -u ./train.py --M1 --dataset tcga --external --seed 42 \
+    python -u ./train.py --M1 --dataset tcga --external --seed 84 \
         --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion \
         --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
         --fold "${fold}" --n-folds 5 --group-ts 0804m1_kfold5_seq 2>&1 | tee "${log}"
