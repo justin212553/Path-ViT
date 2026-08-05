@@ -45,7 +45,7 @@ except ImportError:
 from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
-    resolve_tcga_only_rna_genes, pathway_category_gene_ids,
+    resolve_tcga_only_rna_genes, pathway_category_gene_ids, literature_guided_gene_ids_intersection,
 )
 from data.patch_utils import (
     FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
@@ -57,7 +57,7 @@ from models import (
 )
 from models.rna_predictor import RNAPredictionHead
 from models.stage_predictor import StagePredictionHead
-from models.clinical_encoder import age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df
+from models.clinical_encoder import age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df, margin_stats_from_df
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
@@ -106,6 +106,15 @@ def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] |
     return {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
 
 
+def _margin_ord_from_patient(patient_slides, device) -> torch.Tensor | None:
+    """_stage_ord_from_patient과 동일한 관례의 margin(residual_disease, --clinical-margin) 버전 —
+    with_margin=True로 로드된 데이터셋이 아니면 None."""
+    p = patient_slides[0]
+    if "margin_ord" not in p:
+        return None
+    return p["margin_ord"].to(device, non_blocking=True)
+
+
 def _patient_risk(
     model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0,
     shuffle_patches: bool = False, tile_cache: dict | None = None,
@@ -145,8 +154,11 @@ def _patient_risk(
             age_years = p["age_years"].to(device, non_blocking=True)
             sex_idx   = p["sex_idx"].to(device, non_blocking=True)
             stage_kwargs = {}
-            if getattr(model, "clinical_encoder", None) is not None and model.clinical_encoder.use_staging:
+            _clinical_enc_m5 = getattr(model, "clinical_encoder", None)
+            if _clinical_enc_m5 is not None and _clinical_enc_m5.use_staging:
                 stage_kwargs["stage_ord"] = _stage_ord_from_patient(patient_slides, device)
+            if _clinical_enc_m5 is not None and getattr(_clinical_enc_m5, "use_margin", False):
+                stage_kwargs["margin_ord"] = _margin_ord_from_patient(patient_slides, device)
             return model(age_years, sex_idx, **stage_kwargs), None, None
 
     with amp_ctx:
@@ -228,8 +240,12 @@ def _patient_risk(
                 _stage_ord_from_patient(patient_slides, device)
                 if _clinical_enc is not None and _clinical_enc.use_staging else None
             )
+            margin_ord = (
+                _margin_ord_from_patient(patient_slides, device)
+                if _clinical_enc is not None and getattr(_clinical_enc, "use_margin", False) else None
+            )
             patient_embed = model.combine_with_clinical_rna(
-                patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord,
+                patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord, margin_ord=margin_ord,
                 spatial_feat=patient_spatial_feat,
             )  # (3D,) (+ spatial_feat_dim, models/spatial_features.py 켜졌을 때만)
         elif hasattr(model, "combine_with_clinical"):
@@ -440,7 +456,7 @@ def _parse_args() -> argparse.Namespace:
             "subtype", "literature_1000", "literature_1500", "literature_2000", "pathway8",
             "literature_500_tcga_only", "literature_1000_tcga_only",
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
-            "literature_fdr0.1_cptac_only",
+            "literature_fdr0.1_cptac_only", "literature_1500_intersection",
         ],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
@@ -544,6 +560,19 @@ def _parse_args() -> argparse.Namespace:
              "에서만 사용 가능. 기본은 미사용(age/sex만) - 'age/sex만 쓰라'는 기존 지시가 있어 "
              "두 버전(있음/없음)을 다 비교할 수 있게 별도 플래그로 뒀다. 켜면 wandb/checkpoint에 "
              "_STG 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--clinical-margin", action="store_true",
+        help="train_light.py --clinical-margin과 동일 — ClinicalEncoder 입력에 절제연 상태"
+             "(residual_disease: R0=완전절제 < R1 < R2=잔존종양)를 추가한다. --clinical-staging"
+             "(T/N/M/grade)과 별개 플래그 — 함께 켤 수도 있다. --M2/--M4/--M4A/--M4B/--PM4/"
+             "--PMA/--M4A_FF/--M2_FF/--M5에서 사용 가능. 켜면 wandb/checkpoint에 _R 접미사가 "
+             "자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--no-age-sex", action="store_true",
+        help="train_light.py --no-age-sex와 동일 — --clinical-margin과 함께 사용, age/sex를 빼고 "
+             "margin(/staging)만 입력으로 쓴다. 켜면 model_prefix에 _ONLY가 추가로 붙는다.",
     )
     parser.add_argument(
         "--stage-aux-weight", type=float, default=0.0,
@@ -1116,6 +1145,20 @@ def main():
     else:
         stage_stats = None
 
+    # [Margin] --clinical-margin(ClinicalEncoder 입력) — with_staging과 동일한 관례.
+    if args.clinical_margin:
+        import pandas as pd
+        if args.dataset == "both":
+            margin_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"])[["residual_disease"]],
+                pd.read_csv(CLINICAL_PATHS["cptac"])[["residual_disease"]],
+            ])
+        else:
+            margin_df = pd.read_csv(CLINICAL_PATHS[args.dataset])[["residual_disease"]]
+        margin_stats = margin_stats_from_df(margin_df)
+    else:
+        margin_stats = None
+
     # [RNA] --M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X 시 RNAEncoder 입력 유전자셋을 --rna-genes로
     # 고른다 — 기본(subtype)은 Bailey/Moffitt subtype 분류용 ~340개, literature_{1000,1500,2000}은
     # data/select_rnaseq_genes.py 산출물(생존 예측에 직접 최적화된 유전자셋). WSISurvivalDataset에
@@ -1132,6 +1175,9 @@ def main():
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서
             # single-cohort/FDR 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes).
             rna_gene_ids  = resolve_tcga_only_rna_genes(args.rna_genes)
+            rna_input_dim = len(rna_gene_ids)
+        elif args.rna_genes.endswith("_intersection"):
+            rna_gene_ids  = literature_guided_gene_ids_intersection(int(args.rna_genes.split("_")[1]))
             rna_input_dim = len(rna_gene_ids)
         else:
             rna_gene_ids = (
@@ -1197,6 +1243,9 @@ def main():
         # _tcga_only의 반대 방향 — 같은 spec(예: fdr0.1)이어도 반대 코호트에서 뽑힌 다른
         # 유전자셋이라 CPTAC 접미사로 명시적으로 구분한다(train_light.py와 동일한 관례).
         model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
+    elif args.rna_genes.endswith("_intersection"):
+        # _INT{n} = TCGA-only/CPTAC-only 순위 교집합(양방향 leakage-free) 사용 표시.
+        model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
         # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
@@ -1215,6 +1264,11 @@ def main():
         # _STG = ClinicalEncoder 입력에 병기(T/N/M)+grade 추가 사용 표시 — 있음/없음 버전을
         # 둘 다 비교할 수 있게 독립 접미사로 뒀다.
         model_prefix += "_STG"
+    if args.clinical_margin:
+        # _R = ClinicalEncoder 입력에 절제연 상태(margin) 추가 사용 표시(train_light.py와 동일 관례).
+        model_prefix += "_R"
+        if args.no_age_sex:
+            model_prefix += "_ONLY"
     if args.exclude_normal_slides:
         # _NONORMAL = 확인된 정상 조직 슬라이드만 제외(케이스당 나머지는 전부 유지) 표시.
         model_prefix += "_NONORMAL"
@@ -1337,8 +1391,8 @@ def main():
     with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
     with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
     ds_kwargs = dict(
-        with_clinical=with_clinical, with_staging=with_staging, with_rna=with_rna,
-        feature_backbone=args.backbone,
+        with_clinical=with_clinical, with_staging=with_staging, with_margin=args.clinical_margin,
+        with_rna=with_rna, feature_backbone=args.backbone,
         rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
@@ -1447,6 +1501,11 @@ def main():
     # RNAOnlyExtend : RNAOnly와 동일 유전자 입력, 인코더 폭만 레퍼런스 사양(G->256->256)으로
     #                 확장 (--M6X)
     stage_kwargs = dict(use_staging=args.clinical_staging, stage_stats=stage_stats)
+    # margin_kwargs는 use_margin을 지원하는 ViT_PMA/ClinicalOnly에만 명시적으로 넣는다 — stage_kwargs처럼
+    # 전 모델(M4/M4A/M4B/PM4/M4A_FF/M2_FF/PMA_FF)에 **로 뿌리면 use_margin 파라미터가 없는 클래스에서
+    # TypeError가 난다.
+    margin_kwargs = dict(use_margin=args.clinical_margin, margin_stats=margin_stats,
+                          use_age_sex=not args.no_age_sex)
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
     if args.M4:
@@ -1466,7 +1525,7 @@ def main():
                          precomputed=cfg.data.precomputed, backbone=args.backbone,
                          rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
                          rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
-                         **stage_kwargs).to(device)
+                         **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                             precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -1477,7 +1536,8 @@ def main():
         model = ViT_PMA_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                             precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M5:
-        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std, **stage_kwargs).to(device)
+        model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
+                              **stage_kwargs, **margin_kwargs).to(device)
     elif args.M6:
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
@@ -1615,6 +1675,8 @@ def main():
     elif args.rna_genes.endswith("_cptac_only"):
         # model_prefix와 동일한 이유로 tcga_only 버전과도 섞이면 안 됨.
         tag += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
+    elif args.rna_genes.endswith("_intersection"):
+        tag += f"_INT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
         # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.
@@ -1627,6 +1689,10 @@ def main():
         tag += "_AUX2"
     if args.clinical_staging:
         tag += "_STG"
+    if args.clinical_margin:
+        tag += "_R"
+        if args.no_age_sex:
+            tag += "_ONLY"
     if args.pretrained_wsi_trunk:
         # 이게 없으면 같은 레시피를 --pretrained-wsi-trunk 유무만 다르게 동시에 돌릴 때
         # 두 프로세스가 같은 checkpoint 파일을 공유해(경합 상태) best checkpoint를 서로

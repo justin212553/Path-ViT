@@ -272,6 +272,77 @@ def build_fdr_threshold_ranking(
     return selected.sort_values("rank").reset_index(drop=True)
 
 
+def build_intersection_ranking(target_n: int) -> pd.DataFrame:
+    """
+    2026-08-04(2차): TCGA-only/CPTAC-only 순위(각각 --single-cohort로 이미 산출된
+    data/rna_gene_selection_{tcga,cptac}only/gene_cox_ranking.csv)를 각자의 라벨로만 독립적으로
+    계산한 뒤, 두 순위의 상위 유전자 집합이 겹치는 부분만 남긴다 — "두 코호트가 각자 자기 라벨로
+    봤을 때 독립적으로 동의하는" 유전자만 쓰므로 어느 방향(TCGA->CPTAC/CPTAC->TCGA)에 써도
+    leakage가 없고, 한쪽 코호트의 작은 표본에서 우연히 튄 유전자가 걸러지길 기대하는 접근이다
+    (Stouffer 결합처럼 z-score를 합치지 않고, 순위 집합의 교집합만 본다는 점이 다르다).
+
+    target_n개를 채우기 위해 필요한 최소 깊이(각 코호트 상위 몇 개씩 볼지)를 자동으로 찾는다 —
+    실측상 두 순위가 잘 안 겹쳐서(top-1500끼리 겹치는 건 150개 미만) target_n을 채우려면 각
+    코호트 top-5000 이상까지 내려가야 한다. 교집합 안에서는 두 코호트 p-value의 합(작을수록
+    상위)으로 다시 정렬해 상위 target_n개만 최종 채택한다.
+    """
+    tcga_path = Path("data/rna_gene_selection_tcgaonly/gene_cox_ranking.csv")
+    cptac_path = Path("data/rna_gene_selection_cptaconly/gene_cox_ranking.csv")
+    lit_path = Path("data/rna_gene_selection_tcgaonly/literature_curated_genes.csv")
+    if not tcga_path.exists() or not cptac_path.exists():
+        raise FileNotFoundError(
+            f"먼저 실행: python -m data.select_rnaseq_genes --single-cohort tcga && "
+            f"python -m data.select_rnaseq_genes --single-cohort cptac"
+        )
+    tcga = pd.read_csv(tcga_path).sort_values("tcga_cox_p").reset_index(drop=True)
+    cptac = pd.read_csv(cptac_path).sort_values("cptac_cox_p").reset_index(drop=True)
+
+    # 2026-08-05: top-N/fdr 방식(build_literature_guided_ranking)과 동일한 관례로, 문헌 curated
+    # 유전자(163개)는 두 코호트 순위가 우연히 겹치는지와 무관하게 항상 먼저 포함시킨다 — 처음
+    # 버전은 이 단계가 빠져 있어서 163개 중 23개만 우연히 들어가 있었다(사용자 지적으로 발견).
+    curated_ids: list[str] = []
+    if lit_path.exists():
+        lit = pd.read_csv(lit_path)
+        curated_ids = lit.loc[lit["available"], "gene_id"].dropna().drop_duplicates().tolist()
+    curated_set = set(curated_ids)
+    n_fill = max(target_n - len(curated_ids), 0)
+
+    depth = max(target_n, len(curated_ids))
+    while True:
+        depth = min(depth * 2, len(tcga))
+        inter = (set(tcga.head(depth)["gene_id"]) & set(cptac.head(depth)["gene_id"])) - curated_set
+        if len(inter) >= n_fill or depth >= len(tcga):
+            break
+
+    combined = (
+        tcga[["gene_id", "tcga_cox_p"]].merge(cptac[["gene_id", "cptac_cox_p"]], on="gene_id")
+    )
+    combined = combined[combined["gene_id"].isin(inter)].copy()
+    combined["combined_p_sum"] = combined["tcga_cox_p"] + combined["cptac_cox_p"]
+    combined = combined.sort_values("combined_p_sum").reset_index(drop=True)
+    fill_ids = combined.head(n_fill)["gene_id"].tolist()
+
+    ordered_ids = curated_ids + fill_ids
+    lookup = combined.set_index("gene_id")[["tcga_cox_p", "cptac_cox_p"]].to_dict(orient="index")
+    # curated 유전자는 교집합 계산(combined)에 아예 안 걸렸을 수도 있어(자기 코호트 상위권이
+    # 아니었던 경우) tcga/cptac 원본에서 개별 p-value를 따로 채운다.
+    tcga_p = tcga.set_index("gene_id")["tcga_cox_p"].to_dict()
+    cptac_p = cptac.set_index("gene_id")["cptac_cox_p"].to_dict()
+    rows = []
+    for gid in ordered_ids:
+        info = lookup.get(gid, {})
+        rows.append({
+            "gene_id": gid,
+            "tcga_cox_p": info.get("tcga_cox_p", tcga_p.get(gid)),
+            "cptac_cox_p": info.get("cptac_cox_p", cptac_p.get(gid)),
+            "is_literature_curated": gid in curated_set,
+        })
+    selected = pd.DataFrame(rows)
+    selected.insert(0, "rank", np.arange(1, len(selected) + 1))
+    selected.attrs["depth_used"] = depth
+    return selected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n-genes", nargs="+", type=int, default=[1000, 1500, 2000])
@@ -283,6 +354,13 @@ def main():
              "기존 both-결합 산출물(data/rna_gene_selection/)과 분리된다.",
     )
     parser.add_argument(
+        "--intersection", action="store_true",
+        help="TCGA-only/CPTAC-only 순위(둘 다 미리 --single-cohort로 산출돼 있어야 함)의 교집합만 "
+             "쓴다(build_intersection_ranking 참조) — 두 코호트가 독립적으로 동의하는 유전자만 "
+             "남기는 leakage-free 대안. --n-genes(단일 값)만큼 채택, 출력은 "
+             "data/rna_gene_selection_intersection/selected_genes_top_{n}.csv.",
+    )
+    parser.add_argument(
         "--fdr-threshold", type=float, default=None,
         help="주어지면 --n-genes(임의의 고정 개수) 대신, BH-FDR q < 이 값을 만족하는 유전자만 "
              "고른다(문헌 curated 163개는 항상 포함). raw p-value를 그대로 threshold로 쓰면 "
@@ -291,6 +369,22 @@ def main():
              "달라진다 — 출력 파일명 selected_genes_fdr{threshold}.csv.",
     )
     args = parser.parse_args()
+
+    if args.intersection:
+        if len(args.n_genes) != 1:
+            raise ValueError("--intersection은 --n-genes를 하나만 받습니다(예: --n-genes 1500).")
+        target_n = args.n_genes[0]
+        print(f"TCGA-only/CPTAC-only 순위 교집합 계산 중 (목표 {target_n}개)...")
+        selected = build_intersection_ranking(target_n)
+        out_dir = Path("data/rna_gene_selection_intersection")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"selected_genes_top_{target_n}.csv"
+        selected[["rank", "gene_id", "tcga_cox_p", "cptac_cox_p", "is_literature_curated"]].to_csv(out_path, index=False)
+        n_curated_in_sel = int(selected["is_literature_curated"].sum())
+        print(f"  -> {out_path} ({len(selected)}개, 문헌 curated {n_curated_in_sel}개 + "
+              f"교집합 {len(selected) - n_curated_in_sel}개, 깊이 top-"
+              f"{selected.attrs.get('depth_used', '?')} each에서 교집합 확보)")
+        return
 
     cfg = DataConfig()
     out_dir = Path(f"data/rna_gene_selection_{args.single_cohort}only") if args.single_cohort else OUT_DIR

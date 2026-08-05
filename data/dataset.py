@@ -180,6 +180,23 @@ def literature_guided_gene_ids_fdr_threshold(cohort: str, q_threshold: float = 0
     return sorted(pd.read_csv(path)["gene_id"].tolist())
 
 
+@lru_cache(maxsize=None)
+def literature_guided_gene_ids_intersection(top_n: int = 1500) -> list[str]:
+    """
+    2026-08-05: data/select_rnaseq_genes.py --intersection 산출물 로더 — TCGA-only 순위와
+    CPTAC-only 순위(각자 자기 코호트 라벨만으로 독립 계산)가 겹치는 유전자만 쓴다. 방향
+    상관없이(TCGA->CPTAC, CPTAC->TCGA 둘 다) leakage 없이 쓸 수 있다 — 두 순위 모두 반대
+    코호트 라벨을 전혀 참조하지 않았기 때문이다(literature_guided_gene_ids_single_cohort와
+    달리 --dataset tcga/cptac 어느 쪽으로 학습해도 동일 리스트 사용 가능).
+    """
+    path = Path(f"data/rna_gene_selection_intersection/selected_genes_top_{top_n}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes --intersection --n-genes {top_n}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
 def resolve_tcga_only_rna_genes(rna_genes_arg: str) -> list[str]:
     """train.py/train_light.py --rna-genes "literature_{spec}_{cohort}_only" 문자열을 파싱해
     single-cohort 로더 중 맞는 쪽으로 dispatch한다 — spec이 정수면 top-N

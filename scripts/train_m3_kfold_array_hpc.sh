@@ -14,8 +14,15 @@
 # race condition 픽스 반영됨(data/patch_utils.py) — 병렬로 돌려도 안전.
 # M3(WSI+RNA, clinical 제외, ViT_PMA --no-clinical) — RNA가 있으니 EX+SS+AUX+AUG+DISP 전부.
 #
+# 2026-08-05: --rna-genes literature_1500(leaky, TCGA+CPTAC 둘 다 결합해 뽑은 both-결합
+# 유전자셋) -> literature_1500_intersection으로 교체. TCGA-only/CPTAC-only 순위(각자 자기
+# 코호트 라벨만으로 독립 계산)가 겹치는 유전자만 쓰는 leakage-free 대안(data/
+# select_rnaseq_genes.py --intersection, 문헌 curated 163개 + 교집합 1337개 = 1500개) —
+# M6/M7에서 fdr0.1(leakage-free 단일 코호트 순위)보다 external이 더 잘 나온 걸 확인한 뒤
+# M3(WSI+RNA)에도 같은 방식을 적용해본다.
+#
 # 완료 후 집계(model_prefix에 --no-clinical의 _NOCLINICAL 태그가 들어간다는 점 주의):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP
+#   python scripts/summarize_kfold.py --dataset tcga --seed 42 --n-folds 5 --model PMA_INT1500_SS_AUX_AUG_NOCLINICAL_DISP
 #
 # 제출: sbatch scripts/train_m3_kfold_array_hpc.sh
 
@@ -28,11 +35,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
 FOLD=$SLURM_ARRAY_TASK_ID
-log=".logs/train_tcga_seed42_PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP_kfold5_fold${FOLD}.log"
+log=".logs/train_tcga_seed42_PMA_INT1500_SS_AUX_AUG_NOCLINICAL_DISP_kfold5_fold${FOLD}.log"
 
-echo "=== M3(PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP) fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-python -u ./train.py --PMA --no-clinical --rna-genes literature_1500 --dataset tcga --external --seed 42 \
+echo "=== M3(PMA_INT1500_SS_AUX_AUG_NOCLINICAL_DISP) fold=${FOLD}/5 Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
+python -u ./train.py --PMA --no-clinical --rna-genes literature_1500_intersection --dataset tcga --external --seed 42 \
     --tile-augment --image --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
     --tile-decode-workers 8 --cache-val-tiles --cache-external-tiles \
-    --fold "${FOLD}" --n-folds 5 --group-ts 0804m3_kfold5_array 2>&1 | tee "${log}"
-echo "=== M3(PMA_EX_SS_AUX_AUG_NOCLINICAL_DISP) fold=${FOLD}/5 Complete: $(date) ==="
+    --fold "${FOLD}" --n-folds 5 --group-ts 0805m3_int1500_kfold5_array 2>&1 | tee "${log}"
+echo "=== M3(PMA_INT1500_SS_AUX_AUG_NOCLINICAL_DISP) fold=${FOLD}/5 Complete: $(date) ==="

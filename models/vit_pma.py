@@ -53,6 +53,9 @@ class ViT_PMA(ViT_M1):
         clinical_dim: int | None = None,
         rna_gate_only: bool = False,
         use_clinical: bool = True,
+        use_margin: bool = False,
+        margin_stats: tuple[float, float] | None = None,
+        use_age_sex: bool = True,
     ):
         super().__init__(cfg, precomputed, backbone)
         rna_dim = rna_dim or cfg.embed_dim
@@ -69,7 +72,8 @@ class ViT_PMA(ViT_M1):
 
         if self.use_clinical:
             self.clinical_encoder = ClinicalEncoder(
-                clinical_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+                clinical_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
+                use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
             )
         self.rna_encoder = RNAEncoder(rna_input_dim, rna_dim, dropout=cfg.dropout)
         # 2026-07-23: 학습형 spatial attention(kNN/hybrid) 전부가 pre-augment에서 baseline을
@@ -142,16 +146,19 @@ class ViT_PMA(ViT_M1):
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
+        margin_ord: torch.Tensor | None = None,  # self.clinical_encoder.use_margin=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,  # (spatial_feat_dim,) — 환자 단위 평균, models/spatial_features.py
     ) -> torch.Tensor:
-        stage_kwargs = {}
+        clinical_kwargs = {}
         if stage_ord is not None:
-            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+            clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        if margin_ord is not None:
+            clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
         z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
         parts = [z_wsi]
         if self.use_clinical:
             z_clinical = self.clinical_encoder(
-                age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+                age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
             ).squeeze(0)  # (D,)
             parts.append(z_clinical)
         if not self.rna_gate_only:

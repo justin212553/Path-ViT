@@ -40,6 +40,7 @@ from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
+    literature_guided_gene_ids_intersection,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
 from models.clinical_encoder import age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df
@@ -86,10 +87,15 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
     is_m7 = isinstance(model, ClinicalRNAOnly)
     has_rna = hasattr(model, "rna_encoder")
     if is_m7:
+        m7_margin_kwargs = {}
+        clinical_encoder = getattr(model, "clinical_encoder", None)  # film/cox_add엔 없음
+        if clinical_encoder is not None and getattr(clinical_encoder, "use_margin", False):
+            m7_margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         return model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
             p["rna"].to(device, non_blocking=True),
+            **m7_margin_kwargs,
         )
     if has_rna:
         return model(p["rna"].to(device, non_blocking=True))
@@ -209,6 +215,7 @@ def _parse_args() -> argparse.Namespace:
             "literature_500_tcga_only", "literature_1000_tcga_only",
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
             "literature_fdr0.1_cptac_only", "purist", "purist_top20_tcga_only",
+            "literature_1500_intersection",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -226,7 +233,11 @@ def _parse_args() -> argparse.Namespace:
              "vs TCGA 91명 중 50) 이 방향이 더 잘 되는지 비교하려는 용도. purist_top20_tcga_only: "
              "purist(1차원, chance 수준이었음)와 literature_500_tcga_only 계열(과적합 경향)의 "
              "절충 — PurIST 확률 1차원 + TCGA train split Cox-score 상위 20개 개별 유전자를 "
-             "concat(총 21차원). --dataset tcga --external 전용.",
+             "concat(총 21차원). --dataset tcga --external 전용. literature_1500_intersection: "
+             "TCGA-only 순위와 CPTAC-only 순위가 독립적으로 겹치는 유전자만(data/"
+             "select_rnaseq_genes.py --intersection) — 실측상 top-1500끼리는 10%도 안 겹쳐서 "
+             "top-6000 each까지 내려가야 1500개가 채워짐. 양쪽 라벨을 각자 안에서만 써서 "
+             "방향 상관없이(--dataset tcga/cptac 둘 다) leakage 없이 사용 가능.",
     )
     parser.add_argument(
         "--lr", type=float, default=None,
@@ -264,33 +275,31 @@ def _parse_args() -> argparse.Namespace:
     model_group.add_argument("--M7", action="store_true", help="ClinicalRNAOnly (age/sex + RNA-seq).")
     parser.add_argument(
         "--clinical-margin", action="store_true",
-        help="--M5 전용(M5_R). age/sex에 절제연 상태(residual_disease: R0=완전절제 < R1 < "
-             "R2=잔존종양)를 추가한다(data/extract_rna_clinical.py 2026-08-04 추가 필드). "
-             "TCGA/CPTAC 각각 단독 Cox 회귀로 개별 유의(HR≈1.6, p=0.04/0.01) — age(코호트 간 "
-             "방향 불일치)나 sex(개별 코호트 비유의)보다 신뢰도 높은 clinical 신호라 M5가 "
-             "노이즈 수준(null c-index 대비 <1σ)을 벗어나는지 확인하는 ablation. 켜면 wandb/"
-             "checkpoint에 _R 접미사가 자동으로 붙는다(model_prefix=M5_R).",
+        help="--M5/--M7 공통(M5_R/M7_R, M7은 --combine-mode concat 전용). age/sex에 절제연 "
+             "상태(residual_disease: R0=완전절제 < R1 < R2=잔존종양)를 추가한다(data/"
+             "extract_rna_clinical.py 2026-08-04 추가 필드). TCGA/CPTAC 각각 단독 Cox 회귀로 "
+             "개별 유의(HR≈1.6, p=0.04/0.01) — age(코호트 간 방향 불일치)나 sex(개별 코호트 "
+             "비유의)보다 신뢰도 높은 clinical 신호라 M5가 노이즈 수준(null c-index 대비 <1σ)을 "
+             "벗어나는지 확인하는 ablation. 켜면 wandb/checkpoint에 _R 접미사가 자동으로 "
+             "붙는다(예: M5_R, M7_EXTfdr0.1_R).",
     )
     parser.add_argument(
         "--no-age-sex", action="store_true",
-        help="--clinical-margin과 함께 사용(M5_R_ONLY). age/sex를 아예 빼고 margin만 입력으로 "
-             "쓴다 — age는 TCGA(HR=1.20/10y)와 CPTAC(HR=0.94/10y)에서 방향조차 안 맞아, margin의 "
+        help="--clinical-margin과 함께 사용(M5_R_ONLY/M7_..._R_ONLY). age/sex를 아예 빼고 margin만 "
+             "입력으로 쓴다 — age는 TCGA(HR=1.20/10y)와 CPTAC(HR=0.94/10y)에서 방향조차 안 맞아, margin의 "
              "더 확실한 신호를 age/sex의 노이즈가 희석시키는 건 아닌지 확인하는 ablation. "
              "켜면 model_prefix에 _ONLY가 추가로 붙는다(M5_R_ONLY).",
     )
     parser.add_argument(
         "--clinical-dim", type=int, default=None,
-        help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수 16, models/"
-             "clinical_rna_only.py). RNA(256)와 같은 폭(예: 64)으로 키워서 '정보(표현력)를 "
-             "더 주면 오히려 나빠지는지' 검증하는 ablation용 — M5(RNA만)가 M7(RNA+Clinical)을 "
-             "이긴 관찰(2026-07-28) 이후 clinical 표현력 증가가 해로운지 확인하기 위한 용도.",
+        help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수, models/"
+             "clinical_rna_only.py — 2026-08-05부터 64, M1~M6와 균일). 필요하면 이 인자로 "
+             "덮어쓸 수 있다(예: 레퍼런스 비대칭 16으로 되돌리는 ablation).",
     )
     parser.add_argument(
         "--rna-dim", type=int, default=None,
-        help="--M7 전용: rna_encoder 출력 차원(기본 None=모듈 상수 256). --clinical-dim과 같이 "
-             "써서(예: --rna-dim 64 --clinical-dim 4) 레퍼런스의 RNA:Clinical=16:1 비율은 "
-             "유지한 채, 이 프로젝트의 다른 모델(M1~M6, 전부 64차원)과 같은 절대 폭으로 맞춰볼 "
-             "때 사용한다.",
+        help="--M7 전용: rna_encoder 출력 차원(기본 None=모듈 상수, 2026-08-05부터 64). "
+             "--clinical-dim과 같이 덮어쓸 수 있다.",
     )
     parser.add_argument(
         "--clinical-dropout", type=float, default=0.0,
@@ -415,6 +424,8 @@ def main():
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서 single-cohort/FDR
             # 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes, train.py와 동일한 관례).
             rna_gene_ids = resolve_tcga_only_rna_genes(args.rna_genes)
+        elif args.rna_genes.endswith("_intersection"):
+            rna_gene_ids = literature_guided_gene_ids_intersection(int(args.rna_genes.split("_")[1]))
         else:
             rna_gene_ids = (
                 pdac_subtype_gene_ids() if args.rna_genes == "subtype"
@@ -442,6 +453,9 @@ def main():
         # CPTAC 접미사로 명시적으로 구분한다 — 안 붙이면 "M7_EXTfdr0.1"이 tcga_only 결과와
         # 파일명이 겹쳐 checkpoint/kfold_preds가 서로 덮어써진다.
         model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
+    elif args.rna_genes.endswith("_intersection"):
+        # _INT{n} = TCGA-only/CPTAC-only 순위 교집합(양방향 leakage-free) 사용 표시.
+        model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         model_prefix += "_EX"
     if args.clinical_margin:
@@ -490,7 +504,8 @@ def main():
                                  clinical_dim=args.clinical_dim, rna_dim=args.rna_dim,
                                  clinical_dropout=args.clinical_dropout, sex_onehot=args.sex_onehot,
                                  combine_mode=args.combine_mode, risk_hidden_dim=args.risk_hidden_dim,
-                                 risk_dropout=args.risk_dropout).to(device)
+                                 risk_dropout=args.risk_dropout, use_margin=args.clinical_margin,
+                                 margin_stats=margin_stats, use_age_sex=not args.no_age_sex).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.light.seed)
 

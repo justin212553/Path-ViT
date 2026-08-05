@@ -21,21 +21,26 @@ requires the model to generalize to an institution it has never encountered.
 Both training directions are evaluated (TCGA-PAAD $\rightarrow$ CPTAC-PDAC and
 CPTAC-PDAC $\rightarrow$ TCGA-PAAD).
 
-\textbf{Metrics.} Four survival metrics are reported. (1) \emph{Harrell's
-C-index}: among all comparable patient pairs (an earlier death compared against
-a patient observed at least that long), the fraction whose predicted risk
-ordering agrees with the observed survival ordering, with tied risk scores
-counted as half-concordant. (2) \emph{Hazard ratio (HR)} with 95\% confidence
-interval: patients are split into high- and low-risk groups at the median
-predicted risk score, and a Cox model with group membership as its sole
-covariate is fit to obtain the HR. (3) \emph{Log-rank test $p$-value}: computed
-between the Kaplan--Meier curves of the two median-split risk groups. (4)
-\emph{Time-dependent AUC} (Uno's IPCW-weighted cumulative/dynamic AUC), which
-measures how well the risk score discriminates patients who have died by a
-given time point ($t$) from those still observed beyond it, evaluated at $t =
-$ 12, 24, and 36 months; the censoring-time distribution used for
-inverse-probability weighting is estimated from the training cohort, following
-standard convention.
+\textbf{Metrics.} Four survival metrics are reported:
+
+\begin{enumerate}
+  \item \emph{Harrell's C-index}: among all comparable patient pairs (an
+    earlier death compared against a patient observed at least that long), the
+    fraction whose predicted risk ordering agrees with the observed survival
+    ordering, with tied risk scores counted as half-concordant.
+  \item \emph{Hazard ratio (HR)} with 95\% confidence interval: patients are
+    split into high- and low-risk groups at the median predicted risk score,
+    and a Cox model with group membership as its sole covariate is fit to
+    obtain the HR.
+  \item \emph{Log-rank test $p$-value}: computed between the Kaplan--Meier
+    curves of the two median-split risk groups.
+  \item \emph{Time-dependent AUC} (Uno's IPCW-weighted cumulative/dynamic
+    AUC): measures how well the risk score discriminates patients who have
+    died by a given time point ($t$) from those still observed beyond it,
+    evaluated at $t = $ 12, 24, and 36 months; the censoring-time distribution
+    used for inverse-probability weighting is estimated from the training
+    cohort, following standard convention.
+\end{enumerate}
 
 \textbf{Aggregation across runs.} Following the repeated-run protocol
 (multiple seeds, both external training directions, and pooled 5-fold internal

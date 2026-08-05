@@ -23,6 +23,15 @@ findings_backlog.md 13번 항목 참조) — 원래의 단순 선형(LayerNorm�
 "collinearity or complete separation" 경고를 반복 — 학습 곡선 자체가 불안정/퇴화한 것으로
 판단해 즉시 원복(사용자 판단, 결과 확정 전 중단). RNA를 고쳐도 risk head 직전 Dropout은
 여전히 해롭다는 결론 유지 — 원래의 단순 선형(LayerNorm→Linear) 형태로 되돌렸다.
+
+2026-08-05: 기본 폭을 RNA=256/Clinical=16(위 2026-07-19 결정)에서 RNA=64/Clinical=64로
+바꿨다 — leakage-free 재검증 과정에서 M6(cfg.embed_dim=64 고정)와 공정 비교하려면 매번
+--rna-dim 64 --clinical-dim 64를 명시해야 했는데, 이걸 두 번이나 빠뜨려 256/16으로 잘못
+비교한 채 보고하는 사고가 반복됐다(사용자 지적으로 발견). 위 07-19 결정(256/16이 더
+나았다는 관찰)은 leaky gene selection 시절 결과라 지금 기준으로 재검증되지 않았고, 앞으로
+이 비율을 다시 바꿀 일은 거의 없을 것이므로 --rna-dim/--clinical-dim 인자 없이도 안전한
+기본값(64/64, 균일)으로 코드 자체를 고정한다. 필요하면 여전히 --rna-dim/--clinical-dim으로
+덮어쓸 수 있다.
 """
 import torch
 import torch.nn as nn
@@ -31,8 +40,8 @@ from .clinical_encoder import ClinicalEncoder
 from .rna_encoder_extend import RNAEncoderExtend
 from config import ModelConfig
 
-RNA_EMBED_DIM = 256
-CLINICAL_EMBED_DIM = 16
+RNA_EMBED_DIM = 64
+CLINICAL_EMBED_DIM = 64
 
 
 class ClinicalRNAOnly(nn.Module):
@@ -58,10 +67,14 @@ class ClinicalRNAOnly(nn.Module):
                  clinical_dim: int | None = None, rna_dim: int | None = None,
                  clinical_dropout: float = 0.0, sex_onehot: bool = False,
                  combine_mode: str = "concat",
-                 risk_hidden_dim: int | None = None, risk_dropout: float = 0.0):
+                 risk_hidden_dim: int | None = None, risk_dropout: float = 0.0,
+                 use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
+                 use_age_sex: bool = True):
         super().__init__()
         if combine_mode not in ("concat", "film", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
+        if use_margin and combine_mode != "concat":
+            raise ValueError("use_margin=True는 combine_mode='concat'에서만 지원합니다.")
         self.combine_mode = combine_mode
         # 2026-07-28: clinical_dim을 키워서(레퍼런스 비대칭 16 대신 RNA와 같은 폭) "정보를 더
         # 주면(표현력을 늘리면) 오히려 나빠지는지" 검증하기 위한 ablation(train_light.py
@@ -76,7 +89,8 @@ class ClinicalRNAOnly(nn.Module):
             # 2026-07-29: 레퍼런스 clinical 브랜치엔 Dropout(0.25)이 있는데 우리는 없었다는 차이를
             # 검증하는 ablation(train_light.py --clinical-dropout). 기본 0.0=기존 동작 보존.
             self.clinical_encoder = ClinicalEncoder(clinical_dim, age_mean, age_std, dropout=clinical_dropout,
-                                                     sex_onehot=sex_onehot)
+                                                     sex_onehot=sex_onehot, use_margin=use_margin,
+                                                     margin_stats=margin_stats, use_age_sex=use_age_sex)
             fused_dim = rna_dim + clinical_dim
             if risk_hidden_dim is None:
                 self.risk_head = nn.Sequential(
@@ -121,19 +135,26 @@ class ClinicalRNAOnly(nn.Module):
         age_z = (age_years.float() - self.age_mean) / self.age_std
         return torch.stack([age_z, sex_idx.float()], dim=-1).unsqueeze(0)  # (1, 2)
 
-    def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor) -> torch.Tensor:
+    def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor,
+                margin_ord: torch.Tensor | None = None) -> torch.Tensor:
         """
         Args:
-            age_years: () — 환자 나이(연 단위) 스칼라 텐서
-            sex_idx:   () — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
-            rna:       (G,) — 코호트 내부 z-score 정규화된 유전자 발현 벡터
+            age_years:  () — 환자 나이(연 단위) 스칼라 텐서
+            sex_idx:    () — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
+            rna:        (G,) — 코호트 내부 z-score 정규화된 유전자 발현 벡터
+            margin_ord: self.clinical_encoder.use_margin=True(--clinical-margin, M7_R)일 때만
+                        필요. () 스칼라 long — encode_margin_value() 규약. combine_mode="concat"
+                        전용.
         Returns:
             risk: (1,)
         """
         z_r = self.rna_encoder(rna.unsqueeze(0)).squeeze(0)  # (D,)
 
         if self.combine_mode == "concat":
-            z_c = self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0)).squeeze(0)  # (D,)
+            margin_kwargs = {} if margin_ord is None else {"margin_ord": margin_ord.unsqueeze(0)}
+            z_c = self.clinical_encoder(
+                age_years.unsqueeze(0), sex_idx.unsqueeze(0), **margin_kwargs
+            ).squeeze(0)  # (D,)
             fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
             return self.risk_head(fused.unsqueeze(0)).view(1)
 
