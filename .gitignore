@@ -4,6 +4,7 @@
 __pycache__
 
 *.logs
+.hpc
 *.zip
 .env
 .wandb

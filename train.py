@@ -52,7 +52,7 @@ from data.patch_utils import (
     PATCH_TRANSFORM_AUGMENTED_CACHED, PATCH_TRANSFORM_512, build_tile_cache,
 )
 from models import (
-    ViT_M1, ViT_M1_AvgPool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
+    ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
     ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
 )
 from models.rna_predictor import RNAPredictionHead
@@ -254,6 +254,20 @@ def _patient_risk(
                 patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord, margin_ord=margin_ord,
                 spatial_feat=patient_spatial_feat,
             )  # (3D,) (+ spatial_feat_dim, models/spatial_features.py 켜졌을 때만)
+        elif hasattr(model, "combine_with_clinical_pool"):
+            # models/vit_m2_pool.py::ViT_M2_Pool(--M2_POOL) — z_clinical을 4개 pooling 관점의
+            # co-attention query로 쓴다(PMA가 z_rna를 쓰는 것과 대칭). combine_with_clinical_rna와
+            # 달리 patient_embed가 (4,D) 성분 그대로 넘어온다(train.py가 슬라이드별 out["embed"]를
+            # 평균 풀링한 것 — ViT_M2_Pool.forward가 PMA와 동일하게 4개 성분을 반환하기 때문).
+            age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
+            sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
+            margin_ord = (
+                _margin_ord_from_patient(patient_slides, device)
+                if getattr(model, "use_margin", False) else None
+            )
+            patient_embed = model.combine_with_clinical_pool(
+                patient_embed, age_years, sex_idx, margin_ord=margin_ord, spatial_feat=patient_spatial_feat,
+            )  # (2D,) (+ spatial_feat_dim)
         elif hasattr(model, "combine_with_clinical"):
             # --M2_FF: rna_encoder는 있지만(FFN 직전 FiLM용) 최종 결합엔 RNA를 직접 노출하지 않는
             # 모델이라, encoder 존재 여부가 아니라 결합 메서드 존재 여부로 분기해야 한다.
@@ -263,6 +277,12 @@ def _patient_risk(
             patient_embed = model.combine_with_clinical(
                 patient_embed, age_years, sex_idx, stage_ord=stage_ord, spatial_feat=patient_spatial_feat,
             )  # (2D,) (+ spatial_feat_dim, 2026-07-30 — M1/M2에도 dispersion 확장, train_multi.py)
+        elif hasattr(model, "pool_components"):
+            # models/vit_m1_pool.py::ViT_M1_Pool(--M1_POOL) — 외부 모달리티 없이 학습된 고정
+            # query로 4개 pooling 관점을 co-attention한다. patient_embed는 (4,D) 성분 그대로.
+            patient_embed = model.pool_components(patient_embed)
+            if patient_spatial_feat is not None:
+                patient_embed = torch.cat([patient_embed, patient_spatial_feat], dim=-1)
         elif patient_spatial_feat is not None:
             # 2026-07-30: M1(ViT_M1)은 combine 메서드가 없어 patient_embed에 직접 이어붙인다 —
             # use_attn_dispersion=True인 M1을 이전엔 아무도 안 써서 드러나지 않았던 버그
@@ -993,6 +1013,26 @@ def _parse_args() -> argparse.Namespace:
              "G->256->256, dropout 0.25로 확장). data/rna_{tcga,cptac}.csv 필요. WSI를 전혀 "
              "안 쓰므로 --backbone/--image/--fusion/--avgpool과 함께 써도 무시된다.",
     )
+    model_group.add_argument(
+        "--M1_POOL", action="store_true",
+        help="ViT_M1_Pool 사용 (2026-08-05) — M1(ABMIL 단일 벡터)과 M3/PMA(다성분 pooling+"
+             "co-attention) 사이의 pooling 방식 불일치를 통제하기 위한 ablation. ABMIL 대신 "
+             "MultiComponentPooling(mean/std/attn-weighted/top-k, PMA와 동일)을 쓰되, RNA/"
+             "clinical처럼 query로 쓸 외부 모달리티가 없으므로 학습되는 고정 파라미터([CLS]/"
+             "DETR object query류)를 query로 co-attention한다 — \"co-attention 구조 자체\"의 "
+             "효과를 \"RNA/clinical이 그걸 guide하는 효과\"와 분리해서 보기 위함. WSI만 사용, "
+             "clinical/RNA 없음. --fusion/--avgpool과 동시 사용 불가.",
+    )
+    model_group.add_argument(
+        "--M2_POOL", action="store_true",
+        help="ViT_M2_Pool 사용 (2026-08-05) — M1_POOL과 같은 이유로, M2(ABMIL+Late Fusion "
+             "concat)와 PMA(다성분 pooling+co-attention) 사이의 pooling 방식 불일치를 통제한다. "
+             "M1_POOL의 학습된 고정 query 대신 z_clinical(ClinicalEncoder 출력)을 co-attention "
+             "query로 써서 \"clinical이 WSI pooling을 유의미하게 guide하는가\"를 PMA(z_rna가 "
+             "query)와 대칭적으로 검증 — margin(--clinical-margin)이 진짜 신호로 확인된 뒤 "
+             "처음 시도. --clinical-margin/--no-age-sex 지원(M7/PMA와 동일 관례). "
+             "data/clinical_{tcga,cptac}.csv 필요. --fusion/--avgpool과 동시 사용 불가.",
+    )
     return parser.parse_args()
 
 
@@ -1137,7 +1177,7 @@ def main():
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
     # 정규화" 관례와 동일). dataset="both"면 두 코호트 clinical.csv를 합쳐 통계를 계산한다.
-    if args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5:
+    if args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5:
         if args.dataset == "both":
             import pandas as pd
             ages = pd.concat([
@@ -1241,6 +1281,10 @@ def main():
         model_prefix = "M6"
     elif args.M6X:
         model_prefix = "M6X"
+    elif args.M1_POOL:
+        model_prefix = "M1_POOL"
+    elif args.M2_POOL:
+        model_prefix = "M2_POOL"
     elif args.M2:
         model_prefix = "M2"
     elif args.fusion:
@@ -1338,6 +1382,13 @@ def main():
     if args.combine_mode != "concat":
         # _COX_ADD = train_light.py --M7 --combine-mode와 동일 관례.
         model_prefix += f"_{args.combine_mode.upper()}"
+    if args.sam:
+        # 2026-08-06: 이 태그가 없으면 --sam 유무만 다른 두 실행이 model_prefix/checkpoint/
+        # kfold_preds 파일명이 완전히 같아져 서로 덮어쓴다(_AUG/_NOSPATIAL 빠뜨렸을 때와 동일한
+        # 사고 클래스, 위 주석 참조) — SAM은 학습 시간이 2배라 특히 재실행 비용이 크다.
+        model_prefix += f"_SAM{args.sam_rho:g}"
+    if args.swa:
+        model_prefix += "_SWA"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1413,7 +1464,7 @@ def main():
             },
         )
 
-    with_clinical = args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
+    with_clinical = args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
     with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
     ds_kwargs = dict(
         with_clinical=with_clinical, with_staging=with_staging, with_margin=args.clinical_margin,
@@ -1568,6 +1619,13 @@ def main():
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
+    elif args.M1_POOL:
+        model = ViT_M1_Pool(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone,
+                             use_attn_dispersion=args.attn_dispersion).to(device)
+    elif args.M2_POOL:
+        model = ViT_M2_Pool(cfg.model, age_mean=age_mean, age_std=age_std,
+                             precomputed=cfg.data.precomputed, backbone=args.backbone,
+                             use_attn_dispersion=args.attn_dispersion, **margin_kwargs).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
@@ -1659,6 +1717,11 @@ def main():
     elif args.M6X:
         print(f"Model: RNAOnlyExtend (RNA-seq MLP(G->256->256, dropout 0.25)만, WSI/Clinical 없음, "
               f"rna_input_dim={rna_input_dim})")
+    elif args.M1_POOL:
+        print(f"Model: ViT_M1_Pool (ViT+다성분 pooling + CoAttention(학습된 고정 query), WSI 단독)")
+    elif args.M2_POOL:
+        print(f"Model: ViT_M2_Pool (ViT+다성분 pooling + CoAttention(Clinical query, R={args.clinical_margin}) + "
+              f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f})")
     elif args.M2:
         print(f"Model: ViT_M2 (ViT+ABMIL + Clinical age/sex MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")
@@ -1754,6 +1817,10 @@ def main():
         ckpt_path = ckpt_dir / f"survival_{tag}_best_rna_only.pt"
     elif args.M6X:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_rna_only_extend.pt"
+    elif args.M1_POOL:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_m1_pool.pt"
+    elif args.M2_POOL:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_m2_pool.pt"
     elif args.M2:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical.pt"
     elif args.fusion:

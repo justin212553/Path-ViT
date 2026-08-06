@@ -1,5 +1,7 @@
 from .vit_m1 import ViT_M1
 from .vit_m1_avgpool import ViT_M1_AvgPool
+from .vit_m1_pool import ViT_M1_Pool
+from .vit_m2_pool import ViT_M2_Pool
 from .patch_vit_fusion import LateFusionViT
 from .clinical_encoder import ClinicalEncoder
 from .vit_m2 import ViT_M2
@@ -18,7 +20,7 @@ from .vit_m2_ff import ViT_M2_FF
 from .vit_pma_ff import ViT_PMA_FF
 
 __all__ = [
-    "ViT_M1", "ViT_M1_AvgPool", "ViT_M2", "ViT_M4", "ViT_M4A", "ViT_M4B",
+    "ViT_M1", "ViT_M1_AvgPool", "ViT_M1_Pool", "ViT_M2_Pool", "ViT_M2", "ViT_M4", "ViT_M4A", "ViT_M4B",
     "ViT_PM4", "ViT_PMA", "ViT_M4A_FF", "ViT_M2_FF", "ViT_PMA_FF",
     "LateFusionViT", "ClinicalEncoder", "RNAEncoder", "ClinicalOnly", "RNAOnly",
     "RNAOnlyExtend", "ClinicalRNAOnly",
