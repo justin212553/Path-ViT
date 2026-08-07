@@ -49,7 +49,8 @@ from data.dataset import (
 )
 from data.patch_utils import (
     FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
-    PATCH_TRANSFORM_AUGMENTED_CACHED, PATCH_TRANSFORM_512, build_tile_cache,
+    PATCH_TRANSFORM_AUGMENTED_CACHED, PATCH_TRANSFORM_AUGMENTED_CACHED_STRONGBLUR,
+    PATCH_TRANSFORM_512, build_tile_cache,
 )
 from models import (
     ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
@@ -236,9 +237,13 @@ def _patient_risk(
             # --no-clinical(ViT_PMA use_clinical=False)이면 clinical_encoder 자체가 없다 —
             # getattr로 존재 여부부터 확인해야 한다(2026-07-29, --no-clinical 첫 실사용 중 발견).
             _clinical_enc = getattr(model, "clinical_encoder", None)
+            # 2026-08-06: stage_ord도 margin_ord와 같은 버그(cox_add엔 clinical_encoder가 없어
+            # _clinical_enc.use_staging만 보면 항상 False) — model 최상위 use_staging을 우선 본다.
             stage_ord = (
                 _stage_ord_from_patient(patient_slides, device)
-                if _clinical_enc is not None and _clinical_enc.use_staging else None
+                if getattr(model, "use_staging", False) or
+                   (_clinical_enc is not None and getattr(_clinical_enc, "use_staging", False))
+                else None
             )
             # 2026-08-05: model.combine_mode="cox_add"(ViT_PMA, train.py --combine-mode)면
             # clinical_encoder 자체가 없다 — models/clinical_rna_only.py에서 겪은 것과 같은 버그
@@ -295,7 +300,7 @@ def _patient_risk(
             # models/vit_pma.py::ViT_PMA combine_mode="cox_add" — clinical은 위 patient_embed에
             # 안 섞여 있고(combine_with_clinical_rna가 concat 안 함), 여기서 고전적 Cox 가산항으로
             # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
-            clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord)
+            clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
             risk = risk + model.clinical_linear(clin_raw).view(1)
     return risk, aux_loss, stage_aux_loss
 
@@ -858,6 +863,15 @@ def _parse_args() -> argparse.Namespace:
              "checkpoint에 _AUG 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--strong-blur", action="store_true",
+        help="2026-08-07: --tile-augment --image(진짜 real-time augmentation)와 함께 사용 — "
+             "GaussianBlur만 세게 올린다(kernel_size 3->5, sigma 상한 1.0->2.0, 적용확률 "
+             "0.15->0.35). ColorJitter/flip은 그대로 둔다 — 염색강도/색상 정보(H&E stain "
+             "intensity)는 건드리지 않고 초점/해상도 계열 증강만 강화하는 게 ColorJitter를 "
+             "더 세게 하는 것보다 덜 위험한 레버라는 판단(2026-08-06 논의). --tile-augment "
+             "없이 쓰면 무시된다. 켜면 model_prefix에 _BLUR 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--exclude-normal-slides", action="store_true",
         help="확인된 정상 조직 슬라이드만 제외하고 케이스당 나머지는 전부 그대로 둔다"
              "(data/dataset.py::_exclude_normal_slides, findings_backlog.md 14번 항목) — "
@@ -1355,6 +1369,8 @@ def main():
     if args.tile_augment:
         # _AUG = 학습 시 타일 augmentation(seed 고정, 1회성 features_aug.pt) 사용 표시.
         model_prefix += "_AUG"
+        if args.strong_blur:
+            model_prefix += "_BLUR"
     if args.dropout is not None and args.dropout != 0.3:
         # _DROP{dropout} = cfg.model.dropout(기본 0.3) 스윕 표시.
         model_prefix += f"_DROP{args.dropout:g}"
@@ -1496,7 +1512,8 @@ def main():
             FEATURES_AUG_FILENAME if (args.tile_augment and cfg.data.precomputed) else None
         ),
         transform=(
-            PATCH_TRANSFORM_AUGMENTED_CACHED if (args.tile_augment and not cfg.data.precomputed) else None
+            (PATCH_TRANSFORM_AUGMENTED_CACHED_STRONGBLUR if args.strong_blur else PATCH_TRANSFORM_AUGMENTED_CACHED)
+            if (args.tile_augment and not cfg.data.precomputed) else None
         ),
         **ds_kwargs,
     )

@@ -81,6 +81,20 @@ PATCH_TRANSFORM_AUGMENTED_CACHED = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
+# 2026-08-07: blur만 세게(train.py --strong-blur) — ColorJitter/flip은 그대로 두고 kernel_size
+# 3->5, sigma 상한 1.0->2.0, 적용확률 0.15->0.35만 올린다. ColorJitter(염색강도/색상 정보를
+# 건드림)보다 blur가 "덜 해로운 세기 조절 레버"라는 판단(2026-08-06 논의) — 염색 정보는 그대로
+# 두고 초점/해상도 계열 증강만 강화해 과적합 억제 효과가 더 느는지 확인.
+PATCH_TRANSFORM_AUGMENTED_CACHED_STRONGBLUR = transforms.Compose([
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomVerticalFlip(p=0.5),
+    transforms.RandomApply([transforms.ColorJitter(brightness=0.15, contrast=0.15, saturation=0.10, hue=0.02)], p=0.5),
+    transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.35),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
 # eval(val/test/external, train_c_index 리포팅)용 — augmentation 없이 train과 동일한 512
 # 해상도로 맞춘다. tile_cache 없이(RAM 캐싱 안 함) 그때그때 원본을 열어 리사이즈한다.
 PATCH_TRANSFORM_512 = transforms.Compose([

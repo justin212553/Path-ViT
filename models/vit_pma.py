@@ -14,7 +14,7 @@ from .vit_m1 import ViT_M1
 from .vit_m4a import CoAttentionPooling
 from .spatial_features import spatial_autocorr, attention_dispersion
 from .multi_component_pooling import MultiComponentPooling
-from .clinical_encoder import ClinicalEncoder
+from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
@@ -76,6 +76,7 @@ class ViT_PMA(ViT_M1):
         self.combine_mode = combine_mode
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
+        self.use_staging = use_staging
         self.attn_pool = MultiComponentPooling(cfg.embed_dim)
         self.component_coattn = CoAttentionPooling(
             cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
@@ -96,9 +97,19 @@ class ViT_PMA(ViT_M1):
                 m_mean, m_std = margin_stats
                 self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
                 self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
-            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0)
+            if use_staging:
+                # 2026-08-06: cox_add에 staging(T/N/M/grade) 추가 — ClinicalEncoder(concat 모드)와
+                # 동일하게 필드당 (z_score, known_flag) 2차원씩, 총 4필드=8차원을 raw_dim에 더한다.
+                if stage_stats is None:
+                    raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
+                for field in STAGE_FIELDS:
+                    mean, std = stage_stats[field]
+                    short = _STAGE_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
             if raw_dim == 0:
-                raise ValueError("use_age_sex=False이고 use_margin=False면 clinical 입력이 없습니다.")
+                raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
             self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 risk_head(z_wsi+z_rna)와 동일
         self.rna_encoder = RNAEncoder(rna_input_dim, rna_dim, dropout=cfg.dropout)
@@ -201,8 +212,10 @@ class ViT_PMA(ViT_M1):
         return fused
 
     def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
-                       margin_ord: torch.Tensor | None = None) -> torch.Tensor:
-        """combine_mode="cox_add" 전용 — models/clinical_rna_only.py::ClinicalRNAOnly._clinical_raw와 동일."""
+                       margin_ord: torch.Tensor | None = None,
+                       stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+        """combine_mode="cox_add" 전용 — models/clinical_rna_only.py::ClinicalRNAOnly._clinical_raw와 동일 관례.
+        stage_ord: self.use_staging=True일 때만 필요. {field: () 스칼라 long} — encode_stage_value() 규약."""
         feats = []
         if self.use_age_sex:
             age_z = (age_years.float() - self.age_mean) / self.age_std
@@ -212,4 +225,13 @@ class ViT_PMA(ViT_M1):
             known = (ordv >= 0).float()
             z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
             feats += [z, known]
+        if self.use_staging:
+            for field in STAGE_FIELDS:
+                short = _STAGE_BUFFER_NAMES[field]
+                ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
         return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)

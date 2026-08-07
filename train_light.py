@@ -43,7 +43,9 @@ from data.dataset import (
     literature_guided_gene_ids_intersection,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
-from models.clinical_encoder import age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df
+from models.clinical_encoder import (
+    age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df, stage_stats_from_df, STAGE_FIELDS,
+)
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
@@ -87,23 +89,28 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
     is_m7 = isinstance(model, ClinicalRNAOnly)
     has_rna = hasattr(model, "rna_encoder")
     if is_m7:
-        m7_margin_kwargs = {}
+        m7_clinical_kwargs = {}
         # 2026-08-05: use_margin은 이제 combine_mode 무관하게 model 자체에 있다(film/cox_add도
         # margin 지원) — model.clinical_encoder(concat 전용, film/cox_add엔 없음)가 아니라
         # model.use_margin을 직접 봐야 film/cox_add에서도 margin_ord가 전달된다.
         if getattr(model, "use_margin", False):
-            m7_margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
+            m7_clinical_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
+        # 2026-08-06: use_staging도 동일 관례(combine_mode 무관하게 model 자체에 있음).
+        if getattr(model, "use_staging", False):
+            m7_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
         return model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
             p["rna"].to(device, non_blocking=True),
-            **m7_margin_kwargs,
+            **m7_clinical_kwargs,
         )
     if has_rna:
         return model(p["rna"].to(device, non_blocking=True))
     margin_kwargs = {}
     if getattr(model.clinical_encoder, "use_margin", False):
         margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
+    if getattr(model.clinical_encoder, "use_staging", False):
+        margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
     return model(
         p["age_years"].to(device, non_blocking=True),
         p["sex_idx"].to(device, non_blocking=True),
@@ -293,6 +300,15 @@ def _parse_args() -> argparse.Namespace:
              "켜면 model_prefix에 _ONLY가 추가로 붙는다(M5_R_ONLY).",
     )
     parser.add_argument(
+        "--clinical-staging", action="store_true",
+        help="2026-08-06: train.py --clinical-staging과 동일 — AJCC 병기(T/N/M)+grade를 추가한다"
+             "(--M5/--M7). univariate 검정에서 개별 필드는 margin만큼 깨끗하게 양쪽 코호트에서 "
+             "유의하진 않았지만(ajcc_n TCGA만 p=0.048, ajcc_m/grade는 CPTAC만 유의), 4개를 함께 "
+             "넣으면 PMA+UNI+cox_add에서 external을 M3(WSI+RNA, clinical 없음) 위로 처음 끌어올린 "
+             "걸 확인한 뒤 M7/M5도 같은 레시피(margin+staging)로 맞춰 internal/external 괴리를 "
+             "비교하려는 용도. 켜면 model_prefix에 _STG 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--clinical-dim", type=int, default=None,
         help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수, models/"
              "clinical_rna_only.py — 2026-08-05부터 64, M1~M6와 균일). 필요하면 이 인자로 "
@@ -410,6 +426,19 @@ def main():
     else:
         margin_stats = None
 
+    if args.clinical_staging:
+        import pandas as pd
+        if args.dataset == "both":
+            stage_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"]),
+                pd.read_csv(CLINICAL_PATHS["cptac"]),
+            ])
+        else:
+            stage_df = pd.read_csv(CLINICAL_PATHS[args.dataset])
+        stage_stats = stage_stats_from_df(stage_df)
+    else:
+        stage_stats = None
+
     rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
     if with_rna and args.rna_genes == "purist_top20_tcga_only":
         # 하이브리드: PurIST 확률(1차원, chance 수준이었음) + TCGA train split Cox-score 상위
@@ -460,6 +489,9 @@ def main():
         model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         model_prefix += "_EX"
+    if args.clinical_staging:
+        # train.py --clinical-staging과 동일 관례 — _R보다 먼저 붙인다(PMA_..._STG_R_...와 태그 순서 통일).
+        model_prefix += "_STG"
     if args.clinical_margin:
         # M5_R — age/sex + 절제연 상태(residual_disease). M5(age/sex만)와 checkpoint/kfold_preds
         # 파일명이 겹치면 안 되므로 별도 접미사.
@@ -496,7 +528,8 @@ def main():
     if args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
                               use_margin=args.clinical_margin, margin_stats=margin_stats,
-                              use_age_sex=not args.no_age_sex).to(device)
+                              use_age_sex=not args.no_age_sex,
+                              use_staging=args.clinical_staging, stage_stats=stage_stats).to(device)
     elif args.M6:
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
@@ -507,7 +540,8 @@ def main():
                                  clinical_dropout=args.clinical_dropout, sex_onehot=args.sex_onehot,
                                  combine_mode=args.combine_mode, risk_hidden_dim=args.risk_hidden_dim,
                                  risk_dropout=args.risk_dropout, use_margin=args.clinical_margin,
-                                 margin_stats=margin_stats, use_age_sex=not args.no_age_sex).to(device)
+                                 margin_stats=margin_stats, use_age_sex=not args.no_age_sex,
+                                 use_staging=args.clinical_staging, stage_stats=stage_stats).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.light.seed)
 
@@ -539,8 +573,9 @@ def main():
         restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
         print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
 
-    ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_rna=with_rna,
-                      rna_gene_ids=rna_gene_ids, rna_purist=rna_purist, restrict_case_ids=restrict_case_ids)
+    ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
+                      with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
+                      restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
     val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)
