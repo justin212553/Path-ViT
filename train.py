@@ -558,6 +558,17 @@ def _parse_args() -> argparse.Namespace:
              "요구한다.",
     )
     parser.add_argument(
+        "--sam-wsi-only", action="store_true",
+        help="2026-08-06: --sam과 함께 사용 — perturbation을 WSI 브랜치 파라미터(model.cnn/vit/"
+             "attn_pool/multi_pool/component_coattn/dispersion_scale, 존재하는 것만)에만 적용하고 "
+             "나머지(RNA/clinical 인코더, risk_head, aux head)는 rho=0인 별도 param group으로 둬서 "
+             "사실상 일반 AdamW로 학습한다(utils/sam.py의 SAM은 이미 param_group 단위로 rho를 "
+             "따로 가질 수 있어 SAM 클래스 자체는 손댈 필요가 없었다). WSI 인코더(파라미터 수가 "
+             "가장 많고 patient-level 라벨 대비 과적합 여지가 가장 큰 부분)만 flat minimum을 "
+             "찾도록 강제하는 게, 이미 상대적으로 가벼운 RNA/clinical 브랜치까지 같이 흔드는 것보다 "
+             "나은지 확인하는 ablation. --sam 없이 쓰면 무시된다.",
+    )
+    parser.add_argument(
         "--swa", action="store_true",
         help="2026-07-27: SWA(Stochastic Weight Averaging) — 학습 후반부(--swa-start-frac 이후) "
              "매 epoch의 가중치를 평균 낸 별도 모델을 유지하고, 학습 종료 후 이 평균 모델도 "
@@ -1387,6 +1398,8 @@ def main():
         # kfold_preds 파일명이 완전히 같아져 서로 덮어쓴다(_AUG/_NOSPATIAL 빠뜨렸을 때와 동일한
         # 사고 클래스, 위 주석 참조) — SAM은 학습 시간이 2배라 특히 재실행 비용이 크다.
         model_prefix += f"_SAM{args.sam_rho:g}"
+        if args.sam_wsi_only:
+            model_prefix += "_WSIONLY"
     if args.swa:
         model_prefix += "_SWA"
     if args.fold is not None:
@@ -1668,7 +1681,21 @@ def main():
         # rna_aux_head와 동일한 이유로 optimizer 생성 이전에 붙인다.
         model.stage_aux_head = StagePredictionHead(cfg.model.embed_dim, stage_stats).to(device)
 
-    if args.sam:
+    if args.sam and args.sam_wsi_only:
+        # WSI 브랜치 파라미터만 rho=args.sam_rho, 나머지는 rho=0(=perturbation 없음, 사실상
+        # AdamW) — SAM(utils/sam.py)이 param_group마다 다른 rho를 이미 지원해서(first_step의
+        # `group["rho"]`) SAM 클래스 자체는 그대로 두고 optimizer 생성 시 param_group만 나눈다.
+        _WSI_BRANCH_ATTRS = ("cnn", "vit", "attn_pool", "multi_pool", "component_coattn", "dispersion_scale")
+        wsi_params, other_params = [], []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (wsi_params if name.split(".")[0] in _WSI_BRANCH_ATTRS else other_params).append(p)
+        optimizer = SAM(
+            [{"params": wsi_params, "rho": args.sam_rho}, {"params": other_params, "rho": 0.0}],
+            torch.optim.AdamW, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+        )
+    elif args.sam:
         optimizer = SAM(
             filter(lambda p: p.requires_grad, model.parameters()),
             torch.optim.AdamW, rho=args.sam_rho,
