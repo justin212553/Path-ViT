@@ -250,6 +250,7 @@ class TileLRUCache:
 
 FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
 FEATURES_UNI_FILENAME  = "features_uni.pt"   # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
+FEATURES_UNI2_FILENAME = "features_uni2.pt"  # UNI2-h(models/uni2_encoder.py) 산출물 — UNI와 별도 저장(롤백 가능)
 FEATURES_NORM_FILENAME = "features_norm.pt"  # Macenko stain-normalized + ResNet50 산출물 (utils/extract_features_stain_norm.py)
 FEATURES_AUG_FILENAME  = "features_aug.pt"   # 타일 augmentation(seed 고정, 1회성) + ResNet50 산출물
                                               # (utils/extract_features_augmented.py, train.py --tile-augment)

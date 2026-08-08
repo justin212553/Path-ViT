@@ -34,11 +34,12 @@ if str(_ROOT) not in sys.path:
 from config import DataConfig
 from data.dataset import PATCHES_ROOT_ATTRS
 from data.patch_utils import (
-    FEATURES_FILENAME, FEATURES_UNI_FILENAME,
+    FEATURES_FILENAME, FEATURES_UNI_FILENAME, FEATURES_UNI2_FILENAME,
     PATCH_TRANSFORM, UNI_PATCH_TRANSFORM, list_patch_paths,
 )
 from models.cnn_encoder import CNNEncoder
 from models.uni_encoder import UNIEncoder
+from models.uni2_encoder import UNI2hEncoder
 from utils import load_env, send_slack
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -58,6 +59,18 @@ BACKBONE_REGISTRY = {
         "transform":    UNI_PATCH_TRANSFORM,
         "out_filename": FEATURES_UNI_FILENAME,
         "batch_size":   32,
+    },
+    "uni2": {
+        # UNI2-h(ViT-H/14, 6.81억 파라미터, models/uni2_encoder.py) — UNI(ViT-L/16)보다
+        # 파라미터 2배+토큰 수도 더 많아(512px 입력 기준 1024개 -> ~1296개) 배치를 훨씬
+        # 보수적으로 잡는다. 패치 원본 해상도(1024px @ 1.0MPP)-UNI 학습 해상도 간극 문제는
+        # UNI와 동일해 같은 UNI_PATCH_TRANSFORM(512 리사이즈)을 재사용한다 — dynamic_img_size=True
+        # 라 224가 아닌 입력도 positional embedding 보간으로 그대로 받는다.
+        # 첫 로그에서 GPU 메모리/처리 속도 보고 필요시 조정.
+        "encoder_cls":  UNI2hEncoder,
+        "transform":    UNI_PATCH_TRANSFORM,
+        "out_filename": FEATURES_UNI2_FILENAME,
+        "batch_size":   8,
     },
 }
 
@@ -149,8 +162,8 @@ def main():
                              "patches_root_{tcga,cptac}/tiles/ 를 대상으로 한다.")
     parser.add_argument("--backbone", type=str, default="resnet50", choices=list(BACKBONE_REGISTRY),
                         help="사용할 frozen tile encoder (기본: resnet50=Lunit SwAV). "
-                             "uni는 HuggingFace gated repo(MahmoodLab/UNI) 접근 승인 + "
-                             ".env의 HF_TOKEN이 필요하다.")
+                             "uni/uni2는 각각 HuggingFace gated repo(MahmoodLab/UNI, MahmoodLab/UNI2-h) "
+                             "접근 승인 + .env의 HF_TOKEN이 필요하다(같은 토큰 재사용 가능).")
     args = parser.parse_args()
 
     cfg = DataConfig()

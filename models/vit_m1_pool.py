@@ -5,21 +5,51 @@ ViT_M1_Pool — M1(ABMIL 단일 벡터)과 M3/PMA(다성분 pooling+co-attention
 M3(WSI+RNA)/PMA(WSI+RNA+Clinical)와 M1(WSI 단독)을 비교할 때, 지금까지는 "RNA/Clinical
 유무"와 "WSI pooling 방식(ABMIL vs MultiComponentPooling+co-attention)"이 동시에 바뀌어
 있었다 — 두 요인이 뒤섞인 비교였다. 이 모델은 M1과 같은 WSI 단독 입력에 M3/PMA와 동일한
-MultiComponentPooling(mean/std/attn-weighted/top-k)을 적용하되, RNA/clinical처럼 query로
-쓸 외부 모달리티가 없으므로 학습되는 고정 파라미터를 query로 쓴다(ViT의 [CLS] 토큰, DETR의
-object query와 같은 개념 — 모든 환자에 대해 동일한 벡터지만, key/value(그 환자의 4개 관점)는
-환자마다 다르므로 attention 가중치와 최종 출력은 여전히 환자별로 다르다). 이렇게 하면
-"co-attention 구조 자체의 효과"와 "RNA/clinical이 그 co-attention을 guide하는 효과"를 분리해서
-볼 수 있다.
+MultiComponentPooling(mean/std/attn-weighted/top-k)을 적용한다.
+
+2026-08-07: 초판(학습되는 고정 query로 co-attention)에서 self-attention으로 교체했다 — M1엔
+RNA/clinical처럼 "어디를 봐야 하는지" 알려줄 외부 모달리티가 없으니, 고정 query를 인공적으로
+학습시키는 것보다 4개 관점이 서로를 직접 attend하게 하는 편이 구조적으로 더 자연스럽다(M2_POOL
+이 clinical을 진짜 외부 query로 쓰는 것과 대비되는 지점 — M1은 외부 query가 없다는 사실 자체를
+구조에 반영).
 """
 import torch
 import torch.nn as nn
 
 from .vit_m1 import ViT_M1
-from .vit_m4a import CoAttentionPooling
 from .multi_component_pooling import MultiComponentPooling
 from .spatial_features import attention_dispersion
 from config import ModelConfig
+
+
+class SelfAttentionPooling(nn.Module):
+    """
+    4개 pooling 관점(components)이 서로를 attend하는 self-attention — 외부 query 없이
+    관점들끼리 정보를 교환한 뒤 평균해 하나의 벡터로 합친다. 표준 Transformer encoder layer
+    1개(MHA + residual/LN + FFN + residual/LN)와 동일한 구조.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int = 2, dropout: float = 0.0):
+        super().__init__()
+        self.mha = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim * 2), nn.GELU(), nn.Linear(embed_dim * 2, embed_dim)
+        )
+        self.norm2 = nn.LayerNorm(embed_dim)
+
+    def forward(self, components: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            components: (4, D) — 환자 단위로 평균 풀링된 4개 관점
+        Returns:
+            z_wsi: (D,) — self-attention을 거친 4개 관점의 평균
+        """
+        x = components.unsqueeze(0)  # (1, 4, D)
+        attn_out, _ = self.mha(x, x, x, need_weights=False)
+        x = self.norm1(x + attn_out)
+        x = self.norm2(x + self.ffn(x))
+        return x.squeeze(0).mean(dim=0)  # (D,)
 
 
 class ViT_M1_Pool(ViT_M1):
@@ -33,12 +63,7 @@ class ViT_M1_Pool(ViT_M1):
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion)
         self.multi_pool = MultiComponentPooling(cfg.embed_dim)
-        self.component_coattn = CoAttentionPooling(
-            cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=cfg.embed_dim
-        )
-        # 모든 환자 공통, 학습되는 co-attention query — RNA/clinical 없이 "어떤 관점을 봐야
-        # 하는지"를 데이터가 아니라 학습으로 고정시킨다(PMA의 z_rna 자리를 대신함).
-        self.learned_query = nn.Parameter(torch.randn(cfg.embed_dim) * 0.02)
+        self.component_selfattn = SelfAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
         del self.attn_pool  # ViT_M1의 단일-벡터 ABMIL은 안 쓴다(multi_pool로 대체)
 
         risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
@@ -73,7 +98,6 @@ class ViT_M1_Pool(ViT_M1):
         Args:
             patient_embed: (4, D) — 환자 단위로 평균 풀링된 4개 관점(train.py에서 계산)
         Returns:
-            z_wsi: (D,) — 학습된 고정 query로 co-attention한 결과
+            z_wsi: (D,) — self-attention으로 관점들을 섞은 결과
         """
-        z_wsi, _ = self.component_coattn(patient_embed, self.learned_query)
-        return z_wsi
+        return self.component_selfattn(patient_embed)

@@ -270,18 +270,34 @@ def _patient_risk(
                 _margin_ord_from_patient(patient_slides, device)
                 if getattr(model, "use_margin", False) else None
             )
+            # M2_POOL은 staging을 지원하지 않는다 — 아래 공용 cox_add 블록이 모든 분기에서
+            # stage_ord를 참조하므로(2026-08-07, margin_ord와 같은 버그 클래스) None으로 정의해둔다.
+            stage_ord = None
             patient_embed = model.combine_with_clinical_pool(
                 patient_embed, age_years, sex_idx, margin_ord=margin_ord, spatial_feat=patient_spatial_feat,
-            )  # (2D,) (+ spatial_feat_dim)
+            )  # (2D,) (+ spatial_feat_dim). combine_mode="cox_add"면 (D,)/(D+1,) — clinical은
+            # 여기서 안 섞이고 아래 공용 블록에서 더해짐(models/vit_m2_pool.py 2026-08-07).
         elif hasattr(model, "combine_with_clinical"):
             # --M2_FF: rna_encoder는 있지만(FFN 직전 FiLM용) 최종 결합엔 RNA를 직접 노출하지 않는
             # 모델이라, encoder 존재 여부가 아니라 결합 메서드 존재 여부로 분기해야 한다.
             age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)
             sex_idx   = patient_slides[0]["sex_idx"].to(device, non_blocking=True)
-            stage_ord = _stage_ord_from_patient(patient_slides, device) if model.clinical_encoder.use_staging else None
+            # 2026-08-07: combine_mode="cox_add"(ViT_M2)면 clinical_encoder 자체가 없다 — ViT_PMA에서
+            # 겪은 것과 같은 버그를 피하려 model 최상위 use_staging을 우선 본다.
+            _clinical_enc = getattr(model, "clinical_encoder", None)
+            stage_ord = (
+                _stage_ord_from_patient(patient_slides, device)
+                if getattr(model, "use_staging", False) or
+                   (_clinical_enc is not None and getattr(_clinical_enc, "use_staging", False))
+                else None
+            )
+            # M2엔 margin 입력이 없다(PMA/ClinicalOnly 전용) — 아래 공용 cox_add 블록이 모든
+            # 분기에서 margin_ord를 참조하므로, 이 분기에서도 None으로 정의해둔다.
+            margin_ord = None
             patient_embed = model.combine_with_clinical(
                 patient_embed, age_years, sex_idx, stage_ord=stage_ord, spatial_feat=patient_spatial_feat,
             )  # (2D,) (+ spatial_feat_dim, 2026-07-30 — M1/M2에도 dispersion 확장, train_multi.py)
+            # (combine_mode="cox_add"면 (D,)/(D+1,) — clinical은 위에서 안 섞이고 아래 공용 블록에서 더해짐)
         elif hasattr(model, "pool_components"):
             # models/vit_m1_pool.py::ViT_M1_Pool(--M1_POOL) — 외부 모달리티 없이 학습된 고정
             # query로 4개 pooling 관점을 co-attention한다. patient_embed는 (4,D) 성분 그대로.
@@ -623,14 +639,27 @@ def _parse_args() -> argparse.Namespace:
              "margin(/staging)만 입력으로 쓴다. 켜면 model_prefix에 _ONLY가 추가로 붙는다.",
     )
     parser.add_argument(
+        "--pooling-mode", type=str, default="coattn", choices=["coattn", "selfattn"],
+        help="--M2_POOL(models/vit_m2_pool.py::ViT_M2_Pool) 전용. 4개 pooling 관점(mean/std/"
+             "attn/top-k)을 합치는 방식 — 'coattn'(기본)은 z_clinical(age/sex)을 co-attention "
+             "query로 씀. 'selfattn'은 models/vit_m1_pool.py::SelfAttentionPooling을 재사용해 "
+             "clinical 개입 없이 4개 관점이 서로 self-attention한다. 2026-08-07: coattn 버전이 "
+             "UNI+age/sex만으로 external 0.49~0.51(랜덤 수준, M1_POOL의 self-attention 단독 "
+             "0.556보다도 낮음)에 그쳐 — age/sex 신호가 약해 co-attention query로 쓰면 잘못된 "
+             "기준으로 관점을 고르는 것으로 추정, selfattn+--combine-mode cox_add 조합으로 "
+             "재검증한다. 켜면 model_prefix에 _SELFATTN 접미사가 붙는다.",
+    )
+    parser.add_argument(
         "--combine-mode", type=str, default="concat", choices=["concat", "cox_add"],
-        help="--PMA 전용(models/vit_pma.py::ViT_PMA). train_light.py --M7 --combine-mode의 "
-             "cox_add를 PMA에 이식 — clinical(age/sex/margin)을 z_clinical 임베딩으로 concat하지 "
-             "않고, risk_head(z_wsi+z_rna)에 고전적 Cox 가산항(clinical_linear, 파라미터 "
-             "raw_dim개, zero-init이라 학습 시작 시점엔 clinical 없는 PMA와 동일)으로 직접 더한다. "
+        help="--PMA(models/vit_pma.py::ViT_PMA)와 --M2(models/vit_m2.py::ViT_M2)에서 지원. "
+             "train_light.py --M7 --combine-mode의 cox_add를 이식 — clinical(age/sex[/margin, "
+             "PMA만]/staging)을 z_clinical 임베딩으로 concat하지 않고, risk_head(WSI(+RNA) 임베딩)에 "
+             "고전적 Cox 가산항(clinical_linear, 파라미터 raw_dim개, zero-init이라 학습 시작 "
+             "시점엔 clinical 없는 모델과 동일)으로 직접 더한다. "
              "PMA_INT1500_SS_AUX_R_DISP(no-aug, concat)가 external에서 M6/M7보다도 나은 걸 보고, "
              "M7에서 cox_add가 R_ONLY(margin만)의 internal을 크게 끌어올렸던 효과가 PMA에도 "
-             "재현되는지 확인하는 ablation. 켜면 model_prefix에 _COX_ADD 접미사가 붙는다.",
+             "재현되는 걸 확인했다(2026-08-06) — M2(ABMIL)에서도 재현되는지 확인하는 ablation "
+             "(2026-08-07). 켜면 model_prefix에 _COX_ADD 접미사가 붙는다.",
     )
     parser.add_argument(
         "--stage-aux-weight", type=float, default=0.0,
@@ -1409,6 +1438,8 @@ def main():
     if args.combine_mode != "concat":
         # _COX_ADD = train_light.py --M7 --combine-mode와 동일 관례.
         model_prefix += f"_{args.combine_mode.upper()}"
+    if args.M2_POOL and args.pooling_mode == "selfattn":
+        model_prefix += "_SELFATTN"
     if args.sam:
         # 2026-08-06: 이 태그가 없으면 --sam 유무만 다른 두 실행이 model_prefix/checkpoint/
         # kfold_preds 파일명이 완전히 같아져 서로 덮어쓴다(_AUG/_NOSPATIAL 빠뜨렸을 때와 동일한
@@ -1655,11 +1686,14 @@ def main():
     elif args.M2_POOL:
         model = ViT_M2_Pool(cfg.model, age_mean=age_mean, age_std=age_std,
                              precomputed=cfg.data.precomputed, backbone=args.backbone,
-                             use_attn_dispersion=args.attn_dispersion, **margin_kwargs).to(device)
+                             use_attn_dispersion=args.attn_dispersion,
+                             pooling_mode=args.pooling_mode, combine_mode=args.combine_mode,
+                             **margin_kwargs).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
-                        use_attn_dispersion=args.attn_dispersion, **stage_kwargs).to(device)
+                        use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                        **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
     elif args.avgpool:
