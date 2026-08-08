@@ -22,11 +22,12 @@ from PIL import Image
 from .cnn_encoder import CNNEncoder
 from .spatial_features import attention_dispersion
 from .uni_encoder import UNIEncoder
+from .uni2_encoder import UNI2hEncoder
 from .vit_encoder import ViTEncoder
 from config import ModelConfig
 
-# tile encoder(backbone) 선택 레지스트리 — CNNEncoder/UNIEncoder 둘 다 forward/forward_pooled/
-# .backbone 인터페이스가 동일해 여기서만 바꾸면 나머지 코드는 그대로 재사용된다.
+# tile encoder(backbone) 선택 레지스트리 — CNNEncoder/UNIEncoder/UNI2hEncoder 셋 다 forward/
+# forward_pooled/.backbone 인터페이스가 동일해 여기서만 바꾸면 나머지 코드는 그대로 재사용된다.
 # "resnet50_norm"(Macenko stain-normalized 후 ResNet50/Lunit SwAV로 재추출한 feature,
 # utils/extract_features_stain_norm.py)은 인코더 자체는 "resnet50"과 완전히 동일한
 # CNNEncoder(2048-dim)다 — 달라지는 건 어느 캐싱 feature 파일을 읽는지뿐이라
@@ -34,6 +35,7 @@ from config import ModelConfig
 TILE_ENCODER_REGISTRY = {
     "resnet50":      CNNEncoder,
     "uni":           UNIEncoder,
+    "uni2":          UNI2hEncoder,   # UNI2-h(ViT-H/14, 1536-dim), utils/extract_features.py --backbone uni2
     "resnet50_norm": CNNEncoder,
 }
 
@@ -118,11 +120,12 @@ class ViT_M1(nn.Module):
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
                          pooled feature(features 인자)만 입력으로 받는 모드.
                          False면 patch_paths로 이미지를 직접 디코딩/forward한다.
-            backbone:    "resnet50"(기본, CNNEncoder=ResNet50 Lunit SwAV, 2048-dim) 또는
-                         "uni"(UNIEncoder=UNI ViT-L/16, 1024-dim, 224 리사이즈).
+            backbone:    "resnet50"(기본, CNNEncoder=ResNet50 Lunit SwAV, 2048-dim),
+                         "uni"(UNIEncoder=UNI ViT-L/16, 1024-dim, 224 리사이즈) 또는
+                         "uni2"(UNI2hEncoder=UNI2-h ViT-H/14, 1536-dim, 512 리사이즈).
                          data/extract_features.py --backbone과 값을 맞춰야 캐싱된 feature
-                         차원이 일치한다. attribute 이름은 backbone이 uni여도 관례상 self.cnn을
-                         유지한다(train.py의 model.cnn.backbone 참조 전부와 호환).
+                         차원이 일치한다. attribute 이름은 backbone이 uni/uni2여도 관례상
+                         self.cnn을 유지한다(train.py의 model.cnn.backbone 참조 전부와 호환).
             use_attn_dispersion: 2026-07-30 — 학습 파라미터 없는 공간 특징(models/
                          spatial_features.py::attention_dispersion, ViT_PMA가 먼저 도입한 것을
                          이식). ABMIL도 attn_weights를 만드니 PMA 계열만 쓰던 걸 M1/M2에도

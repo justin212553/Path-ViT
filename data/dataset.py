@@ -52,13 +52,14 @@ from torch.utils.data import Dataset
 
 from config import DataConfig
 from data.patch_utils import (
-    FEATURES_FILENAME, FEATURES_NORM_FILENAME, FEATURES_UNI_FILENAME,
+    FEATURES_FILENAME, FEATURES_NORM_FILENAME, FEATURES_UNI_FILENAME, FEATURES_UNI2_FILENAME,
     PATCH_TRANSFORM, list_patch_paths, _parse_coord,
 )
 
 FEATURES_FILENAME_BY_BACKBONE = {
     "resnet50":      FEATURES_FILENAME,
     "uni":           FEATURES_UNI_FILENAME,
+    "uni2":          FEATURES_UNI2_FILENAME,  # UNI2-h(ViT-H/14, models/uni2_encoder.py), utils/extract_features.py --backbone uni2
     "resnet50_norm": FEATURES_NORM_FILENAME,  # Macenko stain-normalized (utils/extract_features_stain_norm.py)
 }
 from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value
@@ -462,9 +463,10 @@ class WSISurvivalDataset(Dataset):
                        (extract_rna_clinical.py가 보장), 다르면 에러.
                        (models/vit_m4.py::ViT_M4, train.py --M4 용)
         feature_backbone: precomputed=True일 때 어느 backbone의 캐싱된 feature 파일을 읽을지
-                       선택한다 — "resnet50"(기본, features.pt) 또는 "uni"(features_uni.pt).
-                       data/extract_features.py --backbone으로 미리 추출해둔 파일이 있어야
-                       한다. 모델(ViT_M1 등) 생성 시 backbone 인자와 반드시 일치시켜야 한다.
+                       선택한다 — "resnet50"(기본, features.pt), "uni"(features_uni.pt) 또는
+                       "uni2"(features_uni2.pt, UNI2-h). data/extract_features.py --backbone으로
+                       미리 추출해둔 파일이 있어야 한다. 모델(ViT_M1 등) 생성 시 backbone 인자와
+                       반드시 일치시켜야 한다.
         rna_gene_ids:  with_rna=True일 때 사용할 유전자 ENSG id 목록. None(기본)이면
                        pdac_subtype_gene_ids()(Bailey/Moffitt subtype 분류용, ~340개)를
                        쓴다. literature_guided_gene_ids(top_n)(data/select_rnaseq_genes.py

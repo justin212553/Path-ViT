@@ -699,10 +699,14 @@ def _parse_args() -> argparse.Namespace:
              "사전 추출한 features.pt 사용)",
     )
     parser.add_argument(
-        "--backbone", type=str, default="resnet50", choices=["resnet50", "uni", "resnet50_norm"],
+        "--backbone", type=str, default="resnet50", choices=["resnet50", "uni", "uni2", "resnet50_norm"],
         help="frozen tile encoder 선택 (기본: resnet50=Lunit SwAV, 2048-dim). uni는 UNI ViT-L/16"
              "(1024-dim, 224 리사이즈) — 미리 `python -m utils.extract_features --backbone uni`로 "
              "features_uni.pt를 뽑아둬야 한다(HuggingFace gated repo 접근 승인 + .env HF_TOKEN 필요). "
+             "uni2는 UNI2-h ViT-H/14(models/uni2_encoder.py, 1536-dim, 512 리사이즈) — HPC에서 "
+             "`python -m utils.extract_features --backbone uni2`(sbatch/extract_features_uni2_array_hpc.sh)"
+             "로 뽑은 features_uni2.pt를 <patches_root>/<slide_id>/ 아래 그대로 두면 된다(uni와 "
+             "별도 gated repo 승인 필요, MahmoodLab/UNI2-h). "
              "resnet50_norm은 Macenko stain-normalized 후 같은 ResNet50/Lunit SwAV로 재추출한 "
              "feature(features_norm.pt, utils/extract_features_stain_norm.py) — 인코더 자체는 "
              "resnet50과 동일(2048-dim), 캐싱 파일만 다르다.",
@@ -1191,8 +1195,9 @@ def main():
     if args.fusion and args.backbone != "resnet50":
         raise ValueError(
             "--fusion(LateFusionViT)의 cluster_centroids.pt는 ResNet50 raw feature(2048-dim) "
-            "기준으로 사전 계산돼 있어 --backbone uni(1024-dim)와 호환되지 않습니다. "
-            "uni로 --fusion을 쓰려면 data/fit_clusters.py를 features_uni.pt 기준으로 다시 돌려야 합니다."
+            f"기준으로 사전 계산돼 있어 --backbone {args.backbone}와 호환되지 않습니다. "
+            f"{args.backbone}로 --fusion을 쓰려면 data/fit_clusters.py를 해당 backbone의 "
+            "feature 파일 기준으로 다시 돌려야 합니다."
         )
     centroids_path = Path(__file__).parent / CENTROIDS_DIR
     if args.fusion and not centroids_path.exists():
