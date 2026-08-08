@@ -1091,6 +1091,16 @@ def _parse_args() -> argparse.Namespace:
              "처음 시도. --clinical-margin/--no-age-sex 지원(M7/PMA와 동일 관례). "
              "data/clinical_{tcga,cptac}.csv 필요. --fusion/--avgpool과 동시 사용 불가.",
     )
+    parser.add_argument(
+        "--eval-external-ckpt", type=str, default=None,
+        help="2026-08-08: 주어지면 학습을 전혀 하지 않고, 이 경로의 checkpoint를 로드해 --external "
+             "코호트 전체에 대해서만 딱 한 번 평가한 뒤 환자별 예측을 .logs/external_preds/에 CSV로 "
+             "저장하고 즉시 종료한다(scripts/pool_multiseed_kfold_preds.py의 external 버전 입력용). "
+             "다른 모든 인자(--PMA/--backbone/--rna-genes/--fold 등)는 그 checkpoint를 만들 때와 "
+             "정확히 똑같이 줘야 한다(모델 구조/차원이 일치해야 state_dict가 로드됨) — 학습 자체를"
+             "다시 돌리지 않고 이미 저장된 checkpoint 15개(3seed x 5fold 등)의 external 예측만 "
+             "빠르게 재추출할 때 쓴다. --external 없이 쓰면 에러.",
+    )
     return parser.parse_args()
 
 
@@ -1736,6 +1746,34 @@ def main():
             raise ValueError("--stage-aux-weight는 WSI를 쓰는 모델에서만 사용 가능합니다 (--M5/--M6/--M6X 불가).")
         # rna_aux_head와 동일한 이유로 optimizer 생성 이전에 붙인다.
         model.stage_aux_head = StagePredictionHead(cfg.model.embed_dim, stage_stats).to(device)
+
+    if args.eval_external_ckpt:
+        # [--eval-external-ckpt] 학습을 건너뛰고 이미 저장된 checkpoint의 external 예측만 다시
+        # 뽑는다 — model/dataset 생성 코드는 위에서 이미 정상 경로 그대로 실행됐으니(구조 불일치
+        # 위험 없음) 여기서 state_dict만 얹고 evaluate()를 한 번 호출한 뒤 즉시 종료한다.
+        if external_loader is None:
+            raise ValueError("--eval-external-ckpt는 --external과 함께 써야 합니다.")
+        ckpt = torch.load(args.eval_external_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"--eval-external-ckpt: {args.eval_external_ckpt} 로드 완료 "
+              f"(epoch={ckpt.get('epoch')}, val_c_index={ckpt.get('val_c_index')})")
+        external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                     desc="external(ckpt-eval)")
+        print(f"  external c_index={external_metrics['c_index']:.4f} | HR={external_metrics['hr']:.3f} "
+              f"[{external_metrics['hr_ci_lower']:.3f}, {external_metrics['hr_ci_upper']:.3f}] | "
+              f"log_rank_p={external_metrics['log_rank_p']:.4f}")
+        import csv
+        pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = pred_dir / f"{external_dataset}_{model_prefix}_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+        with open(pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                        external_metrics["times"], external_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> external predictions saved: {pred_path}")
+        return
 
     if args.sam and args.sam_wsi_only:
         # WSI 브랜치 파라미터만 rho=args.sam_rho, 나머지는 rho=0(=perturbation 없음, 사실상
