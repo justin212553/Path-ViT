@@ -38,6 +38,12 @@ _TIMM_KWARGS = dict(
     act_layer=torch.nn.SiLU,
     reg_tokens=8,
     dynamic_img_size=True,  # 224 외 해상도 입력도 허용(positional embedding 보간) — UNI와 동일 관례
+    # 2026-08-08: patch_size=14는 512(UNI_PATCH_TRANSFORM의 리사이즈 타깃)로 나누어떨어지지
+    # 않는다(512/14=36.57) — dynamic_img_size=True만으로는 timm의 PatchEmbed가
+    # "Input height should be divisible by patch size" AssertionError를 낸다(HPC에서 실제
+    # 확인). dynamic_img_pad=True를 추가해 나머지를 자동 패딩하게 한다 — UNI(patch16, 512/16=32
+    # 로 이미 나누어떨어짐)에는 없던 문제라 UNIEncoder에는 없다.
+    dynamic_img_pad=True,
 )
 
 
