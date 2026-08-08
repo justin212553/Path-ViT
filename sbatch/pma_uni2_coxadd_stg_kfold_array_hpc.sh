@@ -8,7 +8,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --array=0-4
-#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/pma_uni_coxadd_stg_aug_kfold_array_%a.log
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/pma_uni2_coxadd_stg_kfold_array_%a.log
 
 # 2026-08-07(2차): --strong-blur 버전(kernel_size 5, sigma 상한 2.0, 적용확률 0.35) 결과 —
 # external이 오히려 no-aug(0.644±0.011)보다 떨어졌다(0.614±0.008, internal은 반대로 0.659까지
@@ -17,7 +17,7 @@
 # ColorJitter + 약한 blur, kernel_size=3/sigma 상한 1.0/적용확률 0.15, PATCH_TRANSFORM_AUGMENTED_
 # CACHED)로 재검증한다. --strong-blur 제거.
 #
-# 로컬 no-aug 파일럿(PMA_uni_INT1500_SS_AUX_STG_R_DISP_COX_ADD, seed84) 기준값:
+# 로컬 no-aug 파일럿(PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD, seed84) 기준값:
 #   internal(pooled) 0.617 / external(mean) 0.644 ± 0.011 — 지금까지 최고 기록.
 # M3(ResNet50)에서 기본 AUG는 평균 성능은 거의 안 바꾸면서(0.633->0.628) fold 간 internal
 # 분산을 30% 줄였다(std 0.063->0.045) — "값의 크기"가 아니라 "값의 안정성"에 기여했었다.
@@ -28,9 +28,9 @@
 # blur 세기만 바꾼 이번 버전도 비슷한 시간대일 것으로 예상.
 #
 # 완료 후 집계(model_prefix에 _STG_R_AUG_DISP_COX_ADD 태그가 들어간다는 점 주의, _BLUR 없음):
-#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model PMA_uni_INT1500_SS_AUX_STG_R_AUG_DISP_COX_ADD
+#   python scripts/summarize_kfold.py --dataset tcga --seed 84 --n-folds 5 --model PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD
 #
-# 제출: sbatch sbatch/pma_uni_coxadd_stg_aug_kfold_array_hpc.sh
+# 제출: sbatch sbatch/pma_uni2_coxadd_stg_kfold_array_hpc.sh
 
 cd /pub/wonseukl/Path-ViT/
 
