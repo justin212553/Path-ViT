@@ -30,7 +30,13 @@ from utils.metrics import compute_survival_metrics
 
 
 def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> dict:
-    path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
+    # train.py --eval-external-ckpt는 model_prefix를 그대로 파일명에 쓰는데, model_prefix 자체에
+    # 이미 "_FOLD{fold}OF{n_folds}" 접미사가 붙어 있다(args.fold is not None일 때 항상 추가됨,
+    # pool_kfold_preds.py::internal 예측 파일명과 동일한 관례) — 그래서 이 형태를 먼저 시도하고,
+    # 혹시 model_prefix에 그 접미사가 없는 값을 넘긴 경우를 대비해 접미사 없는 이름도 폴백으로 둔다.
+    path = pred_dir / f"{dataset}_{model}_FOLD{fold}OF{n_folds}_seed{seed}_fold{fold}of{n_folds}.csv"
+    if not path.exists():
+        path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
     if not path.exists():
         raise FileNotFoundError(f"seed={seed} fold={fold} external 예측 파일을 못 찾음: {path}")
     preds = {}
