@@ -46,7 +46,7 @@ N_FOLDS=5
 
 for SEED in "${SEEDS[@]}"; do
   for ((FOLD=0; FOLD<N_FOLDS; FOLD++)); do
-    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2_seed${SEED}_*_FOLD${FOLD}OF${N_FOLDS}_*_best_pma.pt 2>/dev/null)
+    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2_seed${SEED}_*FOLD${FOLD}OF${N_FOLDS}*best_pma.pt 2>/dev/null)
     if [ "${#MATCHES[@]}" -eq 0 ]; then
       echo "[SKIP] seed=${SEED} fold=${FOLD}: checkpoint를 못 찾음 (학습이 아직 안 끝났거나 경로가 다름)"
       continue
