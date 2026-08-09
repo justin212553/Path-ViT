@@ -345,6 +345,15 @@ def _parse_args() -> argparse.Namespace:
         help="--risk-hidden-dim과 함께 사용하는 risk_head 내부 dropout(기본 0.0). 레퍼런스는 0.4.",
     )
     parser.add_argument(
+        "--eval-external-ckpt", type=str, default=None,
+        help="2026-08-08: train.py --eval-external-ckpt와 동일 관례 — 학습을 전혀 하지 않고, 이 "
+             "경로의 checkpoint를 로드해 --external 코호트 전체에 대해서만 딱 한 번 평가한 뒤 "
+             "환자별 예측을 .logs/external_preds/에 CSV로 저장하고 즉시 종료한다"
+             "(scripts/pool_multiseed_external_preds.py 입력용). 다른 모든 인자(--M5/--M6/--M7/"
+             "--rna-genes/--fold 등)는 그 checkpoint를 만들 때와 정확히 똑같이 줘야 한다. "
+             "--external 없이 쓰면 에러.",
+    )
+    parser.add_argument(
         "--combine-mode", type=str, default="concat", choices=["concat", "film", "cox_add"],
         help="--M7 전용: clinical과 RNA를 합치는 방식(models/clinical_rna_only.py::ClinicalRNAOnly "
              "참조). concat(기본, 기존 동작) | film(clinical→스칼라 γ,β로 z_rna 전체를 균일 "
@@ -380,6 +389,8 @@ def main():
         if args.dataset == "both":
             raise ValueError("--external은 --dataset both와 함께 쓸 수 없습니다.")
         external_dataset = {"tcga": "cptac", "cptac": "tcga"}[args.dataset]
+    if args.eval_external_ckpt and not args.external:
+        raise ValueError("--eval-external-ckpt는 --external과 함께 써야 합니다.")
 
     if args.rna_genes.endswith("_tcga_only") and not (args.dataset == "tcga" and args.external):
         raise ValueError(
@@ -548,7 +559,7 @@ def main():
     run_ts = datetime.now().strftime("%m%d::%H%M")
     group_ts = args.group_ts or run_ts
     wandb_group = f"{model_prefix}_{group_ts}"
-    if WANDB_AVAILABLE:
+    if WANDB_AVAILABLE and not args.eval_external_ckpt:
         run_name = f"{args.dataset.upper()}_{model_prefix}_seed{cfg.light.seed}_{run_ts}"
         wandb.init(
             project="Path-ViT",
@@ -591,6 +602,33 @@ def main():
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
     test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
+
+    if args.eval_external_ckpt:
+        # [--eval-external-ckpt] train.py와 동일 관례 — 학습을 건너뛰고 이미 저장된 checkpoint의
+        # external 예측만 다시 뽑는다. model/dataset은 위에서 이미 정상 경로로 생성됐으니(구조
+        # 불일치 위험 없음) 여기서 state_dict만 얹고 evaluate()를 한 번 호출한 뒤 즉시 종료한다.
+        if external_loader is None:
+            raise ValueError("--eval-external-ckpt는 --external과 함께 써야 합니다.")
+        ckpt = torch.load(args.eval_external_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"--eval-external-ckpt: {args.eval_external_ckpt} 로드 완료 "
+              f"(epoch={ckpt.get('epoch')}, val_c_index={ckpt.get('val_c_index')})")
+        external_metrics = evaluate(model, external_loader, device)
+        print(f"  external c_index={external_metrics['c_index']:.4f} | HR={external_metrics['hr']:.3f} "
+              f"[{external_metrics['hr_ci_lower']:.3f}, {external_metrics['hr_ci_upper']:.3f}] | "
+              f"log_rank_p={external_metrics['log_rank_p']:.4f}")
+        import csv
+        pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = pred_dir / f"{external_dataset}_{model_prefix}_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+        with open(pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                        external_metrics["times"], external_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> external predictions saved: {pred_path}")
+        return
 
     split_desc = f"{args.n_folds}-fold CV, fold {args.fold}" if args.fold is not None else "6:2:2 stratified split"
     print(f"Model: {model_prefix} ({type(model).__name__}) | params={sum(p.numel() for p in model.parameters()):,}")

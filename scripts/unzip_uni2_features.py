@@ -1,4 +1,4 @@
-"""
+r"""
 scripts/zip_uni2_features.py(HPC에서 실행)로 만든 uni2_features.zip을 프로젝트 루트에 그대로
 풀어 data/patches_{tcga,cptac}/tiles/<slide_id>/features_uni2.pt 원래 위치에 복원한다. zip
 안의 경로가 이미 프로젝트 루트 기준 상대경로(data/patches_.../...)라 압축 해제 대상 폴더만
@@ -6,7 +6,7 @@ scripts/zip_uni2_features.py(HPC에서 실행)로 만든 uni2_features.zip을 �
 
 사용법(로컬, 프로젝트 루트에서):
     python -m scripts.unzip_uni2_features uni2_features.zip
-    python -m scripts.unzip_uni2_features "D:\Downloads\uni2_features.zip"
+    python -m scripts.unzip_uni2_features D:/Downloads/uni2_features.zip
 """
 import argparse
 import sys
