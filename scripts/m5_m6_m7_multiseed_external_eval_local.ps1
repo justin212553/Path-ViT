@@ -15,10 +15,14 @@ Remove-Item Env:\SSL_CERT_FILE -ErrorAction SilentlyContinue
 $Seeds = @(42, 84, 126)
 $NFolds = 5
 
+# 2026-08-08: Glob을 "survival_tcga_best_m5*"처럼 느슨하게 잡았다가, 프로젝트에 이미 쌓여있는
+# 다른 M5/M6/M7 변형(예: m6_ex_*, m7_d20_*, m7_ex_clindim*...) checkpoint까지 매칭돼 엉뚱한
+# 체크포인트(구조가 달라 state_dict 로드 자체가 실패)를 집어온 사고가 있었다 — 이번 레시피의
+# 정확한 태그(model_prefix.lower())까지 접두사에 포함해 다른 변형과 절대 안 섞이게 좁힌다.
 $Models = @(
-    @{ Name = "M5"; Glob = "survival_tcga_best_m5*"; Args = @("--M5", "--clinical-margin", "--clinical-staging") },
-    @{ Name = "M6"; Glob = "survival_tcga_best_m6*"; Args = @("--M6", "--rna-genes", "literature_1500_intersection") },
-    @{ Name = "M7"; Glob = "survival_tcga_best_m7*"; Args = @("--M7", "--rna-genes", "literature_1500_intersection", "--clinical-margin", "--clinical-staging", "--combine-mode", "cox_add") }
+    @{ Name = "M5"; Glob = "survival_tcga_best_m5_stg_r_*"; Args = @("--M5", "--clinical-margin", "--clinical-staging") },
+    @{ Name = "M6"; Glob = "survival_tcga_best_m6_int1500_*"; Args = @("--M6", "--rna-genes", "literature_1500_intersection") },
+    @{ Name = "M7"; Glob = "survival_tcga_best_m7_int1500_stg_r_cox_add_*"; Args = @("--M7", "--rna-genes", "literature_1500_intersection", "--clinical-margin", "--clinical-staging", "--combine-mode", "cox_add") }
 )
 
 foreach ($m in $Models) {
@@ -27,11 +31,11 @@ foreach ($m in $Models) {
             $pattern = "$($m.Glob)fold${fold}of${NFolds}_seed${seed}_light.pt"
             $matches = Get-ChildItem -Path "models/checkpoint" -Filter $pattern -ErrorAction SilentlyContinue
             if (-not $matches) {
-                Write-Host "[SKIP] $($m.Name) seed=$seed fold=$fold: checkpoint 못 찾음 (패턴: $pattern)"
+                Write-Host "[SKIP] $($m.Name) seed=$seed fold=${fold}: checkpoint 못 찾음 (패턴: $pattern)"
                 continue
             }
             if ($matches.Count -gt 1) {
-                Write-Host "[경고] $($m.Name) seed=$seed fold=$fold: checkpoint가 $($matches.Count)개 매칭됨 — 첫 번째만 사용: $($matches[0].Name)"
+                Write-Host "[경고] $($m.Name) seed=$seed fold=${fold}: checkpoint가 $($matches.Count)개 매칭됨 — 첫 번째만 사용: $($matches[0].Name)"
             }
             $ckpt = "models/checkpoint/$($matches[0].Name)"
 
@@ -41,6 +45,7 @@ foreach ($m in $Models) {
                 "--fold", "$fold", "--n-folds", "$NFolds", "--eval-external-ckpt", $ckpt
             )
             python -u .\train_light.py @fullArgs
+            if ($LASTEXITCODE -ne 0) { Write-Host "FAILED: $($m.Name) seed=$seed fold=${fold} (exit $LASTEXITCODE)" }
             Write-Host "=== external eval-only: $($m.Name) seed=$seed fold=$fold Complete: $(Get-Date) ==="
         }
     }

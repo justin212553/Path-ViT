@@ -46,7 +46,12 @@ N_FOLDS=5
 
 for SEED in "${SEEDS[@]}"; do
   for ((FOLD=0; FOLD<N_FOLDS; FOLD++)); do
-    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2_seed${SEED}_*FOLD${FOLD}OF${N_FOLDS}*best_pma.pt 2>/dev/null)
+    # 2026-08-08: 원래 글롭(*FOLD..OF..*best_pma.pt)이 너무 느슨해 --PMA --no-clinical(M3,
+    # sbatch/m3_uni2_multiseed_kfold_array_hpc.sh)도 checkpoint 접미사가 똑같이 best_pma.pt라
+    # 같은 seed/fold 조합이면 잘못 매칭되는 사고가 있었다(RuntimeError: clinical 관련 buffer
+    # missing — M3 checkpoint엔 age_mean/margin_mean 등이 아예 없음). 이 레시피의 정확한 태그
+    # (STG_R_DISP_COX_ADD)까지 FOLD 앞에 고정해 M3/다른 PMA 변형과 절대 안 섞이게 좁힌다.
+    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2_seed${SEED}_*STG_R_DISP_COX_ADD_FOLD${FOLD}OF${N_FOLDS}_best_pma.pt 2>/dev/null)
     if [ "${#MATCHES[@]}" -eq 0 ]; then
       echo "[SKIP] seed=${SEED} fold=${FOLD}: checkpoint를 못 찾음 (학습이 아직 안 끝났거나 경로가 다름)"
       continue

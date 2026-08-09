@@ -8,7 +8,7 @@
 #SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --array=0-14
-#SBATCH --output=/pub/wonseukl/Path-ViT/.logs/m1_pool_uni2_multiseed_kfold_array_%a.log
+#SBATCH --output=/pub/wonseukl/Path-ViT/.logks/m1_pool_uni2_multiseed_kfold_array_%a.log
 
 # M1_POOL(다성분 pooling+self-attention, WSI 단독, clinical/RNA 없음)을 UNI2-h로 3seed(42/84/126)
 # x 5-fold = 15개 array job으로 학습. sbatch/pma_uni2_coxadd_stg_multiseed_kfold_array_hpc.sh와
