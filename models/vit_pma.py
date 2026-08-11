@@ -59,10 +59,13 @@ class ViT_PMA(ViT_M1):
         combine_mode: str = "concat",
         drop_component: str | None = None,
         top_frac: float = 0.1,
+        rna_combine_mode: str = "concat",
     ):
         super().__init__(cfg, precomputed, backbone)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
+        if rna_combine_mode not in ("concat", "cox_add"):
+            raise ValueError(f"알 수 없는 rna_combine_mode: {rna_combine_mode}")
         rna_dim = rna_dim or cfg.embed_dim
         clinical_dim = clinical_dim or cfg.embed_dim
         self.rna_gate_only = rna_gate_only
@@ -76,6 +79,15 @@ class ViT_PMA(ViT_M1):
         # Cox 가산항(clinical_linear, zero-init)으로 직접 더한다 — M7에서 cox_add가 R_ONLY(margin
         # 단독)의 internal을 M6 수준까지 끌어올린 효과가 PMA에도 재현되는지 검증.
         self.combine_mode = combine_mode
+        # 2026-08-09: clinical의 cox_add 원리를 RNA에도 이식 — RNA는 여전히 component_coattn의
+        # query로 WSI pooling을 guide하지만(M1_POOL 대비 M3에서 이미 유효성이 확인된 경로,
+        # 이건 그대로 둔다), risk_head에 z_rna를 직결 concat하는 경로만 떼어내 별도의 고전적
+        # Cox 가산항(rna_linear, zero-init)으로 바꾼다. rna_gate_only(z_rna를 아예 안 씀)와는
+        # 달리 z_rna의 marginal 기여를 구조적으로 분리해서 보존한다는 점이 다르다.
+        self.rna_combine_mode = rna_combine_mode
+        if rna_combine_mode == "cox_add":
+            self.rna_linear = nn.Linear(rna_dim, 1, bias=False)
+            nn.init.zeros_(self.rna_linear.weight)  # 초기엔 z_rna 가산항 없는 것과 동일
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
         self.use_staging = use_staging
@@ -143,7 +155,7 @@ class ViT_PMA(ViT_M1):
         risk_input_dim = (
             cfg.embed_dim
             + (clinical_dim if (self.use_clinical and combine_mode == "concat") else 0)
-            + (0 if rna_gate_only else rna_dim)
+            + (0 if (rna_gate_only or rna_combine_mode == "cox_add") else rna_dim)
             + spatial_feat_dim
         )
         self.risk_head = nn.Sequential(
@@ -210,10 +222,11 @@ class ViT_PMA(ViT_M1):
                 age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
             ).squeeze(0)  # (D,)
             parts.append(z_clinical)
-        if not self.rna_gate_only:
-            # rna_gate_only=True면 z_rna는 위 co-attention의 query로만 관여하고, risk_head에는
-            # 직결 concat하지 않는다 — RNA로 곧장 우회하는 "지름길"을 막아 risk_head가
-            # z_wsi(에 이미 녹아든 RNA 정보)와 z_clinical만으로 예측하도록 강제한다.
+        if not self.rna_gate_only and self.rna_combine_mode != "cox_add":
+            # rna_gate_only=True거나 rna_combine_mode="cox_add"면 z_rna는 위 co-attention의
+            # query로만 관여하고 risk_head에는 직결 concat하지 않는다. rna_gate_only는 z_rna의
+            # marginal 기여 자체를 차단하는 것이고, cox_add는 그 기여를 risk_head 밖의 별도
+            # 가산항(rna_linear)으로 옮기는 것이라 목적이 다르다(호출부 train.py가 더함).
             parts.append(z_rna)
         fused = torch.cat(parts, dim=-1)
         if spatial_feat is not None:

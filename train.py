@@ -318,6 +318,12 @@ def _patient_risk(
             # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
             clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
             risk = risk + model.clinical_linear(clin_raw).view(1)
+        if getattr(model, "rna_combine_mode", "concat") == "cox_add":
+            # 2026-08-09: models/vit_pma.py::ViT_PMA rna_combine_mode="cox_add" — z_rna는 여전히
+            # component_coattn의 query로 WSI pooling을 guide했지만(combine_with_clinical_rna에서
+            # 이미 반영됨), risk_head에는 직결 concat되지 않았으므로 여기서 별도 Cox 가산항으로
+            # 더한다. clinical cox_add와 완전히 같은 관례 — z_rna는 위에서 이미 계산돼 있음.
+            risk = risk + model.rna_linear(z_rna).view(1)
     return risk, aux_loss, stage_aux_loss
 
 
@@ -487,6 +493,23 @@ def _parse_args() -> argparse.Namespace:
              "case split 재현성과 학습 seed를 동시에 바꿔 여러 seed로 반복 실행할 때 쓴다.",
     )
     parser.add_argument(
+        "--lr", type=float, default=None,
+        help="cfg.train.lr(기본 1e-5) 덮어쓰기. train_light.py --lr과 동일 관례 — WSI 스택은 "
+             "이 값을 왜 1e-5로 낮게 잡았는지 재검토된 적이 없어서(findings_backlog.md, Ray "
+             "Tune 스윕 보류 항목) 하이퍼파라미터 스윕용으로 노출한다. 기본값과 다르면 "
+             "model_prefix에 _LR{lr}이 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--weight-decay", type=float, default=None,
+        help="cfg.train.weight_decay(기본 1e-1) 덮어쓰기. 기본값과 다르면 model_prefix에 "
+             "_WD{wd}가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--warmup-epochs", type=int, default=None,
+        help="cfg.train.warmup_epochs(기본 3) 덮어쓰기. 기본값과 다르면 model_prefix에 "
+             "_WARMUP{n}이 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--fold", type=int, default=None,
         help="주어지면(0-based) internal train/val/test를 단일 6:2:2 대신 K-fold(data/dataset.py::"
              "_kfold_case_split)로 배정한다 — 이 fold를 test로, 나머지를 다시 60:20으로 train/val "
@@ -648,6 +671,15 @@ def _parse_args() -> argparse.Namespace:
              "과적합 압력이 줄 수 있다는 가설). co-attention은 토큰 개수에 무관하게 동작해 "
              "risk_head 등 다른 차원엔 영향 없음. 기본 None(4개 다 사용, 기존 동작). 켜면 "
              "model_prefix에 _NO{COMPONENT}가 붙는다(예: --drop-component top -> _NOTOP).",
+    )
+    parser.add_argument(
+        "--rna-combine-mode", type=str, default="concat", choices=["concat", "cox_add"],
+        help="--PMA 전용(models/vit_pma.py::ViT_PMA). 2026-08-09: clinical의 cox_add 원리를 "
+             "RNA에도 이식 — RNA는 여전히 component_coattn의 query로 WSI pooling을 guide하지만"
+             "(이 경로는 그대로 둠), risk_head에 z_rna를 직결 concat하던 경로만 떼어내 별도의 "
+             "고전적 Cox 가산항(rna_linear, zero-init)으로 바꾼다. --rna-gate-only(z_rna의 "
+             "기여 자체를 차단)와 달리 z_rna의 marginal 기여를 구조적으로 분리해서 보존한다는 "
+             "점이 다르다. 기본 concat(기존 동작). 켜면 model_prefix에 _RNACOXADD가 붙는다.",
     )
     parser.add_argument(
         "--top-frac", type=float, default=0.1,
@@ -1152,6 +1184,12 @@ def main():
     if args.seed is not None:
         cfg.data.seed  = args.seed
         cfg.train.seed = args.seed
+    if args.lr is not None:
+        cfg.train.lr = args.lr
+    if args.weight_decay is not None:
+        cfg.train.weight_decay = args.weight_decay
+    if args.warmup_epochs is not None:
+        cfg.train.warmup_epochs = args.warmup_epochs
     if args.num_workers is not None:
         cfg.data.num_workers = args.num_workers
     if args.tile_decode_workers is not None:
@@ -1479,6 +1517,14 @@ def main():
         model_prefix += f"_NO{args.drop_component.upper()}"
     if args.top_frac != 0.1:
         model_prefix += f"_TOPFRAC{args.top_frac:g}"
+    if args.rna_combine_mode == "cox_add":
+        model_prefix += "_RNACOXADD"
+    if args.lr is not None:
+        model_prefix += f"_LR{args.lr:.0e}"
+    if args.weight_decay is not None:
+        model_prefix += f"_WD{args.weight_decay:.0e}"
+    if args.warmup_epochs is not None:
+        model_prefix += f"_WARMUP{args.warmup_epochs}"
     if args.sam:
         # 2026-08-06: 이 태그가 없으면 --sam 유무만 다른 두 실행이 model_prefix/checkpoint/
         # kfold_preds 파일명이 완전히 같아져 서로 덮어쓴다(_AUG/_NOSPATIAL 빠뜨렸을 때와 동일한
@@ -1702,7 +1748,7 @@ def main():
                          rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
                          rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
                          combine_mode=args.combine_mode, drop_component=args.drop_component,
-                         top_frac=args.top_frac,
+                         top_frac=args.top_frac, rna_combine_mode=args.rna_combine_mode,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
