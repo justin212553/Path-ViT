@@ -114,7 +114,7 @@ class AttentionPooling(nn.Module):
 
 class ViT_M1(nn.Module):
     def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50",
-                 use_attn_dispersion: bool = False):
+                 use_attn_dispersion: bool = False, skip_patch_vit: bool = False):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -135,6 +135,13 @@ class ViT_M1(nn.Module):
         self.precomputed = precomputed
         self.backbone_name = backbone
         self.use_attn_dispersion = use_attn_dispersion
+        # 2026-08-11: True면 patch 간 self-attention을 섞는 self.vit(ViTEncoder, Nystrom/full
+        # attention 1-layer)을 아예 생성하지 않고 patch_tokens를 그대로 attn_pool에 넘긴다 —
+        # UNI2-h처럼 이미 강한 사전학습 backbone을 쓸 때, 적은 표본(환자 ~150명)으로 처음부터
+        # 학습하는 이 작은 patch-mixing transformer가 오히려 좋은 patch token을 흐릴 수 있다는
+        # 가설의 구조적 ablation(post-hoc이 아니라 처음부터 재학습 — NOTOP에서 post-hoc 신호가
+        # 재현 안 됐던 전례 때문에 구조적 재학습으로만 검증).
+        self.skip_patch_vit = skip_patch_vit
         self.tile_decode_workers = getattr(cfg, "tile_decode_workers", 4)
         if use_attn_dispersion:
             # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
@@ -148,20 +155,23 @@ class ViT_M1(nn.Module):
             self.dispersion_scale = nn.Parameter(torch.tensor(0.2))
         encoder_cls = TILE_ENCODER_REGISTRY[backbone]
         self.cnn = encoder_cls(cfg.embed_dim, with_backbone=not precomputed)
-        self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
-                              cfg.num_transformer_layers, cfg.dropout,
-                              use_grad_checkpoint=cfg.grad_checkpoint,
-                              num_landmarks=cfg.num_landmarks,
-                              use_nystrom=cfg.use_nystrom,
-                              use_spatial_embed=cfg.use_spatial_embed,
-                              use_rel_bias_attn=getattr(cfg, "use_rel_bias_attn", False),
-                              use_knn_bias_attn=getattr(cfg, "use_knn_bias_attn", False),
-                              use_hybrid_attn=getattr(cfg, "use_hybrid_attn", False),
-                              use_knn_fixed_bias_attn=getattr(cfg, "use_knn_fixed_bias_attn", False),
-                              knn_k=getattr(cfg, "knn_attn_k", 8),
-                              knn_edge_dropout=getattr(cfg, "knn_attn_edge_dropout", 0.2),
-                              knn_bias_tau=getattr(cfg, "knn_bias_tau", 50.0),
-                              knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False))
+        if skip_patch_vit:
+            self.vit = None
+        else:
+            self.vit = ViTEncoder(cfg.embed_dim, cfg.num_heads,
+                                  cfg.num_transformer_layers, cfg.dropout,
+                                  use_grad_checkpoint=cfg.grad_checkpoint,
+                                  num_landmarks=cfg.num_landmarks,
+                                  use_nystrom=cfg.use_nystrom,
+                                  use_spatial_embed=cfg.use_spatial_embed,
+                                  use_rel_bias_attn=getattr(cfg, "use_rel_bias_attn", False),
+                                  use_knn_bias_attn=getattr(cfg, "use_knn_bias_attn", False),
+                                  use_hybrid_attn=getattr(cfg, "use_hybrid_attn", False),
+                                  use_knn_fixed_bias_attn=getattr(cfg, "use_knn_fixed_bias_attn", False),
+                                  knn_k=getattr(cfg, "knn_attn_k", 8),
+                                  knn_edge_dropout=getattr(cfg, "knn_attn_edge_dropout", 0.2),
+                                  knn_bias_tau=getattr(cfg, "knn_bias_tau", 50.0),
+                                  knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False))
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
@@ -249,7 +259,7 @@ class ViT_M1(nn.Module):
             attn_weights: (N_patches,)
         """
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
-        ctx_tokens   = self.vit(patch_tokens, coords)                          # (N, D)
+        ctx_tokens   = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords)  # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
         # (models/rna_predictor.py::RNAPredictionHead) 보조과제 입력으로만 쓰인다.

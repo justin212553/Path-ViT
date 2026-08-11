@@ -91,7 +91,16 @@ class ViT_M4A(ViT_M4):
         num_heads: int = 4,
         use_staging: bool = False,
         stage_stats: dict[str, tuple[float, float]] | None = None,
+        use_margin: bool = False,
+        margin_stats: tuple[float, float] | None = None,
+        use_age_sex: bool = True,
+        combine_mode: str = "concat",
+        use_attn_dispersion: bool = False,
+        skip_patch_vit: bool = False,
     ):
         super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
-                          use_staging=use_staging, stage_stats=stage_stats)
+                          use_staging=use_staging, stage_stats=stage_stats,
+                          use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
+                          combine_mode=combine_mode, use_attn_dispersion=use_attn_dispersion,
+                          skip_patch_vit=skip_patch_vit)
         self.attn_pool = CoAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)

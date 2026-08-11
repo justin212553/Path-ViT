@@ -682,6 +682,16 @@ def _parse_args() -> argparse.Namespace:
              "점이 다르다. 기본 concat(기존 동작). 켜면 model_prefix에 _RNACOXADD가 붙는다.",
     )
     parser.add_argument(
+        "--skip-patch-vit", action="store_true",
+        help="--PMA 등 ViT_M1 계열 공통(models/vit_m1.py). 패치 간 self-attention을 섞는 "
+             "self.vit(ViTEncoder, Nystrom/full attention 1-layer)을 아예 생성하지 않고, "
+             "backbone(UNI2 등) 출력을 embed_dim으로 projection한 patch_tokens를 그대로 "
+             "attn_pool(MultiComponentPooling 등)에 넘긴다. 2026-08-11: UNI2-h처럼 이미 강한 "
+             "사전학습 backbone을 쓸 때, 적은 표본(환자 ~150명)으로 처음부터 학습하는 이 작은 "
+             "patch-mixing transformer가 오히려 좋은 patch token을 흐릴 수 있다는 가설의 구조적 "
+             "ablation. 켜면 model_prefix에 _NOVIT가 붙는다.",
+    )
+    parser.add_argument(
         "--top-frac", type=float, default=0.1,
         help="--PMA 전용(models/multi_component_pooling.py::MultiComponentPooling). top-k-mean "
              "성분이 attention 상위 몇 %%의 패치를 평균할지(기본 0.1=10%%). 2026-08-09: "
@@ -1519,6 +1529,8 @@ def main():
         model_prefix += f"_TOPFRAC{args.top_frac:g}"
     if args.rna_combine_mode == "cox_add":
         model_prefix += "_RNACOXADD"
+    if args.skip_patch_vit:
+        model_prefix += "_NOVIT"
     if args.lr is not None:
         model_prefix += f"_LR{args.lr:.0e}"
     if args.weight_decay is not None:
@@ -1734,8 +1746,14 @@ def main():
         model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
     elif args.M4A:
+        # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
+        # patch-level co-attention(MCAT 스타일)을 지금의 최종 레시피와 공정하게 비교하기 위함
+        # (models/vit_m4.py 참조. 이전 findings_backlog.md의 M4A 기록은 이 레시피 이전 것들).
         model = ViT_M4A(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                         precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+                         precomputed=cfg.data.precomputed, backbone=args.backbone,
+                         use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                         skip_patch_vit=args.skip_patch_vit,
+                         **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                          precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -1749,6 +1767,7 @@ def main():
                          rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
                          combine_mode=args.combine_mode, drop_component=args.drop_component,
                          top_frac=args.top_frac, rna_combine_mode=args.rna_combine_mode,
+                         skip_patch_vit=args.skip_patch_vit,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,

@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 
 from .vit_m1 import ViT_M1, AttentionPooling
-from .clinical_encoder import ClinicalEncoder
+from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
@@ -60,27 +60,73 @@ class ViT_M4(ViT_M1):
         backbone: str = "resnet50",
         use_staging: bool = False,
         stage_stats: dict[str, tuple[float, float]] | None = None,
+        use_margin: bool = False,
+        margin_stats: tuple[float, float] | None = None,
+        use_age_sex: bool = True,
+        combine_mode: str = "concat",
+        use_attn_dispersion: bool = False,
+        skip_patch_vit: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone)
-        self.clinical_encoder = ClinicalEncoder(
-            cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
-        )
+        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
+                          skip_patch_vit=skip_patch_vit)
+        if combine_mode not in ("concat", "cox_add"):
+            raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
+        self.combine_mode = combine_mode
+        self.use_staging = use_staging
+        self.use_margin = use_margin
+        self.use_age_sex = use_age_sex
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
 
         # ViT_M1이 만든 context 없는 attn_pool을, z_rna(D차원)를 attention 게이트에
         # additive bias로 받을 수 있는 버전으로 교체한다 — RNA-guided attention pooling.
         self.attn_pool = AttentionPooling(cfg.embed_dim, context_dim=cfg.embed_dim)
 
-        # Late Fusion risk head: [z_wsi ‖ z_clinical ‖ z_rna] (3D,) → risk_score (1,)
-        # ViT_M1이 만든 D 차원 risk_head를 3D 차원으로 교체한다.
+        # 2026-08-11: models/vit_pma.py::ViT_PMA/vit_m2.py::ViT_M2와 동일한 관례 — cox_add면
+        # clinical을 임베딩해 concat하지 않고 risk_head 스칼라에 고전적 Cox 가산항으로 직접
+        # 더한다(train.py::_patient_risk 공용 dispatch가 model.combine_mode를 보고 처리).
+        # M4A(patch-level co-attention, MCAT 스타일)를 지금의 최종 레시피(margin/staging/
+        # cox_add/attn-dispersion)와 공정하게 비교하기 위해 이식 — 기존엔 M4/M4A가 이 세
+        # 플래그를 아예 지원하지 않아 findings_backlog.md의 예전 M4A 기록들은 이 레시피
+        # 이전 것들이었다.
+        if combine_mode == "concat":
+            self.clinical_encoder = ClinicalEncoder(
+                cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
+                use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
+            )
+        else:  # cox_add
+            self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
+            self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+            if use_margin:
+                m_mean, m_std = margin_stats
+                self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
+                self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
+            if use_staging:
+                if stage_stats is None:
+                    raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
+                for field in STAGE_FIELDS:
+                    mean, std = stage_stats[field]
+                    short = _STAGE_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+            if raw_dim == 0:
+                raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
+            self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
+            nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 가산항 없는 것과 동일
+
+        # Late Fusion risk head: concat이면 [z_wsi ‖ z_clinical ‖ z_rna] (3D,), cox_add면
+        # [z_wsi ‖ z_rna] (2D,) — clinical은 risk_head 밖에서 별도로 더해짐. 둘 다
+        # spatial_feat_dim(attn-dispersion, 1) 만큼 추가.
         # 2026-07-21: 레퍼런스 M4(m4_pathology_rnaseq_clinical_mil.py::classifier)와 동일하게
         # LayerNorm 뒤 Dropout(0.4) 추가를 시도(은닉층 없이 Dropout만 넣는 최소 개입)했으나
         # negative result(external C 0.614->0.494, findings_backlog.md 13번 항목)로 롤백함 — Cox
         # loss는 배치 내 risk score의 상대적 순서로 손실을 계산해, 최종 스칼라 출력 직전 Dropout이
         # 순서 자체를 크게 흔드는 것으로 추정.
+        spatial_feat_dim = 1 if use_attn_dispersion else 0
+        risk_input_dim = cfg.embed_dim * (3 if combine_mode == "concat" else 2) + spatial_feat_dim
         self.risk_head = nn.Sequential(
-            nn.LayerNorm(cfg.embed_dim * 3),
-            nn.Linear(cfg.embed_dim * 3, 1),
+            nn.LayerNorm(risk_input_dim),
+            nn.Linear(risk_input_dim, 1),
         )
 
     def encode_rna(self, rna: torch.Tensor) -> torch.Tensor:
@@ -101,9 +147,8 @@ class ViT_M4(ViT_M1):
         sex_idx: torch.Tensor,
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
-        spatial_feat: torch.Tensor | None = None,  # ViT_M4/M4A는 미지원(항상 None) — train.py
-                                                     # _patient_risk가 모든 combine_with_clinical_rna에
-                                                     # 공통으로 넘기는 시그니처만 맞춘다(models/spatial_features.py).
+        margin_ord: torch.Tensor | None = None,  # self.use_margin=True일 때만 필요
+        spatial_feat: torch.Tensor | None = None,  # (1,) — self.use_attn_dispersion=True일 때만
     ) -> torch.Tensor:
         """
         Args:
@@ -112,15 +157,54 @@ class ViT_M4(ViT_M1):
             age_years:     ()   — 환자 나이(연 단위) 스칼라 텐서
             sex_idx:       ()   — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
             z_rna:         (D,) — encode_rna()로 미리 계산한 RNA 임베딩(슬라이드 루프와 공유)
-            stage_ord:     self.clinical_encoder.use_staging=True(--clinical-staging)일 때만
-                           필요. {field: () 스칼라 long} — encode_stage_value() 규약.
+            stage_ord:     self.use_staging=True(--clinical-staging)일 때만 필요.
+                           {field: () 스칼라 long} — encode_stage_value() 규약.
+            margin_ord:    self.use_margin=True(--clinical-margin)일 때만 필요.
         Returns:
-            fused: (3D,) — risk_head 입력
+            fused: risk_head 입력. combine_mode="concat": (3D,)(+spatial_feat_dim) —
+            [z_wsi ‖ z_clinical ‖ z_rna]. "cox_add": (2D,)(+spatial_feat_dim) — [z_wsi ‖ z_rna],
+            clinical은 여기서 안 섞이고 train.py가 _clinical_raw()로 별도 계산해 최종
+            스칼라에 더한다(models/vit_pma.py::ViT_PMA와 동일 관례).
         """
-        stage_kwargs = {}
+        if self.combine_mode == "cox_add":
+            fused = torch.cat([patient_embed, z_rna], dim=-1)  # (2D,)
+            if spatial_feat is not None:
+                fused = torch.cat([fused, spatial_feat], dim=-1)
+            return fused
+        clinical_kwargs = {}
         if stage_ord is not None:
-            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+            clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        if margin_ord is not None:
+            clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
         z_clinical = self.clinical_encoder(
-            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
         ).squeeze(0)  # (D,)
-        return torch.cat([patient_embed, z_clinical, z_rna], dim=-1)  # (3D,)
+        fused = torch.cat([patient_embed, z_clinical, z_rna], dim=-1)  # (3D,)
+        if spatial_feat is not None:
+            fused = torch.cat([fused, spatial_feat], dim=-1)
+        return fused
+
+    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
+                       margin_ord: torch.Tensor | None = None,
+                       stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_raw와 동일 관례.
+        stage_ord: self.use_staging=True일 때만 필요. {field: () 스칼라 long} — encode_stage_value() 규약."""
+        feats = []
+        if self.use_age_sex:
+            age_z = (age_years.float() - self.age_mean) / self.age_std
+            feats += [age_z, sex_idx.float()]
+        if self.use_margin:
+            ordv = margin_ord.float()
+            known = (ordv >= 0).float()
+            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+            feats += [z, known]
+        if self.use_staging:
+            for field in STAGE_FIELDS:
+                short = _STAGE_BUFFER_NAMES[field]
+                ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
+        return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)

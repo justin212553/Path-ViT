@@ -60,8 +60,9 @@ class ViT_PMA(ViT_M1):
         drop_component: str | None = None,
         top_frac: float = 0.1,
         rna_combine_mode: str = "concat",
+        skip_patch_vit: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone)
+        super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         if rna_combine_mode not in ("concat", "cox_add"):
@@ -174,7 +175,7 @@ class ViT_PMA(ViT_M1):
         tile_cache: dict | None = None,
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
-        ctx_tokens = self.vit(patch_tokens, coords)
+        ctx_tokens = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords)
         components, attn_weights = self.attn_pool(ctx_tokens)  # (4, D), (N,)
         # meanpool_embed: --rna-aux-weight(models/rna_predictor.py) 보조과제 입력 전용.
         # patch_tokens: scripts/train_spatial_residual.py(공간정보 잔차 branch) 전용 — Nystrom
