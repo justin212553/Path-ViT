@@ -120,6 +120,7 @@ def _patient_risk(
     model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac: float = 1.0,
     shuffle_patches: bool = False, tile_cache: dict | None = None,
     patch_subsample_generator: torch.Generator | None = None,
+    modality_dropout_p: float = 0.0,
 ):
     """환자 1명이 보유한 슬라이드 전부를 forward해 임베딩을 평균 풀링한 뒤 risk score(scalar)를 계산한다.
     Returns: (risk, aux_loss, stage_aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서
@@ -145,6 +146,18 @@ def _patient_risk(
 
     [--M5/--M6] WSI가 전혀 없는 모델(model에 .cnn이 없음) — 슬라이드 순회 자체가
     불필요하다. Clinical 또는 RNA 중 하나만 보고 바로 risk score를 계산한다.
+
+    [modality_dropout_p, --modality-dropout-p] 2026-08-11 — RNA가 있는 모델(hasattr(model,
+    "rna_encoder"))에서만, model.training일 때 이 확률로 z_rna를 통째로 0벡터로 지운다.
+    diagnose_wsi_gradients.py 진단(findings_backlog.md)에서 RNA 인코더 gradient norm이 학습
+    내내 WSI의 ~4배였던 것 — RNA가 강한 신호라 risk_head가 RNA에 안주하고 WSI/clinical
+    브랜치가 상대적으로 undertrained되는 "modality imbalance" 문제에 대한 대응이다(Peng et al.
+    CVPR 2022 OGM-GE 등이 다루는 문제와 동일 계열, 여기서는 그중 가장 단순한 modality dropout
+    방식을 쓴다). z_rna를 rna_true(--rna-aux-weight 보조 loss 타깃) 계산 *이후*에 지우므로
+    보조 loss는 항상 진짜 RNA 값을 본다 — 지워지는 건 메인 risk 경로(co-attention query로도,
+    concat/cox_add 항으로도 쓰이는 z_rna)뿐이다. 이 한 번의 재할당이 PMA(component_coattn
+    query)와 M4/M4A(rna_context, combine_with_clinical_rna)의 z_rna 사용처 전부에 자연스럽게
+    전파되므로, 모델 클래스 쪽 코드는 전혀 안 건드려도 된다.
     """
     if not hasattr(model, "cnn"):
         with amp_ctx:
@@ -169,6 +182,8 @@ def _patient_risk(
             rna = patient_slides[0]["rna"].to(device, non_blocking=True)
             z_rna = model.encode_rna(rna)  # (D,)
             rna_true = rna
+            if model.training and modality_dropout_p > 0 and torch.rand(()).item() < modality_dropout_p:
+                z_rna = torch.zeros_like(z_rna)
 
         slide_embeds = []
         slide_meanpool_embeds = []
@@ -332,6 +347,7 @@ def train_one_epoch(
     patch_keep_frac: float = 1.0, rna_aux_weight: float = 0.0, stage_aux_weight: float = 0.0,
     shuffle_patches: bool = False, tile_cache: dict | None = None,
     patch_subsample_generator: torch.Generator | None = None,
+    modality_dropout_p: float = 0.0,
     desc: str = "train",
 ) -> float:
     model.train()
@@ -366,6 +382,7 @@ def train_one_epoch(
                 model, ps, device, amp_ctx, transform, chunk_size, patch_keep_frac,
                 shuffle_patches=shuffle_patches, tile_cache=tile_cache,
                 patch_subsample_generator=patch_subsample_generator,
+                modality_dropout_p=modality_dropout_p,
             )
             risks2.append(r2)
             if a2 is not None:
@@ -425,6 +442,7 @@ def train_one_epoch(
             model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
             shuffle_patches=shuffle_patches, tile_cache=tile_cache,
             patch_subsample_generator=patch_subsample_generator,
+            modality_dropout_p=modality_dropout_p,
         )
 
         risks.append(risk)
@@ -638,6 +656,18 @@ def _parse_args() -> argparse.Namespace:
              "RNA 개입과 무관하게 ViT 직후 mean-pooled 표현(RNA-free)에서 예측한다 - HE2RNA류 "
              "설계. cox loss에 이 가중치를 곱해 더한다. 0.0 초과면 wandb/checkpoint에 _AUX "
              "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--modality-dropout-p", type=float, default=0.0,
+        help="RNA를 쓰는 모델(--M4/--M4A/--M4B/--PM4/--PMA, rna_encoder 필요)에서, 학습 중 "
+             "이 확률로 z_rna를 통째로 0벡터로 지운다(train.py::_patient_risk). "
+             "diagnose_wsi_gradients.py 진단(RNA 인코더 gradient norm이 WSI의 ~4배)에서 드러난 "
+             "modality imbalance — risk_head가 강한 RNA 신호에 안주해 WSI/clinical 브랜치가 "
+             "undertrained되는 문제 — 에 대한 대응(일반 멀티모달 학습 문헌의 modality dropout, "
+             "예: Peng et al. CVPR 2022 OGM-GE가 다루는 것과 같은 계열의 문제를 가장 단순한 "
+             "방식으로 완화). --rna-aux-weight 보조 loss는 항상 진짜 RNA 값을 타깃으로 쓰므로 "
+             "영향받지 않는다 — 지워지는 건 메인 risk 경로의 z_rna뿐. 0.0(기본)이면 비활성. "
+             "0.0 초과면 model_prefix에 _MODDROP{value}가 붙는다.",
     )
     parser.add_argument(
         "--clinical-staging", action="store_true",
@@ -1531,6 +1561,8 @@ def main():
         model_prefix += "_RNACOXADD"
     if args.skip_patch_vit:
         model_prefix += "_NOVIT"
+    if args.modality_dropout_p > 0:
+        model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
     if args.lr is not None:
         model_prefix += f"_LR{args.lr:.0e}"
     if args.weight_decay is not None:
@@ -2062,6 +2094,7 @@ def main():
                                          stage_aux_weight=args.stage_aux_weight,
                                          shuffle_patches=args.shuffle_patches, tile_cache=tile_cache,
                                          patch_subsample_generator=patch_subsample_generator,
+                                         modality_dropout_p=args.modality_dropout_p,
                                          desc=f"epoch {epoch+1} train")
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
         # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
