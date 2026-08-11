@@ -57,6 +57,8 @@ class ViT_PMA(ViT_M1):
         margin_stats: tuple[float, float] | None = None,
         use_age_sex: bool = True,
         combine_mode: str = "concat",
+        drop_component: str | None = None,
+        top_frac: float = 0.1,
     ):
         super().__init__(cfg, precomputed, backbone)
         if combine_mode not in ("concat", "cox_add"):
@@ -77,7 +79,14 @@ class ViT_PMA(ViT_M1):
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
         self.use_staging = use_staging
-        self.attn_pool = MultiComponentPooling(cfg.embed_dim)
+        # 2026-08-09: scripts/diagnose_pma_component_reliance.py의 zero-ablation 진단(4개 성분
+        # 다 지워봐도 손해가 없었음)에 이어, 구조적으로 하나를 빼고 재학습하는 ablation용
+        # (train.py --drop-component). 기본 None이면 기존과 완전히 동일(4개 다 사용).
+        # top_frac(train.py --top-frac)도 같이 노출 — top-k 성분이 상위 10%라는 너무 작은
+        # 부분집합이라 노이즈에 민감했을 수 있다는 가설(top-k를 지우면 internal이 올랐던 것과
+        # 같은 방향)을 검증한다. top_frac을 키우면(예: 0.25) 같은 "attention 상위" 컨셉은
+        # 유지하되 표본을 넓혀 노이즈를 줄일 수 있는지 본다.
+        self.attn_pool = MultiComponentPooling(cfg.embed_dim, exclude=drop_component, top_frac=top_frac)
         self.component_coattn = CoAttentionPooling(
             cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
         )

@@ -639,6 +639,26 @@ def _parse_args() -> argparse.Namespace:
              "margin(/staging)만 입력으로 쓴다. 켜면 model_prefix에 _ONLY가 추가로 붙는다.",
     )
     parser.add_argument(
+        "--drop-component", type=str, default=None, choices=["mean", "std", "attn", "top"],
+        help="--PMA 전용(models/multi_component_pooling.py::MultiComponentPooling). "
+             "2026-08-09: scripts/diagnose_pma_component_reliance.py의 사후 zero-ablation에서 "
+             "4개 관점(mean/std/attn/top-k) 중 어느 것을 지워도 손해가 아니었던(top-k 제거가 "
+             "external에 소폭 긍정적) 결과를 받아, 구조적으로 하나를 아예 빼고 처음부터 "
+             "재학습해 internal이 실제로 오르는지 검증한다(파라미터/입력 차원이 줄어든 만큼 "
+             "과적합 압력이 줄 수 있다는 가설). co-attention은 토큰 개수에 무관하게 동작해 "
+             "risk_head 등 다른 차원엔 영향 없음. 기본 None(4개 다 사용, 기존 동작). 켜면 "
+             "model_prefix에 _NO{COMPONENT}가 붙는다(예: --drop-component top -> _NOTOP).",
+    )
+    parser.add_argument(
+        "--top-frac", type=float, default=0.1,
+        help="--PMA 전용(models/multi_component_pooling.py::MultiComponentPooling). top-k-mean "
+             "성분이 attention 상위 몇 %%의 패치를 평균할지(기본 0.1=10%%). 2026-08-09: "
+             "--drop-component top(top-k를 아예 제거)이 internal을 올린 것을 보고, 'top-k 자체가 "
+             "쓸모없다'가 아니라 '상위 10%%가 표본이 너무 작아 노이즈에 민감했다'는 가설을 "
+             "검증하기 위해 노출 — 0.25 등으로 키우면 같은 attention-상위 컨셉을 유지하면서 "
+             "표본을 넓힐 수 있다. 기본값(0.1)과 다르면 model_prefix에 _TOPFRAC{value}가 붙는다.",
+    )
+    parser.add_argument(
         "--pooling-mode", type=str, default="coattn", choices=["coattn", "selfattn"],
         help="--M2_POOL(models/vit_m2_pool.py::ViT_M2_Pool) 전용. 4개 pooling 관점(mean/std/"
              "attn/top-k)을 합치는 방식 — 'coattn'(기본)은 z_clinical(age/sex)을 co-attention "
@@ -1455,6 +1475,10 @@ def main():
         model_prefix += f"_{args.combine_mode.upper()}"
     if args.M2_POOL and args.pooling_mode == "selfattn":
         model_prefix += "_SELFATTN"
+    if args.drop_component is not None:
+        model_prefix += f"_NO{args.drop_component.upper()}"
+    if args.top_frac != 0.1:
+        model_prefix += f"_TOPFRAC{args.top_frac:g}"
     if args.sam:
         # 2026-08-06: 이 태그가 없으면 --sam 유무만 다른 두 실행이 model_prefix/checkpoint/
         # kfold_preds 파일명이 완전히 같아져 서로 덮어쓴다(_AUG/_NOSPATIAL 빠뜨렸을 때와 동일한
@@ -1677,7 +1701,8 @@ def main():
                          precomputed=cfg.data.precomputed, backbone=args.backbone,
                          rna_dim=args.rna_dim, clinical_dim=args.clinical_dim,
                          rna_gate_only=args.rna_gate_only, use_clinical=not args.no_clinical,
-                         combine_mode=args.combine_mode,
+                         combine_mode=args.combine_mode, drop_component=args.drop_component,
+                         top_frac=args.top_frac,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
