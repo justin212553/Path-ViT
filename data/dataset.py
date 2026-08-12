@@ -53,6 +53,7 @@ from torch.utils.data import Dataset
 from config import DataConfig
 from data.patch_utils import (
     FEATURES_FILENAME, FEATURES_NORM_FILENAME, FEATURES_UNI_FILENAME, FEATURES_UNI2_FILENAME,
+    FEATURES_UNI2OFFICIAL_FILENAME, COORDS_UNI2OFFICIAL_FILENAME,
     PATCH_TRANSFORM, list_patch_paths, _parse_coord,
 )
 
@@ -61,6 +62,10 @@ FEATURES_FILENAME_BY_BACKBONE = {
     "uni":           FEATURES_UNI_FILENAME,
     "uni2":          FEATURES_UNI2_FILENAME,  # UNI2-h(ViT-H/14, models/uni2_encoder.py), utils/extract_features.py --backbone uni2
     "resnet50_norm": FEATURES_NORM_FILENAME,  # Macenko stain-normalized (utils/extract_features_stain_norm.py)
+    # 2026-08-12: MahmoodLab 공식 UNI2-h feature(256px@20x) — patch grid가 우리 자체 추출본과
+    # 전혀 달라 coords도 별도 파일(COORDS_UNI2OFFICIAL_FILENAME)에서 읽는다(_load_slide 참조,
+    # list_patch_paths/파일명-파싱 coords 경로를 타지 않음).
+    "uni2official":  FEATURES_UNI2OFFICIAL_FILENAME,
 }
 from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value
 
@@ -543,6 +548,7 @@ class WSISurvivalDataset(Dataset):
         self.with_staging     = with_staging
         self.with_margin      = with_margin
         self.with_rna         = with_rna
+        self.feature_backbone   = feature_backbone
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
         self.feature_filename_override = feature_filename_override
         self.rna_gene_ids     = rna_gene_ids
@@ -690,15 +696,23 @@ class WSISurvivalDataset(Dataset):
         return len(self.cases)
 
     def _load_slide(self, row) -> dict:
-        slide_dir   = self.roots[row["dataset"]] / "tiles" / row["slide_id"]
-        patch_paths = list_patch_paths(slide_dir)
+        slide_dir = self.roots[row["dataset"]] / "tiles" / row["slide_id"]
 
-        coords = torch.tensor(
-            [_parse_coord(p.name) for p in patch_paths],
-            dtype=torch.long,
-        )
-        coords[:, 0] -= coords[:, 0].min()
-        coords[:, 1] -= coords[:, 1].min()
+        if self.feature_backbone == "uni2official":
+            # 공식 UNI2-h feature(256px@20x) — patch grid가 우리 자체 JPG 추출본과 전혀 달라
+            # list_patch_paths/파일명-파싱 coords를 쓸 수 없다. 짝을 이루는 coords 파일에서
+            # 직접 읽는다(scripts/convert_uni2h_official_features.py가 features/coords를
+            # 같은 행 순서로 저장해뒀으므로 길이 불일치 걱정이 없음).
+            patch_paths = None
+            coords = torch.load(slide_dir / COORDS_UNI2OFFICIAL_FILENAME, weights_only=True)
+        else:
+            patch_paths = list_patch_paths(slide_dir)
+            coords = torch.tensor(
+                [_parse_coord(p.name) for p in patch_paths],
+                dtype=torch.long,
+            )
+            coords[:, 0] -= coords[:, 0].min()
+            coords[:, 1] -= coords[:, 1].min()
 
         item = {
             "coords":   coords,
@@ -728,10 +742,15 @@ class WSISurvivalDataset(Dataset):
             if self.feature_filename_override is not None and (slide_dir / self.feature_filename_override).exists():
                 features_filename = self.feature_filename_override
             features = torch.load(slide_dir / features_filename, weights_only=True)
-            if len(features) != len(patch_paths):
+            if patch_paths is not None and len(features) != len(patch_paths):
                 raise RuntimeError(
                     f"{slide_dir}: {features_filename} 행 수({len(features)})가 패치 수"
                     f"({len(patch_paths)})와 다릅니다 — utils.extract_features를 다시 실행하세요."
+                )
+            if patch_paths is None and len(features) != len(coords):
+                raise RuntimeError(
+                    f"{slide_dir}: {features_filename} 행 수({len(features)})가 coords 행 수"
+                    f"({len(coords)})와 다릅니다 — scripts/convert_uni2h_official_features.py를 다시 실행하세요."
                 )
             item["features"] = features
         else:

@@ -37,6 +37,10 @@ TILE_ENCODER_REGISTRY = {
     "uni":           UNIEncoder,
     "uni2":          UNI2hEncoder,   # UNI2-h(ViT-H/14, 1536-dim), utils/extract_features.py --backbone uni2
     "resnet50_norm": CNNEncoder,
+    # 2026-08-12: MahmoodLab 공식 UNI2-h feature(256px@20x, scripts/convert_uni2h_official_features.py) —
+    # 인코더 자체(1536-dim proj)는 "uni2"와 완전히 동일, 캐싱 feature 파일/coords 출처만 다름
+    # (data/dataset.py::FEATURES_FILENAME_BY_BACKBONE, _load_slide).
+    "uni2official":  UNI2hEncoder,
 }
 
 

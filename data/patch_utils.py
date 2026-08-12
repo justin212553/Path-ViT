@@ -251,6 +251,12 @@ class TileLRUCache:
 FEATURES_FILENAME      = "features.pt"       # data/extract_features.py 산출물 파일명(ResNet50/Lunit SwAV)
 FEATURES_UNI_FILENAME  = "features_uni.pt"   # UNI 산출물 — 기존 features.pt와 별도 저장(롤백 가능)
 FEATURES_UNI2_FILENAME = "features_uni2.pt"  # UNI2-h(models/uni2_encoder.py) 산출물 — UNI와 별도 저장(롤백 가능)
+# 2026-08-12: MahmoodLab 공식 UNI2-h feature(256px@20x, 공식 스펙) — 우리 자체 추출(1024px@1.0MPP
+# ->512 리사이즈, 실효 2.0MPP)과 스펙이 4배 어긋난다는 게 확인돼, 아키텍처는 그대로 두고 feature
+# 스펙만 공식으로 맞췄을 때 internal이 오르는지 보는 대조 실험용. patch grid가 우리 자체 추출본과
+# 전혀 달라(patch 수/좌표 불일치) coords도 같이 별도 파일로 저장한다(scripts/convert_uni2h_official_features.py).
+FEATURES_UNI2OFFICIAL_FILENAME = "features_uni2official.pt"
+COORDS_UNI2OFFICIAL_FILENAME   = "coords_uni2official.pt"
 FEATURES_NORM_FILENAME = "features_norm.pt"  # Macenko stain-normalized + ResNet50 산출물 (utils/extract_features_stain_norm.py)
 FEATURES_AUG_FILENAME  = "features_aug.pt"   # 타일 augmentation(seed 고정, 1회성) + ResNet50 산출물
                                               # (utils/extract_features_augmented.py, train.py --tile-augment)

@@ -24,6 +24,7 @@ TCGA-PAAD / CPTAC-PDA WSI 생존(OS) 예측 학습 스크립트
         HR/log-rank p는 risk score 중앙값으로 저위험/고위험군을 나눠 계산한다.
 """
 import argparse
+import copy
 import math
 import random
 from datetime import datetime
@@ -642,6 +643,23 @@ def _parse_args() -> argparse.Namespace:
         help="--swa 평균을 시작할 시점(전체 epoch 대비 비율, 기본 0.75 = 마지막 25%%만 평균).",
     )
     parser.add_argument(
+        "--swad", action="store_true",
+        help="2026-08-12: [Poor-man's SWAD, Cha et al. 2021] --swa는 고정 비율(마지막 N%%)을 "
+             "무조건 평균 내지만, SWAD는 'val 성능이 최고점 근방(flat/plateau)에 머무는 구간'만 "
+             "찾아서 평균한다 — model soup 파일럿에서 fold 하나가 시드 간 완전히 다른 basin에 "
+             "떨어진 것(internal c=0.4963)을 본 뒤, 사후 평균이 아니라 학습 중 flat minimum을 "
+             "능동적으로 좇는 게 나은지 확인하는 실험. 원 논문은 mini-batch 단위로 조밀하게 "
+             "평균하지만 여기서는 매 epoch(val eval 있는 시점)이 가장 조밀한 단위라 epoch 단위로 "
+             "근사한다 — best epoch를 중심으로 val c_index가 (best - --swad-tolerance) 이상인 "
+             "연속 구간을 좌우로 넓혀가며 그 구간의 epoch 가중치만 균등 평균. --swa와 동시 사용 가능"
+             "(서로 독립적으로 추가 평가 리포트를 남김).",
+    )
+    parser.add_argument(
+        "--swad-tolerance", type=float, default=0.02,
+        help="--swad plateau 구간을 정할 val c_index 허용 오차(기본 0.02 = best epoch 대비 "
+             "0.02 이내인 연속 epoch까지 포함).",
+    )
+    parser.add_argument(
         "--no-patient-shuffle", action="store_true",
         help="2026-07-27: train DataLoader의 shuffle=True(기본, 매 epoch 환자 처리 순서를 다시 "
              "섞음)를 끄고 항상 고정 순서로 순회한다. patch 서브샘플링 패턴을 격리해도 --full-train "
@@ -791,7 +809,8 @@ def _parse_args() -> argparse.Namespace:
              "사전 추출한 features.pt 사용)",
     )
     parser.add_argument(
-        "--backbone", type=str, default="resnet50", choices=["resnet50", "uni", "uni2", "resnet50_norm"],
+        "--backbone", type=str, default="resnet50",
+        choices=["resnet50", "uni", "uni2", "resnet50_norm", "uni2official"],
         help="frozen tile encoder 선택 (기본: resnet50=Lunit SwAV, 2048-dim). uni는 UNI ViT-L/16"
              "(1024-dim, 224 리사이즈) — 미리 `python -m utils.extract_features --backbone uni`로 "
              "features_uni.pt를 뽑아둬야 한다(HuggingFace gated repo 접근 승인 + .env HF_TOKEN 필요). "
@@ -801,7 +820,11 @@ def _parse_args() -> argparse.Namespace:
              "별도 gated repo 승인 필요, MahmoodLab/UNI2-h). "
              "resnet50_norm은 Macenko stain-normalized 후 같은 ResNet50/Lunit SwAV로 재추출한 "
              "feature(features_norm.pt, utils/extract_features_stain_norm.py) — 인코더 자체는 "
-             "resnet50과 동일(2048-dim), 캐싱 파일만 다르다.",
+             "resnet50과 동일(2048-dim), 캐싱 파일만 다르다. "
+             "uni2official은 MahmoodLab이 공식 스펙(256px@20x, ~0.5MPP)으로 직접 뽑아 배포한 "
+             "UNI2-h feature(HuggingFace dataset MahmoodLab/UNI2-h-features, gated) — 인코더는 "
+             "uni2와 동일(1536-dim)하지만 patch grid가 우리 자체 추출본과 달라 coords도 별도 "
+             "파일에서 읽는다(scripts/convert_uni2h_official_features.py 산출물 필요).",
     )
     parser.add_argument(
         "--num-workers", type=int, default=None,
@@ -1193,6 +1216,16 @@ def _parse_args() -> argparse.Namespace:
              "다시 돌리지 않고 이미 저장된 checkpoint 15개(3seed x 5fold 등)의 external 예측만 "
              "빠르게 재추출할 때 쓴다. --external 없이 쓰면 에러.",
     )
+    parser.add_argument(
+        "--eval-soup-ckpts", type=str, default=None,
+        help="2026-08-12: [Model soup, Wortsman et al. 2022] 콤마로 구분한 N개 checkpoint 경로를 "
+             "받아 state_dict를 파라미터별 단순 평균으로 합친 뒤(재학습 없음) 그 합쳐진 가중치로 "
+             "internal(--fold가 주어졌으면 그 fold의 held-out test)과 external(--external이면)을 "
+             "각각 딱 한 번 평가하고 예측을 CSV로 저장한다. 보통 같은 fold, 다른 seed로 학습된 "
+             "체크포인트들(예: 3seed 같은 fold)을 넣어 '가중치 공간 평균'이 '예측값 평균 앙상블'과 "
+             "어떻게 다른지 비교하는 용도. 다른 인자(--PMA/--backbone/--fold 등)는 그 checkpoint를 "
+             "만들 때와 동일해야 한다(구조 불일치 시 state_dict 로드 실패).",
+    )
     return parser.parse_args()
 
 
@@ -1578,6 +1611,8 @@ def main():
             model_prefix += "_WSIONLY"
     if args.swa:
         model_prefix += "_SWA"
+    if args.swad:
+        model_prefix += f"_SWAD{args.swad_tolerance:g}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1897,6 +1932,49 @@ def main():
         print(f"  -> external predictions saved: {pred_path}")
         return
 
+    if args.eval_soup_ckpts:
+        # [Model soup] 서로 다른 seed로 학습된 N개 checkpoint의 state_dict를 파라미터별 단순
+        # 평균으로 합쳐(재학습 없음) internal/external을 딱 한 번씩 평가한다.
+        ckpt_paths = args.eval_soup_ckpts.split(",")
+        state_dicts = [torch.load(p, map_location=device, weights_only=False)["model_state_dict"]
+                       for p in ckpt_paths]
+        soup_state = {k: sum(sd[k].float() for sd in state_dicts) / len(state_dicts) for k in state_dicts[0]}
+        model.load_state_dict(soup_state)
+        print(f"--eval-soup-ckpts: {len(ckpt_paths)}개 체크포인트 평균 완료")
+        for p in ckpt_paths:
+            print(f"    - {p}")
+
+        import csv
+        if test_loader is not None:
+            soup_test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform,
+                                          desc="internal(soup-eval)")
+            print(f"  internal(soup) c_index={soup_test_metrics['c_index']:.4f}")
+            pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{args.dataset}_{model_prefix}_SOUP_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(soup_test_metrics["case_ids"], soup_test_metrics["risks"],
+                                            soup_test_metrics["times"], soup_test_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> internal(soup) predictions saved: {pred_path}")
+        if external_loader is not None:
+            soup_external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                              desc="external(soup-eval)")
+            print(f"  external(soup) c_index={soup_external_metrics['c_index']:.4f}")
+            pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_SOUP_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(soup_external_metrics["case_ids"], soup_external_metrics["risks"],
+                                            soup_external_metrics["times"], soup_external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> external(soup) predictions saved: {pred_path}")
+        return
+
     if args.sam and args.sam_wsi_only:
         # WSI 브랜치 파라미터만 rho=args.sam_rho, 나머지는 rho=0(=perturbation 없음, 사실상
         # AdamW) — SAM(utils/sam.py)이 param_group마다 다른 rho를 이미 지원해서(first_step의
@@ -2085,6 +2163,13 @@ def main():
     swa_model = torch.optim.swa_utils.AveragedModel(model) if args.swa else None
     swa_start_epoch = round(cfg.train.epochs * args.swa_start_frac) if args.swa else None
 
+    # [SWAD] epoch마다 (val c_index, CPU 가중치 스냅샷)을 모아뒀다가, 학습이 끝난 뒤 val 성능이
+    # best epoch 근방 --swad-tolerance 이내로 유지되는 연속 구간만 골라 평균한다(아래 학습 루프
+    # 종료 직후 블록 참조). 매 epoch state_dict를 CPU에 복사해두므로 --swa의 AveragedModel과
+    # 메모리 사용량이 비슷한 자릿수(모델 1개분 x epoch 수)다.
+    swad_epoch_val_c = []
+    swad_epoch_states = []
+
     best_score   = -1.0
     best_metrics = {}
     for epoch in range(cfg.train.epochs):
@@ -2130,6 +2215,9 @@ def main():
 
         c_index = metrics.get("c_index", float("nan"))
         score   = c_index if not math.isnan(c_index) else -1.0
+        if args.swad and not math.isnan(c_index):
+            swad_epoch_val_c.append(c_index)
+            swad_epoch_states.append({k: v.detach().cpu().clone() for k, v in model.state_dict().items()})
         print(
             f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
             f"train_c_index={train_metrics['c_index']:.4f} | " + _log_line("val", metrics, val_td_auc)
@@ -2255,6 +2343,62 @@ def main():
                 wandb.run.summary["swa_external_hr"]         = swa_external_metrics["hr"]
                 wandb.run.summary["swa_external_log_rank_p"] = swa_external_metrics["log_rank_p"]
                 wandb.run.summary["swa_external_auc_mean"]   = swa_external_td_auc["auc_mean"]
+
+    # [SWAD] best epoch를 중심으로 val c_index가 (best - --swad-tolerance) 이상인 연속 구간을
+    # 좌우로 넓혀가며 찾고(= flat/plateau window), 그 구간의 epoch 가중치만 균등 평균한 뒤
+    # internal/external을 딱 한 번 평가한다 — --swa(고정 마지막 N%% 평균)와 달리 overfit-aware.
+    if args.swad and swad_epoch_states:
+        best_i = max(range(len(swad_epoch_val_c)), key=lambda i: swad_epoch_val_c[i])
+        best_val = swad_epoch_val_c[best_i]
+        lo = best_i
+        while lo - 1 >= 0 and swad_epoch_val_c[lo - 1] >= best_val - args.swad_tolerance:
+            lo -= 1
+        hi = best_i
+        while hi + 1 < len(swad_epoch_val_c) and swad_epoch_val_c[hi + 1] >= best_val - args.swad_tolerance:
+            hi += 1
+        window_states = swad_epoch_states[lo:hi + 1]
+        print(f"\n[SWAD] plateau window: epoch {lo+1}~{hi+1} (best epoch {best_i+1}, val_c={best_val:.4f}, "
+              f"{len(window_states)}개 epoch 평균, tolerance={args.swad_tolerance})")
+        swad_avg_state = {k: sum(sd[k].float() for sd in window_states) / len(window_states)
+                           for k in window_states[0]}
+        swad_ckpt_path = ckpt_path.with_name(ckpt_path.stem + "_swadweights.pt")
+        torch.save({"model_state_dict": swad_avg_state, "swad_window": (lo + 1, hi + 1),
+                    "swad_best_epoch": best_i + 1, "swad_best_val_c": best_val}, swad_ckpt_path)
+        print(f"  -> SWAD 평균 가중치 저장: {swad_ckpt_path}")
+        swad_module = copy.deepcopy(model)
+        swad_module.load_state_dict(swad_avg_state)
+        swad_train_metrics = evaluate(swad_module, train_eval_loader, cfg, device, amp_ctx, eval_transform, tile_cache=tile_cache,
+                                       desc="swad train_eval")
+        if test_ds is not None:
+            swad_test_metrics = evaluate(swad_module, test_loader, cfg, device, amp_ctx, test_ds.transform, desc="swad test")
+            swad_test_td_auc  = compute_time_dependent_auc(
+                swad_train_metrics["times"], swad_train_metrics["events"],
+                swad_test_metrics["times"], swad_test_metrics["events"], swad_test_metrics["risks"],
+                eval_days=auc_days,
+            )
+            print("=== Internal Test 성능 (SWAD 평균 모델, epoch %d~%d 평균) ===" % (lo + 1, hi + 1))
+            print(_log_line("swad_test", swad_test_metrics, swad_test_td_auc))
+            if WANDB_AVAILABLE:
+                wandb.run.summary["swad_test_c_index"]   = swad_test_metrics["c_index"]
+                wandb.run.summary["swad_test_hr"]         = swad_test_metrics["hr"]
+                wandb.run.summary["swad_test_log_rank_p"] = swad_test_metrics["log_rank_p"]
+                wandb.run.summary["swad_test_auc_mean"]   = swad_test_td_auc["auc_mean"]
+        if external_ds is not None:
+            swad_external_metrics = evaluate(swad_module, external_loader, cfg, device, amp_ctx, external_ds.transform,
+                                              tile_cache=external_tile_cache, desc="swad external")
+            swad_external_td_auc  = compute_time_dependent_auc(
+                swad_train_metrics["times"], swad_train_metrics["events"],
+                swad_external_metrics["times"], swad_external_metrics["events"], swad_external_metrics["risks"],
+                eval_days=auc_days,
+            )
+            print(f"=== External Test 성능 ({external_dataset} 전체 코호트, SWAD 평균 모델) ===")
+            print(_log_line("swad_external", swad_external_metrics, swad_external_td_auc))
+            if WANDB_AVAILABLE:
+                wandb.run.summary["swad_external_c_index"]   = swad_external_metrics["c_index"]
+                wandb.run.summary["swad_external_hr"]         = swad_external_metrics["hr"]
+                wandb.run.summary["swad_external_log_rank_p"] = swad_external_metrics["log_rank_p"]
+                wandb.run.summary["swad_external_auc_mean"]   = swad_external_td_auc["auc_mean"]
+        del swad_module, window_states, swad_avg_state
 
     # 학습 종료 후, best checkpoint로 held-out test set을 "딱 한 번" 평가한다.
     # --full-train은 val 자체가 없어 best-val 체크포인트가 존재하지 않으므로, 위에서 이미 계산해둔
