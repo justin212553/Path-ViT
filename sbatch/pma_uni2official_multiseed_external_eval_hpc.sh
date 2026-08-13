@@ -9,13 +9,14 @@
 #SBATCH --time=01:00:00
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/pma_uni2official_multiseed_external_eval.log
 
-# pma_uni2official_multiseed_kfold_array_hpc.sh(3seed x 5fold=15개 학습)가 저장해 둔 checkpoint
-# 15개를 재학습 없이 다시 불러와 --eval-external-ckpt로 external(cptac) 예측만 재추출한다.
-# pma_uni2_coxadd_stg_multiseed_external_eval_hpc.sh와 동일 원리, backbone만 uni2official.
+# pma_uni2official_multiseed_kfold_array_hpc.sh(--epochs 100 --early-stop-patience 10, 3seed x
+# 5fold=15개 학습)가 저장해 둔 checkpoint 15개를 재학습 없이 다시 불러와 --eval-external-ckpt로
+# external(cptac) 예측만 재추출한다. pma_uni2_coxadd_stg_multiseed_external_eval_hpc.sh와
+# 동일 원리, backbone만 uni2official(+ checkpoint 태그에 _ES10 포함).
 #
 # 완료 후(.logs/external_preds/에 CSV 15개 있는지 확인):
 #   python scripts/pool_multiseed_external_preds.py --dataset cptac \
-#       --model PMA_uni2official_INT1500_SS_AUX_STG_R_DISP_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+#       --model PMA_uni2official_INT1500_SS_AUX_STG_R_DISP_COX_ADD_ES10 --seeds 42,84,126 --n-folds 5 --bootstrap 2000
 #
 # 제출: sbatch sbatch/pma_uni2official_multiseed_external_eval_hpc.sh
 # (15개 학습 job이 전부 끝나 checkpoint가 다 저장된 뒤에 제출할 것)
@@ -33,7 +34,7 @@ N_FOLDS=5
 
 for SEED in "${SEEDS[@]}"; do
   for ((FOLD=0; FOLD<N_FOLDS; FOLD++)); do
-    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2official_seed${SEED}_*STG_R_DISP_COX_ADD_FOLD${FOLD}OF${N_FOLDS}_best_pma.pt 2>/dev/null)
+    mapfile -t MATCHES < <(ls models/checkpoint/survival_tcga_uni2official_seed${SEED}_*STG_R_DISP_COX_ADD_ES10_FOLD${FOLD}OF${N_FOLDS}_best_pma.pt 2>/dev/null)
     if [ "${#MATCHES[@]}" -eq 0 ]; then
       echo "[SKIP] seed=${SEED} fold=${FOLD}: checkpoint를 못 찾음 (학습이 아직 안 끝났거나 경로가 다름)"
       continue
@@ -48,6 +49,7 @@ for SEED in "${SEEDS[@]}"; do
         --backbone uni2official \
         --clinical-margin --clinical-staging --combine-mode cox_add \
         --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
+        --epochs 100 --early-stop-patience 10 \
         --fold "${FOLD}" --n-folds "${N_FOLDS}" \
         --eval-external-ckpt "${CKPT}"
     echo "=== external eval-only: seed=${SEED} fold=${FOLD} Complete: $(date) ==="

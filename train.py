@@ -660,6 +660,15 @@ def _parse_args() -> argparse.Namespace:
              "0.02 이내인 연속 epoch까지 포함).",
     )
     parser.add_argument(
+        "--early-stop-patience", type=int, default=None,
+        help="2026-08-12: 주어지면, best-val c_index가 이 patience(epoch 수)만큼 연속으로 "
+             "갱신되지 않으면 학습을 조기 종료한다(--epochs를 크게 잡아두고 실제로 필요한 "
+             "만큼만 도는 용도, 예: uni2official처럼 patch 수가 훨씬 많아 수렴이 느린 backbone). "
+             "best-val checkpoint는 기존과 동일하게 그 시점 그대로 저장돼 있으므로 최종 성능"
+             "(internal/external 평가)에는 영향이 없다 — GPU 시간만 아낀다. 기본(None)이면 "
+             "비활성화(기존 동작 그대로 --epochs 끝까지 학습).",
+    )
+    parser.add_argument(
         "--no-patient-shuffle", action="store_true",
         help="2026-07-27: train DataLoader의 shuffle=True(기본, 매 epoch 환자 처리 순서를 다시 "
              "섞음)를 끄고 항상 고정 순서로 순회한다. patch 서브샘플링 패턴을 격리해도 --full-train "
@@ -1613,6 +1622,8 @@ def main():
         model_prefix += "_SWA"
     if args.swad:
         model_prefix += f"_SWAD{args.swad_tolerance:g}"
+    if args.early_stop_patience is not None:
+        model_prefix += f"_ES{args.early_stop_patience}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -2172,6 +2183,7 @@ def main():
 
     best_score   = -1.0
     best_metrics = {}
+    epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
         lr_now        = optimizer.param_groups[0]["lr"]
         loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform,
@@ -2249,6 +2261,7 @@ def main():
         if score > best_score:
             best_score   = score
             best_metrics = {**metrics, **{f"td_{k}": v for k, v in val_td_auc.items()}, "epoch": epoch + 1}
+            epochs_since_improve = 0
             torch.save(
                 {
                     "model_state_dict": model.state_dict(),
@@ -2271,6 +2284,13 @@ def main():
                 wandb.run.summary["best_val_log_rank_p"]  = metrics["log_rank_p"]
                 wandb.run.summary["best_val_auc_mean"]    = val_td_auc["auc_mean"]
                 wandb.run.summary["best_epoch"]           = epoch + 1
+        else:
+            epochs_since_improve += 1
+            if (args.early_stop_patience is not None
+                    and epochs_since_improve >= args.early_stop_patience):
+                print(f"  -> early stop: 최근 {epochs_since_improve} epoch 동안 val c_index 갱신 없음 "
+                      f"(best epoch {best_metrics.get('epoch', '-')}, best c_index={best_score:.4f})")
+                break
 
     # 2026-07-26: 작은 validation set(31명)에서 best-val 체크포인트 선택 자체가 노이즈에 취약할
     # 수 있다는 가설(seed126: val_c_index가 3시드 중 최고인데 test는 최저) 검증용 — best-val
