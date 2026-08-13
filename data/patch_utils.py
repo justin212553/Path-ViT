@@ -52,6 +52,18 @@ UNI_PATCH_TRANSFORM = transforms.Compose([
                          std=[0.229, 0.224, 0.225]),
 ])
 
+# 2026-08-12: UNI2-h "native" 재타일링(data/preprocess.py --target-mpp 0.5 --tile-size 256, UNI2-h
+# 공식 스펙 그대로)용 transform — 위 UNI_PATCH_TRANSFORM의 512 리사이즈는 1024px@1.0MPP 원본
+# 타일을 UNI 해상도에 억지로 맞추던 보정이었지, 애초에 256px@0.5MPP로 뽑은 타일에는 필요 없다
+# (이미 공식 스펙 그대로라 리사이즈=항등연산이어야 함). Resize(256)은 방어적 안전장치일 뿐이다.
+UNI2_NATIVE_PATCH_TRANSFORM = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(256),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225]),
+])
+
 # [진짜 real-time augmentation, 2026-07-22] PATCH_TRANSFORM_AUGMENTED(위)를 원본 1024x1024
 # 타일에 매 epoch 그대로 적용하면 디스크에서 매 epoch 다시 디코딩하느라 1 epoch도 못 끝낼 만큼
 # 느렸다(findings_backlog.md). 레퍼런스(tmp_m1_cell1.py::preload_resized_tile_images +
@@ -257,6 +269,12 @@ FEATURES_UNI2_FILENAME = "features_uni2.pt"  # UNI2-h(models/uni2_encoder.py) �
 # 전혀 달라(patch 수/좌표 불일치) coords도 같이 별도 파일로 저장한다(scripts/convert_uni2h_official_features.py).
 FEATURES_UNI2OFFICIAL_FILENAME = "features_uni2official.pt"
 COORDS_UNI2OFFICIAL_FILENAME   = "coords_uni2official.pt"
+# 2026-08-12: uni2official 대조실험에서 확인된 두 confound(DX 슬라이드만 포함, coords가 level0
+# 픽셀 단위라 attn_dispersion 스케일이 ~4000배 어긋남)를 피하려고, 우리 raw WSI를 우리 파이프라인
+# (data/preprocess.py --target-mpp 0.5 --tile-size 256, 우리 슬라이드 전체 + 우리 좌표 컨벤션)으로
+# 직접 재타일링한 결과 — scripts/reconcile_uni2native_features.py 산출물.
+FEATURES_UNI2NATIVE_FILENAME = "features_uni2native.pt"
+COORDS_UNI2NATIVE_FILENAME   = "coords_uni2native.pt"
 FEATURES_NORM_FILENAME = "features_norm.pt"  # Macenko stain-normalized + ResNet50 산출물 (utils/extract_features_stain_norm.py)
 FEATURES_AUG_FILENAME  = "features_aug.pt"   # 타일 augmentation(seed 고정, 1회성) + ResNet50 산출물
                                               # (utils/extract_features_augmented.py, train.py --tile-augment)

@@ -41,6 +41,9 @@ TILE_ENCODER_REGISTRY = {
     # 인코더 자체(1536-dim proj)는 "uni2"와 완전히 동일, 캐싱 feature 파일/coords 출처만 다름
     # (data/dataset.py::FEATURES_FILENAME_BY_BACKBONE, _load_slide).
     "uni2official":  UNI2hEncoder,
+    # 2026-08-12: 우리 raw WSI를 우리 파이프라인으로 256px@0.5MPP 재타일링한 UNI2-h feature
+    # (scripts/reconcile_uni2native_features.py) — 인코더는 위와 동일하게 UNI2hEncoder 재사용.
+    "uni2native":    UNI2hEncoder,
 }
 
 

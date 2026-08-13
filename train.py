@@ -819,7 +819,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--backbone", type=str, default="resnet50",
-        choices=["resnet50", "uni", "uni2", "resnet50_norm", "uni2official"],
+        choices=["resnet50", "uni", "uni2", "resnet50_norm", "uni2official", "uni2native"],
         help="frozen tile encoder 선택 (기본: resnet50=Lunit SwAV, 2048-dim). uni는 UNI ViT-L/16"
              "(1024-dim, 224 리사이즈) — 미리 `python -m utils.extract_features --backbone uni`로 "
              "features_uni.pt를 뽑아둬야 한다(HuggingFace gated repo 접근 승인 + .env HF_TOKEN 필요). "
@@ -833,7 +833,12 @@ def _parse_args() -> argparse.Namespace:
              "uni2official은 MahmoodLab이 공식 스펙(256px@20x, ~0.5MPP)으로 직접 뽑아 배포한 "
              "UNI2-h feature(HuggingFace dataset MahmoodLab/UNI2-h-features, gated) — 인코더는 "
              "uni2와 동일(1536-dim)하지만 patch grid가 우리 자체 추출본과 달라 coords도 별도 "
-             "파일에서 읽는다(scripts/convert_uni2h_official_features.py 산출물 필요).",
+             "파일에서 읽는다(scripts/convert_uni2h_official_features.py 산출물 필요). "
+             "uni2native는 uni2official과 같은 스펙(256px@20x)을 우리 raw WSI에서 우리 파이프라인"
+             "(data/preprocess.py --target-mpp 0.5 --tile-size 256)으로 직접 재타일링한 버전 — "
+             "uni2official이 가진 두 confound(DX 슬라이드만 포함, coords가 level0 픽셀 단위라 "
+             "attn_dispersion 스케일이 ~4000배 어긋남)를 피한다(scripts/reconcile_uni2native_features.py "
+             "산출물 필요).",
     )
     parser.add_argument(
         "--num-workers", type=int, default=None,

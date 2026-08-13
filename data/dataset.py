@@ -54,6 +54,7 @@ from config import DataConfig
 from data.patch_utils import (
     FEATURES_FILENAME, FEATURES_NORM_FILENAME, FEATURES_UNI_FILENAME, FEATURES_UNI2_FILENAME,
     FEATURES_UNI2OFFICIAL_FILENAME, COORDS_UNI2OFFICIAL_FILENAME,
+    FEATURES_UNI2NATIVE_FILENAME, COORDS_UNI2NATIVE_FILENAME,
     PATCH_TRANSFORM, list_patch_paths, _parse_coord,
 )
 
@@ -66,6 +67,16 @@ FEATURES_FILENAME_BY_BACKBONE = {
     # 전혀 달라 coords도 별도 파일(COORDS_UNI2OFFICIAL_FILENAME)에서 읽는다(_load_slide 참조,
     # list_patch_paths/파일명-파싱 coords 경로를 타지 않음).
     "uni2official":  FEATURES_UNI2OFFICIAL_FILENAME,
+    # 2026-08-12: 우리 raw WSI를 우리 파이프라인으로 256px@0.5MPP 재타일링한 UNI2-h feature
+    # (scripts/reconcile_uni2native_features.py) — uni2official과 같은 이유로 coords도 별도 파일.
+    "uni2native":    FEATURES_UNI2NATIVE_FILENAME,
+}
+
+# feature 파일과 짝을 이루는 별도 coords 파일에서 읽어야 하는 backbone들(patch grid가 우리 자체
+# JPG 추출본과 달라 list_patch_paths/파일명-파싱 coords를 쓸 수 없음) — _load_slide 참조.
+_PAIRED_COORDS_FILENAME_BY_BACKBONE = {
+    "uni2official": COORDS_UNI2OFFICIAL_FILENAME,
+    "uni2native":   COORDS_UNI2NATIVE_FILENAME,
 }
 from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value
 
@@ -698,13 +709,14 @@ class WSISurvivalDataset(Dataset):
     def _load_slide(self, row) -> dict:
         slide_dir = self.roots[row["dataset"]] / "tiles" / row["slide_id"]
 
-        if self.feature_backbone == "uni2official":
-            # 공식 UNI2-h feature(256px@20x) — patch grid가 우리 자체 JPG 추출본과 전혀 달라
-            # list_patch_paths/파일명-파싱 coords를 쓸 수 없다. 짝을 이루는 coords 파일에서
-            # 직접 읽는다(scripts/convert_uni2h_official_features.py가 features/coords를
-            # 같은 행 순서로 저장해뒀으므로 길이 불일치 걱정이 없음).
+        if self.feature_backbone in _PAIRED_COORDS_FILENAME_BY_BACKBONE:
+            # patch grid가 우리 자체 JPG 추출본과 달라(uni2official: MahmoodLab 공식 추출,
+            # uni2native: 우리 파이프라인이지만 별도 트리로 재타일링) list_patch_paths/파일명-파싱
+            # coords를 쓸 수 없다. 짝을 이루는 coords 파일에서 직접 읽는다(변환 스크립트가
+            # features/coords를 같은 행 순서로 저장해뒀으므로 길이 불일치 걱정이 없음).
             patch_paths = None
-            coords = torch.load(slide_dir / COORDS_UNI2OFFICIAL_FILENAME, weights_only=True)
+            coords = torch.load(slide_dir / _PAIRED_COORDS_FILENAME_BY_BACKBONE[self.feature_backbone],
+                                 weights_only=True)
         else:
             patch_paths = list_patch_paths(slide_dir)
             coords = torch.tensor(

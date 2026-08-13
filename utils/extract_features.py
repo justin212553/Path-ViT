@@ -35,7 +35,7 @@ from config import DataConfig
 from data.dataset import PATCHES_ROOT_ATTRS
 from data.patch_utils import (
     FEATURES_FILENAME, FEATURES_UNI_FILENAME, FEATURES_UNI2_FILENAME,
-    PATCH_TRANSFORM, UNI_PATCH_TRANSFORM, list_patch_paths,
+    PATCH_TRANSFORM, UNI_PATCH_TRANSFORM, UNI2_NATIVE_PATCH_TRANSFORM, list_patch_paths,
 )
 from models.cnn_encoder import CNNEncoder
 from models.uni_encoder import UNIEncoder
@@ -71,6 +71,20 @@ BACKBONE_REGISTRY = {
         "transform":    UNI_PATCH_TRANSFORM,
         "out_filename": FEATURES_UNI2_FILENAME,
         "batch_size":   8,
+    },
+    "uni2native": {
+        # 2026-08-12: UNI2-h 공식 스펙(256px@20x, ~0.5MPP) 그대로 재타일링한 타일
+        # (data/preprocess.py --target-mpp 0.5 --tile-size 256, --patches-root로 별도
+        # 디렉토리에 뽑음)에서 feature를 추출할 때 쓴다. 위 "uni2"는 1024px@1.0MPP 원본을
+        # 512로 억지 리사이즈하지만, 여기 입력은 이미 256px로 딱 맞게 뽑혀 있어 리사이즈가
+        # 항등연산이어야 한다(UNI2_NATIVE_PATCH_TRANSFORM 참조). out_filename은 별도
+        # 디렉토리 트리에 쓰여 기존 "uni2" 산출물과 안 겹치므로 그대로 FEATURES_UNI2_FILENAME
+        # 재사용 — scripts/reconcile_uni2native_features.py가 이걸 기존 patches 트리로
+        # features_uni2native.pt(+coords_uni2native.pt)라는 이름으로 복사해온다.
+        "encoder_cls":  UNI2hEncoder,
+        "transform":    UNI2_NATIVE_PATCH_TRANSFORM,
+        "out_filename": FEATURES_UNI2_FILENAME,
+        "batch_size":   32,
     },
 }
 
@@ -163,11 +177,18 @@ def main():
     parser.add_argument("--backbone", type=str, default="resnet50", choices=list(BACKBONE_REGISTRY),
                         help="사용할 frozen tile encoder (기본: resnet50=Lunit SwAV). "
                              "uni/uni2는 각각 HuggingFace gated repo(MahmoodLab/UNI, MahmoodLab/UNI2-h) "
-                             "접근 승인 + .env의 HF_TOKEN이 필요하다(같은 토큰 재사용 가능).")
+                             "접근 승인 + .env의 HF_TOKEN이 필요하다(같은 토큰 재사용 가능). "
+                             "uni2native는 --patches-root로 별도 재타일링 트리(256px@0.5MPP, "
+                             "data/preprocess.py --target-mpp 0.5 --tile-size 256)를 가리켜야 한다.")
+    parser.add_argument("--patches-root", type=str, default=None,
+                        help="2026-08-12: 주어지면 config.DataConfig()의 기본 patches_root_{dataset} "
+                             "대신 이 경로 아래 tiles/를 대상으로 한다 — UNI2-h 공식 스펙(256px@20x) "
+                             "재타일링 결과물처럼 기존 patches 트리와 다른 별도 디렉토리에서 추출할 때 "
+                             "쓴다(예: --patches-root data/patches_tcga_uni2native).")
     args = parser.parse_args()
 
     cfg = DataConfig()
-    patches_root = Path(getattr(cfg, PATCHES_ROOT_ATTRS[args.dataset]))
+    patches_root = Path(args.patches_root) if args.patches_root else Path(getattr(cfg, PATCHES_ROOT_ATTRS[args.dataset]))
     extract_features_for_root(patches_root / "tiles", backbone=args.backbone)
 
 
