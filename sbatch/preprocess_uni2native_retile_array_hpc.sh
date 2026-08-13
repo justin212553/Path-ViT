@@ -6,8 +6,8 @@
 #SBATCH --gres=gpu:A30:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=06:00:00
-#SBATCH --array=0-15
+#SBATCH --time=24:00:00
+#SBATCH --array=1-7
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_uni2native_retile_array_%a.log
 
 # 2026-08-12: UNI2-h 공식 스펙(256px@20x, ~0.5MPP)으로 원본 WSI(data/{tcga_paad,cptac_pda}_wsi/)를
@@ -29,6 +29,14 @@
 # (기존 data/patches_{tcga,cptac}/ 트리와 완전히 별도 — 덮어쓰기 없음, 롤백 가능)
 #
 # SLURM_ARRAY_TASK_ID(0~15) -> 0~7: tcga 8-shard, 8~15: cptac 8-shard.
+#
+# [2026-08-13 수정] 최초 제출(--time=06:00:00, --array=0-15)에서 CPTAC 8-shard(8~15)는 전부
+# 완료됐지만 TCGA는 native_mpp가 훨씬 낮아(대부분 40x) 0.5MPP 타깃 재타일링이 CPTAC보다 훨씬
+# 느렸다(슬라이드당 타일 수가 이전 1024px 파이프라인 대비 최대 ~58배로 폭증 — 같은 예시 슬라이드
+# 기준 288개->16,662개 실측) — TCGA shard 0만 6시간 안에 끝났고 1~7은 전부 TIME LIMIT으로
+# CANCELLED(슬라이드 30~53/58~59개까지만 처리). data/preprocess.py가 이미 처리된 슬라이드는
+# skip(exists)하므로 처음부터 다시 돌 필요 없이 이어서 완료 가능 — --time을 24h로 늘리고
+# --array를 미완료분(1-7)만으로 좁혀 재제출한다(0/8-15는 이미 끝났으므로 뺌).
 #
 # 완료 후: sbatch sbatch/extract_features_uni2native_array_hpc.sh 제출.
 #
