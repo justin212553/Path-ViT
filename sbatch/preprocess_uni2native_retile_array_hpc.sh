@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=24:00:00
-#SBATCH --array=1-7
+#SBATCH --array=0-7
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/preprocess_uni2native_retile_array_%a.log
 
 # 2026-08-12: UNI2-h 공식 스펙(256px@20x, ~0.5MPP)으로 원본 WSI(data/{tcga_paad,cptac_pda}_wsi/)를
@@ -35,8 +35,15 @@
 # 느렸다(슬라이드당 타일 수가 이전 1024px 파이프라인 대비 최대 ~58배로 폭증 — 같은 예시 슬라이드
 # 기준 288개->16,662개 실측) — TCGA shard 0만 6시간 안에 끝났고 1~7은 전부 TIME LIMIT으로
 # CANCELLED(슬라이드 30~53/58~59개까지만 처리). data/preprocess.py가 이미 처리된 슬라이드는
-# skip(exists)하므로 처음부터 다시 돌 필요 없이 이어서 완료 가능 — --time을 24h로 늘리고
-# --array를 미완료분(1-7)만으로 좁혀 재제출한다(0/8-15는 이미 끝났으므로 뺌).
+# skip(exists)하므로 처음부터 다시 돌 필요 없이 이어서 완료 가능.
+#
+# [2026-08-14 추가 수정] --array=1-7만 재제출했다가 extract_features 단계에서 깨진 JPEG 발견
+# (TCGA-XD-AAUL...) — 확인해보니 .done 마커가 아예 없는 슬라이드였다. _process_slide()는
+# 슬라이드 하나가 예외로 실패해도 내부에서 캐치하고 "ERROR ..."만 로그에 남긴 뒤 다음
+# 슬라이드로 넘어가므로, 그 shard 자체는 정상적으로 "Complete"라고 끝나버려 실패한 슬라이드가
+# 로그상 안 드러났다 — 즉 "Complete" 찍힌 shard(0 포함) 안에도 조용히 실패한 슬라이드가 더
+# 있을 수 있다. 이미 성공한 슬라이드는 .done이 있어 즉시 skip되니 손해가 없으므로, shard 0도
+# 포함해 --array=0-7 전체를 다시 제출한다.
 #
 # 완료 후: sbatch sbatch/extract_features_uni2native_array_hpc.sh 제출.
 #

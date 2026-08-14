@@ -28,8 +28,9 @@ data/extract_rna_clinical.py 산출물)에 없는 case도 추가로 제외된다
 data/rna_{tcga,cptac}.csv에 없는 case도 마찬가지로 제외된다(실제로는 두 파일이 같은
 extract_rna_clinical.py 실행에서 함께 나온 산출물이라 case 집합이 이미 동일하다).
 
-train/val/test는 case 단위 6:2:2 stratified split이다 — (dataset, OS_event) 조합별로 case를
-seed로 섞은 뒤 순서대로 잘라 배정하므로, 코호트 비율과 사망/생존 비율이 세 split에 고르게
+train/val/test는 case 단위 6:2:2 stratified split이다 — (dataset, OS_event) 조합별로(use_stage_
+stratify=True면 stage도 함께) case를 seed로 섞은 뒤 순서대로 잘라 배정하므로, 코호트 비율과
+사망/생존 비율(+옵션 시 병기 구성)이 세 split에 고르게
 유지된다. dataset="both"면 tcga+cptac 전체를 하나의 풀로 합친 뒤 이 방식으로 나눈다
 (dataset="tcga"|"cptac" 하나만 주면 그 코호트 하나만 대상으로 같은 방식으로 나눈다).
 학습에 쓰지 않은 반대 코호트 전체(split="all")를 추가 external test로 쓸 수도 있다
@@ -321,6 +322,27 @@ def _slide_tumor_status(slide_id: str, dataset: str, cptac_slide_types: dict) ->
     return 2
 
 
+def _load_case_stage(dataset_name: str) -> dict:
+    """2026-08-14: case_id -> ajcc_stage 문자열 매핑, split stratification 전용(모델 입력과
+    무관 — with_clinical=False인 모델도 이 정보로 fold를 나눌 수 있다). data/clinical_{name}.csv에
+    ajcc_stage 컬럼이 없거나 파일 자체가 없으면 빈 dict를 반환하고, 호출부에서 "unknown"으로
+    처리한다.
+
+    도입 배경: fold별 internal log-rank p가 fold마다 크게 요동쳤는데(2026-08-14 조사), event
+    비율/표본 크기는 fold 간 거의 동일한 반면 stage 구성만 뚜렷이 달랐다(나쁜 fold는 Stage IIB가
+    77%까지 쏠림, 좋은 fold는 58~62%로 더 다양) — 단일 병기에 쏠린 fold는 애초에 그 안에 위험도
+    스펙트럼이 좁아 log-rank 검정력 자체가 약해진다. (dataset, OS_event) 기준 stratification에
+    stage를 추가해 이 쏠림을 fold 간에 고르게 분산시킨다.
+    """
+    path = CLINICAL_PATHS.get(dataset_name)
+    if path is None or not path.exists():
+        return {}
+    df = pd.read_csv(path)
+    if "ajcc_stage" not in df.columns:
+        return {}
+    return dict(zip(df["case_id"], df["ajcc_stage"].fillna("unknown")))
+
+
 def _select_representative_slide(all_items: pd.DataFrame) -> pd.DataFrame:
     """케이스당 슬라이드를 1장으로 줄인다(findings_backlog.md 14번 항목 — 레퍼런스(Leeyoungsup/
     pancreatic_cancer_pathology)는 TCGA는 diagnostic(DX) WSI 1개/환자, CPTAC는 SeriesDescription에
@@ -383,22 +405,36 @@ def _exclude_normal_slides(all_items: pd.DataFrame) -> pd.DataFrame:
     return all_items[keep].reset_index(drop=True)
 
 
-def _stratified_case_split(case_df: pd.DataFrame, seed: int) -> dict:
-    """
-    (dataset, OS_event) 조합별로 case를 6:2:2(train/val/test)로 나눈다.
+# 2026-08-14: (dataset, OS_event) 기준 stratification에 stage(_load_case_stage())를 선택적으로
+#추가할 수 있게 한다(--stage-stratify, 기본 False로 기존 동작 그대로 유지). fold별 internal
+# log-rank p가 요동친 원인 조사에서, event 비율/표본 크기는 fold 간 거의 동일한데 stage 구성만
+# 뚜렷이 달랐다(나쁜 fold는 Stage IIB가 77%까지 쏠림) — 단일 병기에 쏠린 fold는 그 안의 위험도
+# 스펙트럼이 좁아 log-rank 검정력 자체가 약해진다. 다만 이 stratify key를 바꾸면 같은 seed라도
+# fold 배정(어떤 환자가 어느 fold에 들어가는지) 자체가 달라져 기존 결과와 split이 안 맞게
+# 되므로, 기본은 꺼둔 채 옵션으로만 제공한다 — 켜서 새로 실험할 땐 baseline도 같은 옵션으로
+# 다시 돌려야 공정한 비교가 된다.
+def _stratify_keys(use_stage_stratify: bool) -> list[str]:
+    return ["dataset", "OS_event", "stage"] if use_stage_stratify else ["dataset", "OS_event"]
 
-    그룹 내에서 seed로 섞은 뒤 순서대로 잘라 배정하므로, 코호트 구성비와 사망/생존 비율이
-    세 split 전체에 고르게 유지된다(dataset="both"일 때도 tcga/cptac 비율이 유지됨).
+
+def _stratified_case_split(case_df: pd.DataFrame, seed: int, use_stage_stratify: bool = False) -> dict:
+    """
+    (dataset, OS_event[, stage]) 조합별로 case를 6:2:2(train/val/test)로 나눈다.
+
+    그룹 내에서 seed로 섞은 뒤 순서대로 잘라 배정하므로, 코호트 구성비·사망/생존 비율(및
+    use_stage_stratify=True면 병기 구성)이 세 split 전체에 고르게 유지된다(dataset="both"일
+    때도 tcga/cptac 비율이 유지됨).
 
     Args:
-        case_df: index=case_id, columns=["dataset", "OS_event"] (case당 1행)
+        case_df: index=case_id, columns=["dataset", "OS_event", "stage"] (case당 1행,
+                 stage는 use_stage_stratify=False면 값이 있어도 무시됨)
         seed:    셔플 재현성
     Returns:
         {case_id: "train"|"val"|"test"}
     """
     rng = np.random.RandomState(seed)
     split_of_case = {}
-    for _, group in case_df.groupby(["dataset", "OS_event"]):
+    for _, group in case_df.groupby(_stratify_keys(use_stage_stratify)):
         case_ids = group.index.to_numpy().copy()
         rng.shuffle(case_ids)
         n       = len(case_ids)
@@ -414,26 +450,37 @@ def _stratified_case_split(case_df: pd.DataFrame, seed: int) -> dict:
     return split_of_case
 
 
-def _stratified_kfold_assignment(case_df: pd.DataFrame, seed: int, n_folds: int) -> dict:
+def _stratified_kfold_assignment(case_df: pd.DataFrame, seed: int, n_folds: int,
+                                  use_stage_stratify: bool = False) -> dict:
     """
-    (dataset, OS_event) 조합별로 case를 n_folds개 fold에 라운드로빈으로 균등 배정한다.
+    (dataset, OS_event[, stage]) 조합별로 case를 n_folds개 fold에 라운드로빈으로 균등 배정한다.
     K-fold 교차검증의 fold 번호 할당 전용 — train/val 배정은 _kfold_case_split()이 이어서 한다.
+
+    2026-08-14: use_stage_stratify=True면 stage도 stratify key에 들어가 그룹 수가 확 늘어난다
+    (dataset x OS_event x stage, 최대 ~14개) — 상당수 그룹이 n_folds(5)보다 작아진다. 그룹마다
+    항상 i=0부터 시작해 i%n_folds로 배정하면, 작은 그룹은 항상 fold 0/1/2...번에만 몰리는
+    체계적 편향이 생긴다(실측: fold0 N=37 vs fold4 N=25로 뒤틀림). 그룹마다 시작 fold를 무작위
+    offset으로 옮겨서, 어느 그룹의 "나머지"가 어느 fold에 쏠릴지 자체를 무작위화한다 — 그룹이
+    여럿이면 이 쏠림이 fold 사이에서 평균적으로 상쇄된다. use_stage_stratify=False(그룹 수가
+    최대 4개라 그룹이 항상 n_folds보다 훨씬 큼)일 때도 안전하게 동작한다.
     """
     rng = np.random.RandomState(seed)
     fold_of_case = {}
-    for _, group in case_df.groupby(["dataset", "OS_event"]):
+    for _, group in case_df.groupby(_stratify_keys(use_stage_stratify)):
         case_ids = group.index.to_numpy().copy()
         rng.shuffle(case_ids)
+        offset = rng.randint(0, n_folds)
         for i, case_id in enumerate(case_ids):
-            fold_of_case[case_id] = i % n_folds
+            fold_of_case[case_id] = (i + offset) % n_folds
     return fold_of_case
 
 
-def _stratified_binary_split(case_df: pd.DataFrame, seed: int, frac: float) -> dict:
-    """(dataset, OS_event) 조합별로 case를 frac:(1-frac) 비율로 "train"/"val" 둘로 나눈다."""
+def _stratified_binary_split(case_df: pd.DataFrame, seed: int, frac: float,
+                              use_stage_stratify: bool = False) -> dict:
+    """(dataset, OS_event[, stage]) 조합별로 case를 frac:(1-frac) 비율로 "train"/"val" 둘로 나눈다."""
     rng = np.random.RandomState(seed)
     split_of_case = {}
-    for _, group in case_df.groupby(["dataset", "OS_event"]):
+    for _, group in case_df.groupby(_stratify_keys(use_stage_stratify)):
         case_ids = group.index.to_numpy().copy()
         rng.shuffle(case_ids)
         n       = len(case_ids)
@@ -443,7 +490,8 @@ def _stratified_binary_split(case_df: pd.DataFrame, seed: int, frac: float) -> d
     return split_of_case
 
 
-def _kfold_case_split(case_df: pd.DataFrame, seed: int, n_folds: int, fold_idx: int) -> dict:
+def _kfold_case_split(case_df: pd.DataFrame, seed: int, n_folds: int, fold_idx: int,
+                       use_stage_stratify: bool = False) -> dict:
     """
     K-fold 교차검증 split. case_df를 n_folds개로 나눠 fold_idx번째를 test로 쓰고, 나머지
     (n_folds-1)/n_folds 풀은 TRAIN_FRAC:VAL_FRAC 비율 그대로(60:20 관례)로 다시 train/val로
@@ -454,20 +502,23 @@ def _kfold_case_split(case_df: pd.DataFrame, seed: int, n_folds: int, fold_idx: 
     n_folds=5면 train=80%*0.75=60%, val=80%*0.25=20% — 기존과 동일).
 
     Args:
-        case_df:  index=case_id, columns=["dataset", "OS_event"]
+        case_df:  index=case_id, columns=["dataset", "OS_event", "stage"]
         seed:     fold 배정과 train/val 재분할에 공통으로 쓰는 셔플 시드
         n_folds:  fold 개수
         fold_idx: 이번 호출에서 test로 쓸 fold 번호(0-based)
+        use_stage_stratify: True면 stage도 stratify key에 포함(기본 False — 기존 동작 유지,
+                            켜면 fold 배정 자체가 기존과 달라짐).
     Returns:
         {case_id: "train"|"val"|"test"}
     """
-    fold_of_case = _stratified_kfold_assignment(case_df, seed, n_folds)
+    fold_of_case = _stratified_kfold_assignment(case_df, seed, n_folds, use_stage_stratify=use_stage_stratify)
     is_test = case_df.index.map(lambda cid: fold_of_case[cid] == fold_idx)
     test_df, remaining_df = case_df[is_test], case_df[~is_test]
 
     split_of_case = {case_id: "test" for case_id in test_df.index}
     train_val_frac = TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)
-    split_of_case.update(_stratified_binary_split(remaining_df, seed, frac=train_val_frac))
+    split_of_case.update(_stratified_binary_split(remaining_df, seed, frac=train_val_frac,
+                                                    use_stage_stratify=use_stage_stratify))
     return split_of_case
 
 
@@ -477,7 +528,8 @@ class WSISurvivalDataset(Dataset):
         cfg:           DataConfig (patches_root_tcga/cptac, precomputed, seed 참조)
         dataset:       "tcga" | "cptac" | "both" ("both"면 두 코호트를 하나의 풀로 합친다)
         split:         "train" | "val" | "test" — case 단위 6:2:2 stratified split
-                       ((dataset, OS_event) 조합 기준, _stratified_case_split 참조)
+                       ((dataset, OS_event) 조합 기준, use_stage_stratify=True면 stage도 추가,
+                       _stratified_case_split 참조)
                        "all"이면 split을 나누지 않고 dataset의 case 전체를 반환한다 —
                        학습에 전혀 쓰이지 않은 별도 코호트를 통째로 external test로 평가할 때
                        쓴다(예: --dataset cptac으로 학습한 모델을 dataset="tcga", split="all"로
@@ -539,6 +591,12 @@ class WSISurvivalDataset(Dataset):
                        단일 split의 20%가 아니라 코호트 전체 크기가 된다. None(기본)이면 기존
                        단일 _stratified_case_split 그대로 동작(하위 호환).
         n_folds:       fold 개수(기본 5). fold=None이면 무시.
+        use_stage_stratify: 2026-08-14, 기본 False(기존 동작 그대로) — True면 (dataset,
+                       OS_event) split stratification에 ajcc_stage(_load_case_stage())도
+                       추가한다. fold별 log-rank p 변동 원인 조사에서 나쁜 fold일수록 단일
+                       병기(Stage IIB)에 쏠려 있었던 것에 대한 대응. 켜면 같은 seed라도 fold
+                       배정 자체가 기존과 달라지므로, 기존 결과와 직접 비교하려면 baseline도
+                       같은 옵션으로 다시 돌려야 한다(train.py --stage-stratify).
 
     아이템 단위 = 환자 1명. __getitem__은 그 환자가 가진 모든 슬라이드의 dict 리스트를 반환한다.
     """
@@ -563,6 +621,7 @@ class WSISurvivalDataset(Dataset):
         feature_filename_override: str | None = None,
         fold: int | None = None,
         n_folds: int = 5,
+        use_stage_stratify: bool = False,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -594,6 +653,7 @@ class WSISurvivalDataset(Dataset):
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
         self.rna_purist       = rna_purist
+        self.use_stage_stratify = use_stage_stratify
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -715,12 +775,23 @@ class WSISurvivalDataset(Dataset):
             self.items = all_items.reset_index(drop=True)
         else:
             case_df = all_items.groupby("case_id").agg(dataset=("dataset", "first"), OS_event=("OS_event", "first"))
+            if self.use_stage_stratify:
+                # split stratification 전용 stage 컬럼(_load_case_stage 참조) — 모델이
+                # with_clinical=False라 all_items에 ajcc_stage가 아예 없어도 여기서 독립적으로
+                # 채운다. use_stage_stratify=False면 아예 안 만들고(불필요한 파일 I/O 생략)
+                # _stratify_keys()도 "stage"를 안 봐서 이 컬럼 부재가 문제되지 않는다.
+                stage_lookup = {}
+                for name in case_df["dataset"].unique():
+                    stage_lookup.update(_load_case_stage(name))
+                case_df["stage"] = case_df.index.map(lambda cid: stage_lookup.get(cid, "unknown"))
             if fold is not None:
                 # K-fold — fold 번째를 test로, 나머지를 다시 60:20 비율로 train/val 배정
-                split_of_case = _kfold_case_split(case_df, seed=cfg.seed, n_folds=n_folds, fold_idx=fold)
+                split_of_case = _kfold_case_split(case_df, seed=cfg.seed, n_folds=n_folds, fold_idx=fold,
+                                                   use_stage_stratify=self.use_stage_stratify)
             else:
-                # case 단위 6:2:2 stratified split — (dataset, OS_event) 조합별로 seed 고정 셔플 후 배정
-                split_of_case = _stratified_case_split(case_df, seed=cfg.seed)
+                # case 단위 6:2:2 stratified split — (dataset, OS_event[, stage]) 조합별로 seed 고정 셔플 후 배정
+                split_of_case = _stratified_case_split(case_df, seed=cfg.seed,
+                                                         use_stage_stratify=self.use_stage_stratify)
             all_items["_split"] = all_items["case_id"].map(split_of_case)
             self.items = all_items[all_items["_split"] == split].reset_index(drop=True)
 

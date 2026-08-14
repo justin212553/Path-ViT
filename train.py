@@ -1063,6 +1063,17 @@ def _parse_args() -> argparse.Namespace:
              "접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--stage-stratify", action="store_true",
+        help="2026-08-14: train/val/test(및 k-fold) split의 stratification key에 ajcc_stage를 "
+             "추가한다(data/dataset.py::WSISurvivalDataset use_stage_stratify, 기본 False로 "
+             "기존 동작 유지). fold별 internal log-rank p가 요동친 원인 조사에서, event 비율/"
+             "표본 크기는 fold 간 거의 동일한데 stage 구성만 뚜렷이 달랐다(나쁜 fold는 Stage "
+             "IIB가 77%까지 쏠림) — 단일 병기에 쏠린 fold는 위험도 스펙트럼이 좁아 log-rank "
+             "검정력 자체가 약해진다. 켜면 같은 seed라도 fold 배정 자체가 기존과 달라지므로, "
+             "기존 결과와 비교하려면 baseline도 이 옵션으로 다시 돌려야 한다. 켜면 wandb/"
+             "checkpoint에 _STGSTRAT 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--rna-dim", type=int, default=None,
         help="--PMA 전용: RNA 인코더 출력 차원(기본 None=cfg.model.embed_dim과 동일, 기존 동작). "
              "레퍼런스처럼 RNA를 WSI(embed_dim)보다 넓게 쓰는 조합(예: RNA=128, WSI=64)을 "
@@ -1659,6 +1670,8 @@ def main():
         model_prefix += "_RNASNN"
     if args.tumor_type_embed:
         model_prefix += "_TTE"
+    if args.stage_stratify:
+        model_prefix += "_STGSTRAT"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1743,6 +1756,7 @@ def main():
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
         fold=args.fold, n_folds=args.n_folds,
+        use_stage_stratify=args.stage_stratify,
     )
     # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 features.pt/
     # PATCH_TRANSFORM). --image와 함께 쓰면 매 epoch 실시간 augmentation(transform 교체),
