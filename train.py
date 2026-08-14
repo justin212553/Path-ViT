@@ -1063,6 +1063,15 @@ def _parse_args() -> argparse.Namespace:
              "접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--dx-only-slides", action="store_true",
+        help="2026-08-14: TCGA에서 DX(진단용/영구절편)가 아닌 슬라이드(TS/BS 등 냉동절편)만 "
+             "제외하고 케이스당 남은 DX 슬라이드는 전부 그대로 둔다(data/dataset.py::_dx_only_slides). "
+             "uni2official 조사에서 발견한 두 confound(DX-only 슬라이드 감소 + 좌표스케일 버그) 중 "
+             "좌표스케일 버그 없이(자체 추출 좌표 그대로) DX-only 효과만 분리해서 검증하기 위한 "
+             "옵션. CPTAC은 DX/TS 구분 정보가 없어 영향받지 않는다(external은 항상 전체 코호트). "
+             "기본은 미사용. 켜면 wandb/checkpoint에 _DXONLY 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--stage-stratify", action="store_true",
         help="2026-08-14: train/val/test(및 k-fold) split의 stratification key에 ajcc_stage를 "
              "추가한다(data/dataset.py::WSISurvivalDataset use_stage_stratify, 기본 False로 "
@@ -1072,6 +1081,18 @@ def _parse_args() -> argparse.Namespace:
              "검정력 자체가 약해진다. 켜면 같은 seed라도 fold 배정 자체가 기존과 달라지므로, "
              "기존 결과와 비교하려면 baseline도 이 옵션으로 다시 돌려야 한다. 켜면 wandb/"
              "checkpoint에 _STGSTRAT 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--leverage-stratify", action="store_true",
+        help="2026-08-14: train/val/test(및 k-fold) split의 stratification key에 high_leverage("
+             "data/dataset.py::_HIGH_LEVERAGE_CASE_IDS 소속 여부, 기본 False로 기존 동작 유지)를 "
+             "추가한다. --stage-stratify로도 fold별 log-rank p 변동이 개별 fold 단위에서는 "
+             "깔끔히 설명되지 않아, 다변량 상관 분석에서 가장 강했던 후보(고레버리지 환자 집중도 "
+             "rho=0.894)를 직접 통제해보는 탐색적 실험. _HIGH_LEVERAGE_CASE_IDS는 baseline "
+             "3seed pooled OOF의 leave-one-out c-index delta로 역산한 20명으로 모델 종속적인 "
+             "정의임을 유의(일반적 '어려운 환자' 정답이 아님). 켜면 같은 seed라도 fold 배정 "
+             "자체가 기존과 달라지므로, 기존 결과와 비교하려면 baseline도 이 옵션으로 다시 돌려야 "
+             "한다. 켜면 wandb/checkpoint에 _LEVSTRAT 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--rna-dim", type=int, default=None,
@@ -1589,6 +1610,9 @@ def main():
     if args.exclude_normal_slides:
         # _NONORMAL = 확인된 정상 조직 슬라이드만 제외(케이스당 나머지는 전부 유지) 표시.
         model_prefix += "_NONORMAL"
+    if args.dx_only_slides:
+        # _DXONLY = TCGA에서 DX(진단용/영구절편)가 아닌 슬라이드만 제외(케이스당 나머지 DX는 전부 유지) 표시.
+        model_prefix += "_DXONLY"
     if args.one_slide_per_case:
         # _1SLIDE = 케이스당 대표 슬라이드 1장만 사용 표시(findings_backlog.md 14번 항목).
         model_prefix += "_1SLIDE"
@@ -1672,6 +1696,8 @@ def main():
         model_prefix += "_TTE"
     if args.stage_stratify:
         model_prefix += "_STGSTRAT"
+    if args.leverage_stratify:
+        model_prefix += "_LEVSTRAT"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1755,8 +1781,10 @@ def main():
         rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
+        dx_only_slides=args.dx_only_slides,
         fold=args.fold, n_folds=args.n_folds,
         use_stage_stratify=args.stage_stratify,
+        use_leverage_stratify=args.leverage_stratify,
     )
     # --tile-augment는 학습 split에서만 적용한다(val/test/external은 항상 증강 없는 features.pt/
     # PATCH_TRANSFORM). --image와 함께 쓰면 매 epoch 실시간 augmentation(transform 교체),
