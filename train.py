@@ -1072,6 +1072,17 @@ def _parse_args() -> argparse.Namespace:
              "기본은 미사용. 켜면 wandb/checkpoint에 _DXONLY 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--reference-cohort", action="store_true",
+        help="레퍼런스(Leeyoungsup/pancreatic_cancer_pathology)의 케이스 포함 기준(24개월 시점 "
+             "생존 여부 확정 + WSI 보유, data/reference_cohort.py::reference_eligible_case_ids "
+             "참조)으로 case를 제한한다 — train_light.py --match-reference-cohort와 동일한 "
+             "메커니즘을 train.py(WSI 모델)에도 이식. --dataset/--external로 쓰이는 코호트 전부에 "
+             "적용되므로(train/val/test/external 공통 ds_kwargs), --external과 함께 쓰면 external "
+             "평가 코호트도 함께 줄어든다(레퍼런스가 CPTAC 평가도 같은 205명 풀 안에서 하는 것과 "
+             "동일 관례) — 기존 baseline(external 항상 전체 144명)과 직접 비교하려면 이 점을 "
+             "감안할 것. 기본은 미사용. 켜면 wandb/checkpoint에 _REFCOHORT 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--stage-stratify", action="store_true",
         help="2026-08-14: train/val/test(및 k-fold) split의 stratification key에 ajcc_stage를 "
              "추가한다(data/dataset.py::WSISurvivalDataset use_stage_stratify, 기본 False로 "
@@ -1613,6 +1624,9 @@ def main():
     if args.dx_only_slides:
         # _DXONLY = TCGA에서 DX(진단용/영구절편)가 아닌 슬라이드만 제외(케이스당 나머지 DX는 전부 유지) 표시.
         model_prefix += "_DXONLY"
+    if args.reference_cohort:
+        # _REFCOHORT = 레퍼런스의 24개월 시점 생존 확정 + WSI 보유 기준으로 case 제한 표시.
+        model_prefix += "_REFCOHORT"
     if args.one_slide_per_case:
         # _1SLIDE = 케이스당 대표 슬라이드 1장만 사용 표시(findings_backlog.md 14번 항목).
         model_prefix += "_1SLIDE"
@@ -1775,6 +1789,16 @@ def main():
 
     with_clinical = args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
     with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
+
+    restrict_case_ids = None
+    if args.reference_cohort:
+        from data.reference_cohort import reference_eligible_case_ids
+        target_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+        if external_dataset:
+            target_datasets = list(set(target_datasets) | {external_dataset})
+        restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
+        print(f"--reference-cohort: {len(restrict_case_ids)}개 case로 제한")
+
     ds_kwargs = dict(
         with_clinical=with_clinical, with_staging=with_staging, with_margin=args.clinical_margin,
         with_rna=with_rna, feature_backbone=args.backbone,
@@ -1782,6 +1806,7 @@ def main():
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
         dx_only_slides=args.dx_only_slides,
+        restrict_case_ids=restrict_case_ids,
         fold=args.fold, n_folds=args.n_folds,
         use_stage_stratify=args.stage_stratify,
         use_leverage_stratify=args.leverage_stratify,
