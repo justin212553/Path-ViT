@@ -296,6 +296,31 @@ def _load_cptac_gdc_slide_types() -> dict:
     return dict(zip(df["slide_id"], df["sample_type"]))
 
 
+def _slide_tumor_status(slide_id: str, dataset: str, cptac_slide_types: dict) -> int:
+    """2026-08-13: --tumor-type-embed용 — 슬라이드의 종양/정상 여부를 0(tumor)/1(normal)/
+    2(unknown)으로 인코딩한다. _exclude_normal_slides()가 이미 같은 출처(TCGA 바코드 sample
+    type, CPTAC GDC biospecimen)로 정상 조직을 걸러내는 데 쓰던 것과 동일한 정보를, 여기서는
+    필터링이 아니라 모델 입력 태그로 재사용한다.
+
+    TCGA: sample type 코드(idx=3)가 "0"으로 시작하면 종양 계열(01=Primary Tumor 등),
+    "1"로 시작하면 정상/대조 계열(11=Solid Tissue Normal 등) — TCGA 코드 체계 관례.
+    CPTAC: GDC biospecimen 매칭 결과(52%만 커버, 나머지는 unknown)를 그대로 쓴다.
+    """
+    if dataset == "tcga":
+        code = _tcga_barcode_field(slide_id, 3)
+        if code.startswith("0"):
+            return 0
+        if code.startswith("1"):
+            return 1
+        return 2
+    sample_type = cptac_slide_types.get(slide_id)
+    if sample_type == "Primary Tumor":
+        return 0
+    if sample_type == "Solid Tissue Normal":
+        return 1
+    return 2
+
+
 def _select_representative_slide(all_items: pd.DataFrame) -> pd.DataFrame:
     """케이스당 슬라이드를 1장으로 줄인다(findings_backlog.md 14번 항목 — 레퍼런스(Leeyoungsup/
     pancreatic_cancer_pathology)는 TCGA는 diagnostic(DX) WSI 1개/환자, CPTAC는 SeriesDescription에
@@ -562,6 +587,10 @@ class WSISurvivalDataset(Dataset):
         self.feature_backbone   = feature_backbone
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
         self.feature_filename_override = feature_filename_override
+        # 2026-08-13: --tumor-type-embed(models/vit_encoder.py) — 슬라이드가 종양/정상 조직인지를
+        # ViT 입력 단계에서 조건 신호로 주입하기 위해 매 __getitem__마다 다시 계산하지 않도록
+        # 한 번만 로드해 캐싱한다(_load_cptac_gdc_slide_types()는 파일 I/O가 있음).
+        self._cptac_slide_types = _load_cptac_gdc_slide_types()
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
         self.rna_purist       = rna_purist
@@ -726,13 +755,15 @@ class WSISurvivalDataset(Dataset):
             coords[:, 0] -= coords[:, 0].min()
             coords[:, 1] -= coords[:, 1].min()
 
+        tumor_status = _slide_tumor_status(row["slide_id"], row["dataset"], self._cptac_slide_types)
         item = {
-            "coords":   coords,
-            "case_id":  row["case_id"],
-            "slide_id": row["slide_id"],
-            "dataset":  row["dataset"],
-            "OS_time":  torch.tensor([row["OS_time"]], dtype=torch.float32),
-            "OS_event": torch.tensor([row["OS_event"]], dtype=torch.long),
+            "coords":       coords,
+            "case_id":      row["case_id"],
+            "slide_id":     row["slide_id"],
+            "dataset":      row["dataset"],
+            "OS_time":      torch.tensor([row["OS_time"]], dtype=torch.float32),
+            "OS_event":     torch.tensor([row["OS_event"]], dtype=torch.long),
+            "tumor_status": torch.tensor(tumor_status, dtype=torch.long),  # 0=tumor,1=normal,2=unknown
         }
 
         if self.with_clinical:

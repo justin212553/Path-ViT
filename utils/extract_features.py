@@ -162,7 +162,17 @@ def extract_features_for_root(
         if not patch_paths:
             continue
 
-        features = _extract_node(encoder, patch_paths, transform, batch_size)
+        # 2026-08-14: 깨진(잘린) JPEG 타일 하나 때문에 shard 전체 job이 죽는 걸 막는다 —
+        # 재타일링 단계가 SLURM TIME LIMIT으로 죽으면서 일부 타일이 잘린 채 남을 수 있음이
+        # 실측 확인됨(preprocess.py의 .done 마커는 슬라이드 단위라 슬라이드 내 개별 타일 파일
+        # 손상까지는 못 잡음). 이 슬라이드는 건너뛰고(경고만 출력, out_path 안 만듦 -> 다음
+        # 실행에서 다시 시도) 나머지 슬라이드는 계속 처리한다.
+        try:
+            features = _extract_node(encoder, patch_paths, transform, batch_size)
+        except Exception as e:
+            print(f"WARN 슬라이드 스킵(패치 로드/추출 실패, 타일 손상 의심): {node_dir.name}: "
+                  f"{type(e).__name__}: {e}")
+            continue
         # 2026-08-13: skip 판단이 out_path.exists()뿐이라 torch.save 도중 job이 죽으면(SLURM
         # TIME LIMIT 등) 잘린 파일이 "이미 완료"로 오판될 수 있었다(data/preprocess.py는 .done
         # 마커로 이 문제를 이미 피해뒀음). 임시 파일에 쓴 뒤 원자적 rename으로 교체 —

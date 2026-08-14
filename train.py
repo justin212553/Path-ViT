@@ -217,6 +217,8 @@ def _patient_risk(
 
             coords = coords.to(device, non_blocking=True)
             forward_kwargs = {"rna_context": z_rna} if z_rna is not None else {}
+            if "tumor_status" in slide:
+                forward_kwargs["tumor_type"] = slide["tumor_status"].to(device, non_blocking=True)
             if features is not None:
                 out = model(coords, features=features, **forward_kwargs)
             else:
@@ -685,6 +687,14 @@ def _parse_args() -> argparse.Namespace:
              "접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--rna-snn", action="store_true",
+        help="2026-08-13: models/rna_encoder.py::RNAEncoder를 PORPOISE(Chen et al. 2022) "
+             "SNN_Block 스타일(Linear->ELU->AlphaDropout->Linear, LayerNorm 제거)로 교체한다 "
+             "— 기본(GELU+LayerNorm+Dropout) 대비 표준 Dropout보다 덜 파괴적인 AlphaDropout이 "
+             "RNA 브랜치의 반복 관측된 과적합(train-val c_index 격차)을 줄이는지 보는 파일럿. "
+             "현재 --M6(RNAOnly)에만 배선됨.",
+    )
+    parser.add_argument(
         "--modality-dropout-p", type=float, default=0.0,
         help="RNA를 쓰는 모델(--M4/--M4A/--M4B/--PM4/--PMA, rna_encoder 필요)에서, 학습 중 "
              "이 확률로 z_rna를 통째로 0벡터로 지운다(train.py::_patient_risk). "
@@ -956,6 +966,17 @@ def _parse_args() -> argparse.Namespace:
              "5번째 관점으로 추가한다(cfg.model.use_attn_dispersion=True, ViT_PMA 전용). "
              "--spatial-autocorr와 독립적으로 켤 수 있다(순차 검증용). 켜면 wandb/checkpoint에 "
              "_DISP 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--tumor-type-embed", action="store_true",
+        help="2026-08-13: 슬라이드가 종양/정상/미상(data/dataset.py::_slide_tumor_status, "
+             "0/1/2)인지를 학습 가능한 임베딩으로 인코딩해 self.vit 입력 직전 patch_tokens에 "
+             "더한다(models/vit_encoder.py — pos_embedding과 동일한 자리, 동일한 가산 패턴). "
+             "findings_backlog.md 14번 항목(대표 슬라이드 1장으로 줄이면 오히려 악화)과 "
+             "uni2official 대조실험(DX 슬라이드만 있으면 성능 하락)에서, 지금은 암묵적으로만 "
+             "활용되는 슬라이드 타입 정보를 모델에 명시적으로 알려주면 더 잘 쓸 수 있는지 "
+             "확인하는 파일럿. 현재 --PMA에만 배선됨. 켜면 wandb/checkpoint에 _TTE 접미사가 "
+             "자동으로 붙는다.",
     )
     parser.add_argument(
         "--knn-fixed-bias-attention", action="store_true",
@@ -1319,6 +1340,11 @@ def main():
         cfg.model.use_nystrom = False
         cfg.model.use_spatial_embed = False
 
+    if args.rna_snn and not args.M6:
+        raise ValueError("--rna-snn은 현재 --M6(RNAOnly)에서만 배선돼 있습니다.")
+    if args.tumor_type_embed and not args.PMA:
+        raise ValueError("--tumor-type-embed는 현재 --PMA에서만 배선돼 있습니다.")
+
     # [LateFusion] --fusion 플래그 시 cluster_centroids.pt 로드 검증
     if args.fusion and not cfg.data.precomputed:
         raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
@@ -1629,6 +1655,10 @@ def main():
         model_prefix += f"_SWAD{args.swad_tolerance:g}"
     if args.early_stop_patience is not None:
         model_prefix += f"_ES{args.early_stop_patience}"
+    if args.rna_snn:
+        model_prefix += "_RNASNN"
+    if args.tumor_type_embed:
+        model_prefix += "_TTE"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -1851,6 +1881,7 @@ def main():
                          combine_mode=args.combine_mode, drop_component=args.drop_component,
                          top_frac=args.top_frac, rna_combine_mode=args.rna_combine_mode,
                          skip_patch_vit=args.skip_patch_vit,
+                         use_tumor_type_embed=args.tumor_type_embed,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -1865,7 +1896,8 @@ def main():
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
                               **stage_kwargs, **margin_kwargs).to(device)
     elif args.M6:
-        model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
+        model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim,
+                         rna_encoder_mode="snn" if args.rna_snn else "gelu").to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M1_POOL:

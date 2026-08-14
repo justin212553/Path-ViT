@@ -13,9 +13,9 @@ from config import ModelConfig
 
 
 class RNAOnly(nn.Module):
-    def __init__(self, cfg: ModelConfig, rna_input_dim: int):
+    def __init__(self, cfg: ModelConfig, rna_input_dim: int, rna_encoder_mode: str = "gelu"):
         super().__init__()
-        self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
+        self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout, mode=rna_encoder_mode)
         self.risk_head = nn.Sequential(
             nn.LayerNorm(cfg.embed_dim),
             nn.Linear(cfg.embed_dim, 1),

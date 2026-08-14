@@ -121,7 +121,8 @@ class AttentionPooling(nn.Module):
 
 class ViT_M1(nn.Module):
     def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50",
-                 use_attn_dispersion: bool = False, skip_patch_vit: bool = False):
+                 use_attn_dispersion: bool = False, skip_patch_vit: bool = False,
+                 use_tumor_type_embed: bool = False):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -178,7 +179,8 @@ class ViT_M1(nn.Module):
                                   knn_k=getattr(cfg, "knn_attn_k", 8),
                                   knn_edge_dropout=getattr(cfg, "knn_attn_edge_dropout", 0.2),
                                   knn_bias_tau=getattr(cfg, "knn_bias_tau", 50.0),
-                                  knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False))
+                                  knn_bias_learnable_tau=getattr(cfg, "knn_bias_learnable_tau", False),
+                                  use_tumor_type_embed=use_tumor_type_embed)
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
@@ -250,6 +252,7 @@ class ViT_M1(nn.Module):
         chunk_size: int | None = None,
         rna_context: torch.Tensor | None = None,
         tile_cache: dict | None = None,
+        tumor_type: torch.Tensor | None = None,
     ) -> dict:
         """
         risk_head를 적용하기 전, WSI 1장을 attention-pooled 임베딩 1개로 집계한다.
@@ -260,13 +263,14 @@ class ViT_M1(nn.Module):
             rna_context: (D,) — RNA-guided attention pooling용 컨텍스트(ViT_M4에서만 사용).
                          attn_pool이 context_dim으로 생성되지 않은 모델(M1/M2)에서는 무시된다.
             tile_cache:  _patch_tokens 참조 — 진짜 real-time augmentation 경로 전용.
+            tumor_type:  () 스칼라 — self.vit로 그대로 전달(use_tumor_type_embed=True일 때만 사용).
 
         Returns:
             embed:        (D,) — WSI 임베딩
             attn_weights: (N_patches,)
         """
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
-        ctx_tokens   = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords)  # (N, D)
+        ctx_tokens   = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords, tumor_type=tumor_type)  # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
         # (models/rna_predictor.py::RNAPredictionHead) 보조과제 입력으로만 쓰인다.

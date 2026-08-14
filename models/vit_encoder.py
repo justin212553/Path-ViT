@@ -402,10 +402,18 @@ class ViTEncoder(nn.Module):
         knn_edge_dropout: float = 0.2,
         knn_bias_tau: float = 50.0,
         knn_bias_learnable_tau: bool = False,
+        use_tumor_type_embed: bool = False,
     ):
         super().__init__()
         self.pos_embedding = SpatialPositionEmbedding(embed_dim)
         self.use_grad_checkpoint = use_grad_checkpoint
+        # 2026-08-13: --tumor-type-embed — pos_embedding과 완전히 같은 패턴(ViT 입력 직전
+        # patch_tokens에 가산)으로, 슬라이드가 종양/정상/미상(data/dataset.py::_slide_tumor_status)
+        # 인지를 학습 가능한 임베딩으로 조건화한다. pos_embedding은 결정론적(좌표의 sinusoidal
+        # 함수)인 반면 이건 룩업 테이블이라 학습된다는 점만 다르다.
+        self.use_tumor_type_embed = use_tumor_type_embed
+        if use_tumor_type_embed:
+            self.tumor_type_embed = nn.Embedding(3, embed_dim)  # 0=tumor,1=normal,2=unknown
         # 2026-07-22: attention이 이미 uniform으로 붕괴해 있고(diagnose_wsi_reliance.py) 나이스트롬
         # 근사가 landmark를 뭉뚱그리는 상황에서, 좌표 임베딩이 실제로 최종 예측에 기여하는지
         # 직접 확인하는 ablation(findings_backlog.md, --no-spatial-embed) — False면
@@ -436,7 +444,8 @@ class ViTEncoder(nn.Module):
         self.norm = nn.LayerNorm(embed_dim)
 
     def forward(
-        self, patch_tokens: torch.Tensor, coords: torch.Tensor, context: torch.Tensor | None = None
+        self, patch_tokens: torch.Tensor, coords: torch.Tensor, context: torch.Tensor | None = None,
+        tumor_type: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -445,14 +454,20 @@ class ViTEncoder(nn.Module):
             context:      (embed_dim,) 선택 — 각 레이어의 FFN 직전에 가산 bias로 주입할
                           외부 컨텍스트(z_rna). --M2_FF 맛보기 ablation 전용, 기본 None이면
                           기존 모델들과 완전히 동일하게 동작한다.
+            tumor_type:   () 스칼라 텐서 선택 — 이 슬라이드의 종양/정상/미상 라벨(0/1/2,
+                          data/dataset.py::_slide_tumor_status). use_tumor_type_embed=True일
+                          때만 쓰이며, 슬라이드 전체 패치에 동일한 임베딩을 더한다.
         Returns:
             out_tokens: (N_patches, embed_dim) - 공간 문맥이 반영된 패치 토큰
         """
         if self.use_spatial_embed:
             pos = self.pos_embedding(coords)       # (N, D)
-            x = (patch_tokens + pos).unsqueeze(0)  # (1, N, D)
+            x = patch_tokens + pos
         else:
-            x = patch_tokens.unsqueeze(0)          # (1, N, D)
+            x = patch_tokens
+        if self.use_tumor_type_embed and tumor_type is not None:
+            x = x + self.tumor_type_embed(tumor_type)  # (D,) -> 전체 패치에 broadcast
+        x = x.unsqueeze(0)                          # (1, N, D)
 
         use_ckpt = self.use_grad_checkpoint and self.training
         for layer in self.layers:
