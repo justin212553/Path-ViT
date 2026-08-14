@@ -114,12 +114,18 @@ def _extract_node(encoder, patch_paths: list[Path], transform, batch_size: int) 
 
 def extract_features_for_root(
     patches_root: Path, backbone: str = "resnet50", encoder=None, notify: bool = True,
+    task_id: int = 0, num_tasks: int = 1,
 ) -> int:
     """patches_root 바로 아래의 각 디렉터리(슬라이드/노드 1개당 1폴더)에 feature 파일을 생성한다.
     이미 산출물이 있는 디렉터리는 skip한다.
 
     다른 전처리 파이프라인(예: data/preprocess_cptac.py)이 타일링 직후 같은 프로세스 안에서
     바로 이어 호출할 수 있도록 만든 진입점 — encoder를 넘기면 재사용하고, 안 넘기면 새로 로드한다.
+
+    task_id/num_tasks: 2026-08-13, data/preprocess.py --task-id/--num-tasks와 동일한 관례로
+    슬라이드 목록을 num_tasks개로 나눠 그중 task_id번째 몫만 처리한다(HPC array job 샤딩용,
+    uni2native처럼 슬라이드 수가 많아 단일 job으로 돌리면(실측 77시간+) 너무 오래 걸릴 때 씀).
+    이미 처리된 디렉터리는 그대로 skip하므로 샤딩과 재실행 skip 로직이 서로 안전하게 공존한다.
 
     Returns: 새로 추출한 디렉터리 수
     """
@@ -134,10 +140,15 @@ def extract_features_for_root(
         encoder = _build_encoder(backbone)
 
     node_dirs = sorted(d for d in patches_root.iterdir() if d.is_dir())
+    if num_tasks > 1:
+        node_dirs = node_dirs[task_id::num_tasks]
 
     try:
         from tqdm import tqdm
-        node_dirs = tqdm(node_dirs, desc=f"Extracting {backbone} features", unit="node")
+        desc = f"Extracting {backbone} features"
+        if num_tasks > 1:
+            desc += f" (task {task_id}/{num_tasks})"
+        node_dirs = tqdm(node_dirs, desc=desc, unit="node")
     except ImportError:
         pass
 
@@ -185,11 +196,14 @@ def main():
                              "대신 이 경로 아래 tiles/를 대상으로 한다 — UNI2-h 공식 스펙(256px@20x) "
                              "재타일링 결과물처럼 기존 patches 트리와 다른 별도 디렉토리에서 추출할 때 "
                              "쓴다(예: --patches-root data/patches_tcga_uni2native).")
+    parser.add_argument("--task-id",   type=int, default=0, help="0-indexed shard index(HPC array job 샤딩용)")
+    parser.add_argument("--num-tasks", type=int, default=1, help="total number of shards")
     args = parser.parse_args()
 
     cfg = DataConfig()
     patches_root = Path(args.patches_root) if args.patches_root else Path(getattr(cfg, PATCHES_ROOT_ATTRS[args.dataset]))
-    extract_features_for_root(patches_root / "tiles", backbone=args.backbone)
+    extract_features_for_root(patches_root / "tiles", backbone=args.backbone,
+                               task_id=args.task_id, num_tasks=args.num_tasks)
 
 
 if __name__ == "__main__":
