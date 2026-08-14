@@ -163,7 +163,13 @@ def extract_features_for_root(
             continue
 
         features = _extract_node(encoder, patch_paths, transform, batch_size)
-        torch.save(features, out_path)
+        # 2026-08-13: skip 판단이 out_path.exists()뿐이라 torch.save 도중 job이 죽으면(SLURM
+        # TIME LIMIT 등) 잘린 파일이 "이미 완료"로 오판될 수 있었다(data/preprocess.py는 .done
+        # 마커로 이 문제를 이미 피해뒀음). 임시 파일에 쓴 뒤 원자적 rename으로 교체 —
+        # out_path가 존재하면 항상 완전히 쓰인 파일임을 보장한다.
+        tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+        torch.save(features, tmp_path)
+        tmp_path.replace(out_path)
         done += 1
 
     elapsed = datetime.now() - start_time
