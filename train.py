@@ -317,11 +317,19 @@ def _patient_risk(
                    (_clinical_enc is not None and getattr(_clinical_enc, "use_staging", False))
                 else None
             )
-            # M2엔 margin 입력이 없다(PMA/ClinicalOnly 전용) — 아래 공용 cox_add 블록이 모든
-            # 분기에서 margin_ord를 참조하므로, 이 분기에서도 None으로 정의해둔다.
-            margin_ord = None
+            # 2026-08-14: M2에 margin(--clinical-margin) 지원 추가 — 그 전엔 M2엔 margin 입력이
+            # 아예 없어 항상 None이었다(M2_FF 등 margin 미지원 모델은 getattr가 False로 안전
+            # 폴백). model 최상위 use_margin을 우선 본다(cox_add면 clinical_encoder 자체가 없어
+            # _clinical_enc.use_margin만 보면 항상 False가 되는 버그를 피하려는 것 — PMA/M4와 동일 관례).
+            margin_ord = (
+                _margin_ord_from_patient(patient_slides, device)
+                if getattr(model, "use_margin", False) or
+                   (_clinical_enc is not None and getattr(_clinical_enc, "use_margin", False))
+                else None
+            )
             patient_embed = model.combine_with_clinical(
-                patient_embed, age_years, sex_idx, stage_ord=stage_ord, spatial_feat=patient_spatial_feat,
+                patient_embed, age_years, sex_idx, stage_ord=stage_ord, margin_ord=margin_ord,
+                spatial_feat=patient_spatial_feat,
             )  # (2D,) (+ spatial_feat_dim, 2026-07-30 — M1/M2에도 dispersion 확장, train_multi.py)
             # (combine_mode="cox_add"면 (D,)/(D+1,) — clinical은 위에서 안 섞이고 아래 공용 블록에서 더해짐)
         elif hasattr(model, "pool_components"):
@@ -1434,8 +1442,14 @@ def main():
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
     if args.rna_gate_only and not args.PMA:
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
-    if args.no_clinical and not args.PMA:
-        raise ValueError("--no-clinical은 --PMA에서만 사용 가능합니다.")
+    if args.no_clinical and not (args.PMA or args.M4):
+        raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
+    if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
+        raise ValueError(
+            "--M4 --no-clinical은 --combine-mode cox_add와 함께 쓸 수 없습니다 — "
+            "cox_add는 clinical이 있어야 의미가 있는 결합 방식입니다(models/vit_m4.py::ViT_M4 "
+            "use_clinical guard 참조). --combine-mode concat(기본)을 쓰세요."
+        )
     if args.tile_risk_head and not args.PMA:
         raise ValueError("--tile-risk-head는 --PMA에서만 사용 가능합니다.")
     if args.fusion and args.backbone != "resnet50":
@@ -1967,7 +1981,7 @@ def main():
         model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
                         use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
-                        skip_patch_vit=args.skip_patch_vit,
+                        skip_patch_vit=args.skip_patch_vit, use_clinical=not args.no_clinical,
                         **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A:
         # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
@@ -2025,6 +2039,8 @@ def main():
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
                         use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                        use_margin=args.clinical_margin, margin_stats=margin_stats,
+                        skip_patch_vit=args.skip_patch_vit,
                         **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
@@ -2036,7 +2052,8 @@ def main():
         # cfg.model.use_attn_dispersion을 True로 세팅해도 M1/M2 생성자가 그 값을 받는 파라미터
         # 자체가 없어 무시됐다(ViT_PMA만 getattr로 읽었음) — M1(기본 모델)에서 처음 실사용 중 발견.
         model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone,
-                        use_attn_dispersion=args.attn_dispersion).to(device)
+                        use_attn_dispersion=args.attn_dispersion,
+                        skip_patch_vit=args.skip_patch_vit).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:

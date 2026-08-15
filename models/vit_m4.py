@@ -66,6 +66,7 @@ class ViT_M4(ViT_M1):
         combine_mode: str = "concat",
         use_attn_dispersion: bool = False,
         skip_patch_vit: bool = False,
+        use_clinical: bool = True,
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
                           skip_patch_vit=skip_patch_vit)
@@ -75,6 +76,11 @@ class ViT_M4(ViT_M1):
         self.use_staging = use_staging
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
+        # 2026-08-14: M3(WSI+RNA, clinical 제외) 슬롯을 M4-NOVIT과 같은 계열(단일 gated ABMIL,
+        # RNA-guided FiLM, patch-mixing 없음)로 다시 만들기 위한 옵션 — models/vit_pma.py::
+        # ViT_PMA의 use_clinical과 동일 관례. False면 clinical_encoder/clinical_linear를 아예
+        # 안 만들고 risk_head 입력이 [z_wsi, z_rna]만으로 구성된다(train.py --no-clinical).
+        self.use_clinical = use_clinical
         self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
 
         # ViT_M1이 만든 context 없는 attn_pool을, z_rna(D차원)를 attention 게이트에
@@ -89,11 +95,14 @@ class ViT_M4(ViT_M1):
         # 플래그를 아예 지원하지 않아 findings_backlog.md의 예전 M4A 기록들은 이 레시피
         # 이전 것들이었다.
         if combine_mode == "concat":
-            self.clinical_encoder = ClinicalEncoder(
-                cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
-                use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
-            )
+            if self.use_clinical:
+                self.clinical_encoder = ClinicalEncoder(
+                    cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
+                    use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
+                )
         else:  # cox_add
+            if not self.use_clinical:
+                raise ValueError("combine_mode='cox_add'는 use_clinical=True에서만 의미가 있습니다.")
             self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
             self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
             if use_margin:
@@ -123,7 +132,10 @@ class ViT_M4(ViT_M1):
         # loss는 배치 내 risk score의 상대적 순서로 손실을 계산해, 최종 스칼라 출력 직전 Dropout이
         # 순서 자체를 크게 흔드는 것으로 추정.
         spatial_feat_dim = 1 if use_attn_dispersion else 0
-        risk_input_dim = cfg.embed_dim * (3 if combine_mode == "concat" else 2) + spatial_feat_dim
+        # concat: [z_wsi, z_rna] + (use_clinical=True일 때만 z_clinical) — use_clinical=False면
+        # M3(WSI+RNA, clinical 제외) 슬롯이 되어 2D. cox_add는 use_clinical=True 강제(위 guard)라 항상 2D.
+        n_components = 2 + (1 if (combine_mode == "concat" and self.use_clinical) else 0)
+        risk_input_dim = cfg.embed_dim * n_components + spatial_feat_dim
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
             nn.Linear(risk_input_dim, 1),
@@ -166,7 +178,9 @@ class ViT_M4(ViT_M1):
             clinical은 여기서 안 섞이고 train.py가 _clinical_raw()로 별도 계산해 최종
             스칼라에 더한다(models/vit_pma.py::ViT_PMA와 동일 관례).
         """
-        if self.combine_mode == "cox_add":
+        if self.combine_mode == "cox_add" or not self.use_clinical:
+            # cox_add는 항상, concat이어도 use_clinical=False(M3: WSI+RNA, clinical 제외)면
+            # z_clinical을 아예 안 섞는다 — [z_wsi, z_rna]만.
             fused = torch.cat([patient_embed, z_rna], dim=-1)  # (2D,)
             if spatial_feat is not None:
                 fused = torch.cat([fused, spatial_feat], dim=-1)

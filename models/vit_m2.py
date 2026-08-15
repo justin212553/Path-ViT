@@ -45,24 +45,37 @@ class ViT_M2(ViT_M1):
         backbone: str = "resnet50",
         use_staging: bool = False,
         stage_stats: dict[str, tuple[float, float]] | None = None,
+        use_margin: bool = False,
+        margin_stats: tuple[float, float] | None = None,
         use_attn_dispersion: bool = False,
         combine_mode: str = "concat",
+        skip_patch_vit: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion)
+        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
+                          skip_patch_vit=skip_patch_vit)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         self.combine_mode = combine_mode
         self.use_staging = use_staging
+        # 2026-08-14: M2(WSI+Clinical)를 M4-NOVIT과 같은 계열(단일 ABMIL, patch-mixing 없음)로
+        # 맞추면서 margin(절제연) 입력도 함께 지원하게 확장 — 기존엔 M2에 margin이 아예 없었다
+        # (PMA/M4/M5/M6/M7만 --clinical-margin 지원). 기본 False라 기존 동작 유지.
+        self.use_margin = use_margin
 
         if combine_mode == "concat":
             self.clinical_encoder = ClinicalEncoder(
-                cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats
+                cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
+                use_margin=use_margin, margin_stats=margin_stats,
             )
             # Late Fusion risk head: [z_wsi ‖ z_clinical] (2D,) [+ dispersion(1,)] → risk_score (1,)
             risk_input_dim = cfg.embed_dim * 2 + (1 if use_attn_dispersion else 0)
         else:  # cox_add
             self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
             self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+            if use_margin:
+                m_mean, m_std = margin_stats
+                self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
+                self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
             if use_staging:
                 if stage_stats is None:
                     raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
@@ -71,7 +84,8 @@ class ViT_M2(ViT_M1):
                     short = _STAGE_BUFFER_NAMES[field]
                     self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                     self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
-            raw_dim = 2 + (2 * len(STAGE_FIELDS) if use_staging else 0)  # age/sex(2) [+ staging(8)]
+            # age/sex(2) [+ margin(2)] [+ staging(8)]
+            raw_dim = 2 + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
             self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 없는 M1과 동일
             # cox_add는 risk_head에 clinical을 넣지 않는다 — z_wsi(+dispersion)만.
@@ -86,6 +100,7 @@ class ViT_M2(ViT_M1):
     def combine_with_clinical(
         self, patient_embed: torch.Tensor, age_years: torch.Tensor, sex_idx: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
+        margin_ord: torch.Tensor | None = None,  # self.use_margin=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
@@ -95,6 +110,7 @@ class ViT_M2(ViT_M1):
             sex_idx:       ()   — encode_sex() 인덱스 스칼라 텐서 (0=male, 1=female)
             stage_ord:     self.clinical_encoder.use_staging=True(--clinical-staging)일 때만
                            필요. {field: () 스칼라 long} — encode_stage_value() 규약.
+            margin_ord:    self.use_margin=True(--clinical-margin)일 때만 필요.
             spatial_feat:  (1,) — self.use_attn_dispersion=True일 때만, 환자 단위 평균
                            dispersion(models/spatial_features.py). 2026-07-30, PMA와 동일 관례.
         Returns:
@@ -106,11 +122,13 @@ class ViT_M2(ViT_M1):
             if spatial_feat is not None:
                 fused = torch.cat([fused, spatial_feat], dim=-1)
             return fused
-        stage_kwargs = {}
+        clinical_kwargs = {}
         if stage_ord is not None:
-            stage_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+            clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        if margin_ord is not None:
+            clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
         z_clinical = self.clinical_encoder(
-            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **stage_kwargs
+            age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
         ).squeeze(0)  # (D,)
         fused = torch.cat([patient_embed, z_clinical], dim=-1)  # (2D,)
         if spatial_feat is not None:
@@ -120,11 +138,14 @@ class ViT_M2(ViT_M1):
     def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                        margin_ord: torch.Tensor | None = None,
                        stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_raw와 동일 관례.
-        M2엔 margin 입력이 없어 margin_ord는 시그니처 호환용으로만 받고 쓰지 않는다(train.py의
-        공용 dispatch가 모든 cox_add 모델에 동일한 인자로 호출한다)."""
+        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_raw와 동일 관례."""
         age_z = (age_years.float() - self.age_mean) / self.age_std
         feats = [age_z, sex_idx.float()]
+        if self.use_margin:
+            ordv = margin_ord.float()
+            known = (ordv >= 0).float()
+            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+            feats += [z, known]
         if self.use_staging:
             for field in STAGE_FIELDS:
                 short = _STAGE_BUFFER_NAMES[field]
