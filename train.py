@@ -54,7 +54,7 @@ from data.patch_utils import (
     PATCH_TRANSFORM_512, build_tile_cache,
 )
 from models import (
-    ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4A, ViT_M4B,
+    ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4_AvgPool, ViT_M4A, ViT_M4B,
     ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
 )
 from models.rna_predictor import RNAPredictionHead
@@ -189,6 +189,7 @@ def _patient_risk(
         slide_embeds = []
         slide_meanpool_embeds = []
         slide_spatial_feats = []
+        slide_risk_stats = []
         for slide in patient_slides:
             coords = slide["coords"]
             features = slide.get("features")
@@ -229,9 +230,12 @@ def _patient_risk(
                 slide_meanpool_embeds.append(out["meanpool_embed"])
             if "spatial_feat" in out:
                 slide_spatial_feats.append(out["spatial_feat"])
+            if "risk_stats" in out:
+                slide_risk_stats.append(out["risk_stats"])
 
         patient_embed = torch.stack(slide_embeds).mean(dim=0)      # (D,) — 슬라이드 평균 풀링
         patient_spatial_feat = torch.stack(slide_spatial_feats).mean(dim=0) if slide_spatial_feats else None
+        patient_risk_stats = torch.stack(slide_risk_stats).mean(dim=0) if slide_risk_stats else None
 
         patient_meanpool = None
         if slide_meanpool_embeds and (hasattr(model, "rna_aux_head") or hasattr(model, "stage_aux_head")):
@@ -273,9 +277,13 @@ def _patient_risk(
                    (_clinical_enc is not None and getattr(_clinical_enc, "use_margin", False))
                 else None
             )
+            # risk_stats는 models/vit_pma.py::ViT_PMA(use_tile_risk_head=True)만 지원한다 —
+            # M4/M4A/M4B의 combine_with_clinical_rna는 이 kwarg 자체가 없으므로, patient_risk_stats가
+            # None일 때(=PMA가 아니거나 use_tile_risk_head=False)는 아예 안 넘겨 TypeError를 피한다.
+            extra_kwargs = {"risk_stats": patient_risk_stats} if patient_risk_stats is not None else {}
             patient_embed = model.combine_with_clinical_rna(
                 patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord, margin_ord=margin_ord,
-                spatial_feat=patient_spatial_feat,
+                spatial_feat=patient_spatial_feat, **extra_kwargs,
             )  # (3D,) (+ spatial_feat_dim, models/spatial_features.py 켜졌을 때만)
         elif hasattr(model, "combine_with_clinical_pool"):
             # models/vit_m2_pool.py::ViT_M2_Pool(--M2_POOL) — z_clinical을 4개 pooling 관점의
@@ -1072,6 +1080,18 @@ def _parse_args() -> argparse.Namespace:
              "기본은 미사용. 켜면 wandb/checkpoint에 _DXONLY 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--tile-risk-head", action="store_true",
+        help="2026-08-14: --PMA 전용. diagnose_pma_wsi_structure.py 실측 — MultiComponentPooling의 "
+             "top-k 성분이 attn_weights(entropy~0.999, 사실상 uniform으로 붕괴)로 선정되고 있어 "
+             "독립적인 관점이 아니었다. 레퍼런스(Leeyoungsup/pancreatic_cancer_pathology) "
+             "MorphologyBurdenPooling을 참고해, top-k 선정을 self.attn과 파라미터를 공유하지 않는 "
+             "별도의 단순 TileRiskHead(게이트 없는 얕은 MLP)로 분리한다(models/"
+             "multi_component_pooling.py::TileRiskHead). 동시에 레퍼런스의 risk_stats(패치별 risk "
+             "점수 분포를 요약하는 10개 스칼라 — mean/std/max/quantile/top05/top10/frac_over_50/"
+             "frac_over_70)를 risk_head 입력에 spatial_feat과 나란히 추가한다. 기본은 미사용(기존 "
+             "동작 완전히 유지). 켜면 wandb/checkpoint에 _RISKHEAD 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--reference-cohort", action="store_true",
         help="레퍼런스(Leeyoungsup/pancreatic_cancer_pathology)의 케이스 포함 기준(24개월 시점 "
              "생존 여부 확정 + WSI 보유, data/reference_cohort.py::reference_eligible_case_ids "
@@ -1397,10 +1417,10 @@ def main():
         raise ValueError("--M4/--M4A/--M4B/--PM4/--PMA(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if (args.M5 or args.M6 or args.M6X) and args.fusion:
         raise ValueError("--M5/--M6/--M6X(WSI-free)와 --fusion(Cluster fusion, WSI 전제)은 동시에 지원되지 않습니다.")
-    if args.avgpool and (args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X or args.fusion):
+    if args.avgpool and (args.M2 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X or args.fusion):
         raise ValueError(
-            "--avgpool은 --M1(기본)에서만 지원됩니다 — "
-            "--M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion과 동시 사용 불가."
+            "--avgpool은 --M1(기본)/--M4에서만 지원됩니다 — "
+            "--M2/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion과 동시 사용 불가."
         )
     if args.clinical_staging and not (
         args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
@@ -1416,6 +1436,8 @@ def main():
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
     if args.no_clinical and not args.PMA:
         raise ValueError("--no-clinical은 --PMA에서만 사용 가능합니다.")
+    if args.tile_risk_head and not args.PMA:
+        raise ValueError("--tile-risk-head는 --PMA에서만 사용 가능합니다.")
     if args.fusion and args.backbone != "resnet50":
         raise ValueError(
             "--fusion(LateFusionViT)의 cluster_centroids.pt는 ResNet50 raw feature(2048-dim) "
@@ -1543,7 +1565,7 @@ def main():
     amp_ctx = _make_amp_ctx()
 
     if args.M4:
-        model_prefix = "M4"
+        model_prefix = "M4_AVGPOOL" if args.avgpool else "M4"
     elif args.M4A:
         model_prefix = "M4A"
     elif args.M4B:
@@ -1681,6 +1703,9 @@ def main():
         model_prefix += f"_TOPFRAC{args.top_frac:g}"
     if args.rna_combine_mode == "cox_add":
         model_prefix += "_RNACOXADD"
+    if args.tile_risk_head:
+        # _RISKHEAD = top-k 선정을 attn_weights 대신 독립적인 TileRiskHead로 분리 + risk_stats(10개) 추가 표시.
+        model_prefix += "_RISKHEAD"
     if args.skip_patch_vit:
         model_prefix += "_NOVIT"
     if args.modality_dropout_p > 0:
@@ -1922,7 +1947,18 @@ def main():
                           use_age_sex=not args.no_age_sex)
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
-    if args.M4:
+    if args.M4 and args.avgpool:
+        # 2026-08-14: diagnose_pma_wsi_structure.py 실측 — patch attention entropy~0.999(사실상
+        # uniform), attn_pool 자체의 gradient norm이 다른 모듈 대비 100~250배 작음. 이미 사실상
+        # 균일하게 동작하는 학습된 attention을, 애초에 학습 파라미터가 없는 평균 풀링으로
+        # 교체해 (a) 성능이 정말 동일한지 (b) 무의미한 게이트 파라미터가 유발하는 gradient
+        # 노이즈가 없어지면서 seed 간 변동(std)이 줄어드는지 확인한다(models/vit_m4_avgpool.py).
+        model = ViT_M4_AvgPool(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                                precomputed=cfg.data.precomputed, backbone=args.backbone,
+                                use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                                skip_patch_vit=args.skip_patch_vit,
+                                **stage_kwargs, **margin_kwargs).to(device)
+    elif args.M4:
         # 2026-08-14: margin(R)/combine_mode(cox_add)/attn_dispersion 이식 — M4A가 2026-08-11에
         # 받은 것과 동일한 업그레이드(models/vit_m4.py 참조). PMA(다성분 pooling+co-attention)와
         # M4(단일 gated-ABMIL, RNA는 attention 게이트에 FiLM으로만 개입)를 같은 레시피로 공정
@@ -1957,6 +1993,7 @@ def main():
                          top_frac=args.top_frac, rna_combine_mode=args.rna_combine_mode,
                          skip_patch_vit=args.skip_patch_vit,
                          use_tumor_type_embed=args.tumor_type_embed,
+                         use_tile_risk_head=args.tile_risk_head,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -2128,7 +2165,10 @@ def main():
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
     print(f"Mode: {mode}")
     # [Clinical/RNA/LateFusion] 모델 종류 출력
-    if args.M4:
+    if args.M4 and args.avgpool:
+        print(f"Model: ViT_M4_AvgPool (ViT+무학습 평균 풀링(attention 제거) + Clinical age/sex MLP + RNA-seq MLP, "
+              f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
+    elif args.M4:
         print(f"Model: ViT_M4 (ViT+ABMIL(RNA-guided FiLM) + Clinical age/sex MLP + RNA-seq MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M4A:

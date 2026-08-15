@@ -111,7 +111,7 @@ class ViT_M2_Pool(ViT_M1):
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         ctx_tokens = self.vit(patch_tokens, coords)
-        components, attn_weights = self.multi_pool(ctx_tokens)  # (4, D), (N,)
+        components, attn_weights, _ = self.multi_pool(ctx_tokens)  # (4, D), (N,), risk_stats(미사용)
         out = {
             "embed": components, "attn_weights": attn_weights,
             "meanpool_embed": ctx_tokens.mean(dim=0),

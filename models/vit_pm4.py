@@ -65,7 +65,7 @@ class ViT_PM4(ViT_M1):
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size)
         ctx_tokens = self.vit(patch_tokens, coords)
-        components, attn_weights = self.attn_pool(ctx_tokens)  # (4, D), (N,)
+        components, attn_weights, _ = self.attn_pool(ctx_tokens)  # (4, D), (N,), risk_stats(PM4 미사용)
         h_i = components.flatten()  # (4D,)
         return {"embed": h_i, "attn_weights": attn_weights}
 

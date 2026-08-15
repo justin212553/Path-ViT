@@ -62,6 +62,7 @@ class ViT_PMA(ViT_M1):
         rna_combine_mode: str = "concat",
         skip_patch_vit: bool = False,
         use_tumor_type_embed: bool = False,
+        use_tile_risk_head: bool = False,
     ):
         super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit,
                           use_tumor_type_embed=use_tumor_type_embed)
@@ -101,7 +102,9 @@ class ViT_PMA(ViT_M1):
         # 부분집합이라 노이즈에 민감했을 수 있다는 가설(top-k를 지우면 internal이 올랐던 것과
         # 같은 방향)을 검증한다. top_frac을 키우면(예: 0.25) 같은 "attention 상위" 컨셉은
         # 유지하되 표본을 넓혀 노이즈를 줄일 수 있는지 본다.
-        self.attn_pool = MultiComponentPooling(cfg.embed_dim, exclude=drop_component, top_frac=top_frac)
+        self.use_tile_risk_head = use_tile_risk_head
+        self.attn_pool = MultiComponentPooling(cfg.embed_dim, exclude=drop_component, top_frac=top_frac,
+                                                use_tile_risk_head=use_tile_risk_head)
         self.component_coattn = CoAttentionPooling(
             cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
         )
@@ -149,17 +152,24 @@ class ViT_PMA(ViT_M1):
             # 입력보다 5~10배 커서 LayerNorm 통계를 왜곡할 수 있음) — 학습되는 배율로 낮춘다.
             self.dispersion_scale = nn.Parameter(torch.tensor(0.2))
         spatial_feat_dim = (2 if self.use_spatial_autocorr else 0) + (1 if self.use_attn_dispersion else 0)
+        # 2026-08-14: use_tile_risk_head=True면 MultiComponentPooling이 반환하는 risk_stats(10개
+        # 스칼라, 레퍼런스 MorphologyBurdenPooling과 동일 정의 — models/multi_component_pooling.py
+        # 참조)도 risk_head 입력에 spatial_feat과 나란히 추가한다.
+        risk_stats_dim = 10 if use_tile_risk_head else 0
         # risk_head 입력: [z_wsi(WSI_D)] (+ z_clinical(clinical_dim), use_clinical=True이고
         # combine_mode="concat"일 때만 — cox_add는 clinical을 risk_head에 넣지 않고 최종
         # 스칼라에 별도로 더한다) (+ z_rna(rna_dim), rna_gate_only=False일 때만)
         # (+ spatial_feat(spatial_feat_dim), 위 두 플래그 중 하나라도 켜졌을 때만)
+        # (+ risk_stats(risk_stats_dim), use_tile_risk_head=True일 때만)
         # (rna_dim/clinical_dim이 둘 다 기본값(None)이고 use_clinical=True, combine_mode="concat",
-        # rna_gate_only=False, spatial_feat_dim=0이면 3*cfg.embed_dim과 동일 — 기존 동작 보존)
+        # rna_gate_only=False, spatial_feat_dim=0, risk_stats_dim=0이면 3*cfg.embed_dim과 동일
+        # — 기존 동작 보존)
         risk_input_dim = (
             cfg.embed_dim
             + (clinical_dim if (self.use_clinical and combine_mode == "concat") else 0)
             + (0 if (rna_gate_only or rna_combine_mode == "cox_add") else rna_dim)
             + spatial_feat_dim
+            + risk_stats_dim
         )
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
@@ -179,7 +189,7 @@ class ViT_PMA(ViT_M1):
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         ctx_tokens = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords, tumor_type=tumor_type)
-        components, attn_weights = self.attn_pool(ctx_tokens)  # (4, D), (N,)
+        components, attn_weights, risk_stats = self.attn_pool(ctx_tokens)  # (4, D), (N,), (10,) 또는 None
         # meanpool_embed: --rna-aux-weight(models/rna_predictor.py) 보조과제 입력 전용.
         # patch_tokens: scripts/train_spatial_residual.py(공간정보 잔차 branch) 전용 — Nystrom
         # *이전* raw CNN 출력을 그대로 노출해, 이미 근사/혼합된 ctx_tokens가 아니라 패치별
@@ -188,6 +198,8 @@ class ViT_PMA(ViT_M1):
             "embed": components, "attn_weights": attn_weights,
             "meanpool_embed": ctx_tokens.mean(dim=0), "patch_tokens": patch_tokens,
         }
+        if risk_stats is not None:
+            out["risk_stats"] = risk_stats
         # 학습 파라미터 없는 공간 특징(models/spatial_features.py) — --spatial-autocorr/
         # --attn-dispersion으로 독립적으로 켠다.
         if self.use_spatial_autocorr or self.use_attn_dispersion:
@@ -211,6 +223,7 @@ class ViT_PMA(ViT_M1):
         stage_ord: dict[str, torch.Tensor] | None = None,  # self.clinical_encoder.use_staging=True일 때만 필요
         margin_ord: torch.Tensor | None = None,  # self.clinical_encoder.use_margin=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,  # (spatial_feat_dim,) — 환자 단위 평균, models/spatial_features.py
+        risk_stats: torch.Tensor | None = None,  # (10,) — 환자 단위 평균, self.use_tile_risk_head=True일 때만
     ) -> torch.Tensor:
         clinical_kwargs = {}
         if stage_ord is not None:
@@ -235,6 +248,8 @@ class ViT_PMA(ViT_M1):
         fused = torch.cat(parts, dim=-1)
         if spatial_feat is not None:
             fused = torch.cat([fused, spatial_feat], dim=-1)
+        if risk_stats is not None:
+            fused = torch.cat([fused, risk_stats], dim=-1)
         return fused
 
     def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
