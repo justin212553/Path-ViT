@@ -1826,7 +1826,13 @@ def main():
             },
         )
 
-    with_clinical = args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
+    # 2026-08-14: --stage-aux-weight는 clinical CSV의 staging 필드를 보조과제 타깃으로 읽어야 해서
+    # (with_staging=True, 아래 참조), M1처럼 원래 clinical을 아예 join 안 하는 모델에서도 clinical
+    # join 자체는 필요하다 — 모델(M1)이 age/sex를 입력으로 쓰진 않지만, 그 join으로 딸려오는
+    # staging 컬럼만 aux head가 참조한다(with_staging=True인데 with_clinical=False면
+    # data/dataset.py의 검증에서 에러가 났었음).
+    with_clinical = (args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
+                      or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.stage_aux_weight > 0)
     with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
 
     restrict_case_ids = None
