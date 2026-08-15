@@ -775,6 +775,29 @@ def _parse_args() -> argparse.Namespace:
              "ablation. 켜면 model_prefix에 _NOVIT가 붙는다.",
     )
     parser.add_argument(
+        "--coord-embed", action="store_true",
+        help="ViT_M1 계열 공통(models/vit_m1.py::ViT_M1). 학습 파라미터 없는 sinusoidal "
+             "위치 인코딩(models/vit_encoder.py::SpatialPositionEmbedding, --skip-patch-vit가 "
+             "꺼져있을 때 self.vit 내부에서 이미 쓰던 것과 동일)을 patch_tokens에 잔차로 "
+             "더한 뒤 attn_pool에 넘긴다. --skip-patch-vit(NOVIT)와 같이 쓰면 그 경우 "
+             "완전히 사라졌던 패치 위치 정보를 attn_pool의 gate(attn_v/attn_u)에 되살려주는 "
+             "게 목적 — attn-dispersion은 attn_weights에 대한 post-hoc 페널티일 뿐 토큰 "
+             "자체엔 안 섞이는 것과 다르다. 켜면 model_prefix에 _COORD가 붙는다.",
+    )
+    parser.add_argument(
+        "--coord-embed-concat", action="store_true",
+        help="--coord-embed 전용 세부옵션. 기본(잔차 add) 대신 [patch_tokens ‖ coord_embed] -> "
+             "Linear->LayerNorm->GELU 융합층으로 다시 embed_dim에 투영한다 — 위치 정보를 "
+             "별도 채널로 유지해 fusion 레이어가 얼마나 반영할지 직접 학습하게 한다. 켜면 "
+             "model_prefix에 _CAT이 붙는다.",
+    )
+    parser.add_argument(
+        "--coord-embed-learnable-scale", action="store_true",
+        help="--coord-embed 전용 세부옵션(--coord-embed-concat과는 배타적, concat이면 무시됨). "
+             "dispersion_scale과 동일 관례로 잔차 add 전에 학습되는 스칼라 배율(0.2 초기화)을 "
+             "곱한다. 켜면 model_prefix에 _SC가 붙는다.",
+    )
+    parser.add_argument(
         "--top-frac", type=float, default=0.1,
         help="--PMA 전용(models/multi_component_pooling.py::MultiComponentPooling). top-k-mean "
              "성분이 attention 상위 몇 %%의 패치를 평균할지(기본 0.1=10%%). 2026-08-09: "
@@ -1722,6 +1745,12 @@ def main():
         model_prefix += "_RISKHEAD"
     if args.skip_patch_vit:
         model_prefix += "_NOVIT"
+    if args.coord_embed:
+        model_prefix += "_COORD"
+        if args.coord_embed_concat:
+            model_prefix += "_CAT"
+        elif args.coord_embed_learnable_scale:
+            model_prefix += "_SC"
     if args.modality_dropout_p > 0:
         model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
     if args.lr is not None:
@@ -1988,6 +2017,8 @@ def main():
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
                         use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
                         skip_patch_vit=args.skip_patch_vit, use_clinical=not args.no_clinical,
+                        use_coord_embed=args.coord_embed, coord_embed_concat=args.coord_embed_concat,
+                        coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                         **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A:
         # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
@@ -2047,6 +2078,8 @@ def main():
                         use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
                         use_margin=args.clinical_margin, margin_stats=margin_stats,
                         skip_patch_vit=args.skip_patch_vit,
+                        use_coord_embed=args.coord_embed, coord_embed_concat=args.coord_embed_concat,
+                        coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                         **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
@@ -2059,7 +2092,10 @@ def main():
         # 자체가 없어 무시됐다(ViT_PMA만 getattr로 읽었음) — M1(기본 모델)에서 처음 실사용 중 발견.
         model = ViT_M1(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone,
                         use_attn_dispersion=args.attn_dispersion,
-                        skip_patch_vit=args.skip_patch_vit).to(device)
+                        skip_patch_vit=args.skip_patch_vit,
+                        use_coord_embed=args.coord_embed,
+                        coord_embed_concat=args.coord_embed_concat,
+                        coord_embed_learnable_scale=args.coord_embed_learnable_scale).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:

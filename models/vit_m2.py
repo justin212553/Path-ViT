@@ -50,9 +50,14 @@ class ViT_M2(ViT_M1):
         use_attn_dispersion: bool = False,
         combine_mode: str = "concat",
         skip_patch_vit: bool = False,
+        use_coord_embed: bool = False,
+        coord_embed_concat: bool = False,
+        coord_embed_learnable_scale: bool = False,
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
-                          skip_patch_vit=skip_patch_vit)
+                          skip_patch_vit=skip_patch_vit, use_coord_embed=use_coord_embed,
+                          coord_embed_concat=coord_embed_concat,
+                          coord_embed_learnable_scale=coord_embed_learnable_scale)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         self.combine_mode = combine_mode

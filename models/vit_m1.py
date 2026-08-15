@@ -23,7 +23,7 @@ from .cnn_encoder import CNNEncoder
 from .spatial_features import attention_dispersion
 from .uni_encoder import UNIEncoder
 from .uni2_encoder import UNI2hEncoder
-from .vit_encoder import ViTEncoder
+from .vit_encoder import ViTEncoder, SpatialPositionEmbedding
 from config import ModelConfig
 
 # tile encoder(backbone) 선택 레지스트리 — CNNEncoder/UNIEncoder/UNI2hEncoder 셋 다 forward/
@@ -122,7 +122,8 @@ class AttentionPooling(nn.Module):
 class ViT_M1(nn.Module):
     def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50",
                  use_attn_dispersion: bool = False, skip_patch_vit: bool = False,
-                 use_tumor_type_embed: bool = False):
+                 use_tumor_type_embed: bool = False, use_coord_embed: bool = False,
+                 coord_embed_concat: bool = False, coord_embed_learnable_scale: bool = False):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -138,6 +139,30 @@ class ViT_M1(nn.Module):
                          spatial_features.py::attention_dispersion, ViT_PMA가 먼저 도입한 것을
                          이식). ABMIL도 attn_weights를 만드니 PMA 계열만 쓰던 걸 M1/M2에도
                          똑같이 적용해 모델 간 비교 조건을 통일한다(train_multi.py).
+            use_coord_embed: 2026-08-15 — skip_patch_vit=True(NOVIT)면 self.vit(패치 간
+                         self-attention, 여기서 coords로 SpatialPositionEmbedding을 이미
+                         더하고 있었음)가 아예 안 생기므로 patch_tokens에 위치 정보가 전혀
+                         안 들어간다(attn_dispersion은 attn_weights에 대한 post-hoc 페널티일
+                         뿐 토큰 자체엔 안 섞임). ViTEncoder가 쓰던 것과 같은 학습 파라미터
+                         없는 sinusoidal encoding(SpatialPositionEmbedding)을 attn_pool
+                         직전 patch_tokens에 잔차로 더해, gate(attn_v/attn_u)가 위치를 보고
+                         점수를 매길 수 있게 한다 — 레퍼런스 레포(morphology_burden_mil.py::
+                         SpatialEmbedding)는 학습되는 MLP+concat+fusion-Linear를 쓰지만,
+                         표본(~150명) 대비 파라미터를 늘리는 걸 반복적으로 경계해온 이
+                         프로젝트 관례상 이미 검증된 파라미터-프리 인코딩을 재사용한다.
+            coord_embed_concat: use_coord_embed=True일 때만 의미 있음. 2026-08-15 — 기본
+                         동작(잔차 add)은 위치 인코딩이 patch_tokens와 같은 채널에 그대로
+                         섞여 CNN feature 대비 상대적 크기에 따라 신호가 묻힐 수 있다.
+                         True면 대신 레퍼런스 레포 방식대로 [patch_tokens ‖ coord_embed] ->
+                         Linear->LayerNorm->GELU 융합층(coord_fusion)으로 다시 embed_dim에
+                         투영한다 — 위치 정보가 별도 채널로 유지된 채 fusion 레이어가 얼마나
+                         반영할지 직접 학습.
+            coord_embed_learnable_scale: use_coord_embed=True이고 coord_embed_concat=False일
+                         때만 의미 있음(concat 모드는 fusion 레이어가 스케일을 알아서 학습).
+                         dispersion_scale과 동일 관례 — 잔차 add 전에 학습되는 스칼라
+                         배율(0.2로 초기화)을 곱해, sinusoidal 원값의 크기가 patch_tokens
+                         스케일과 안 맞을 가능성(attn_dispersion에서 실제로 발견된 버그
+                         클래스)에 대비해 최적 배율을 backprop이 찾게 한다.
         """
         super().__init__()
         self.precomputed = precomputed
@@ -150,6 +175,18 @@ class ViT_M1(nn.Module):
         # 가설의 구조적 ablation(post-hoc이 아니라 처음부터 재학습 — NOTOP에서 post-hoc 신호가
         # 재현 안 됐던 전례 때문에 구조적 재학습으로만 검증).
         self.skip_patch_vit = skip_patch_vit
+        self.use_coord_embed = use_coord_embed
+        self.coord_embed_concat = coord_embed_concat
+        if use_coord_embed:
+            self.coord_embed = SpatialPositionEmbedding(cfg.embed_dim)
+            if coord_embed_concat:
+                self.coord_fusion = nn.Sequential(
+                    nn.Linear(cfg.embed_dim * 2, cfg.embed_dim),
+                    nn.LayerNorm(cfg.embed_dim),
+                    nn.GELU(),
+                )
+            elif coord_embed_learnable_scale:
+                self.coord_embed_scale = nn.Parameter(torch.tensor(0.2))
         self.tile_decode_workers = getattr(cfg, "tile_decode_workers", 4)
         if use_attn_dispersion:
             # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
@@ -270,6 +307,14 @@ class ViT_M1(nn.Module):
             attn_weights: (N_patches,)
         """
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
+        if self.use_coord_embed:
+            pos = self.coord_embed(coords)  # (N, D)
+            if self.coord_embed_concat:
+                patch_tokens = self.coord_fusion(torch.cat([patch_tokens, pos], dim=-1))
+            elif hasattr(self, "coord_embed_scale"):
+                patch_tokens = patch_tokens + self.coord_embed_scale * pos
+            else:
+                patch_tokens = patch_tokens + pos
         ctx_tokens   = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords, tumor_type=tumor_type)  # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
