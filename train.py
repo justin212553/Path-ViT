@@ -1923,8 +1923,16 @@ def main():
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
     if args.M4:
+        # 2026-08-14: margin(R)/combine_mode(cox_add)/attn_dispersion 이식 — M4A가 2026-08-11에
+        # 받은 것과 동일한 업그레이드(models/vit_m4.py 참조). PMA(다성분 pooling+co-attention)와
+        # M4(단일 gated-ABMIL, RNA는 attention 게이트에 FiLM으로만 개입)를 같은 레시피로 공정
+        # 비교하기 위함 — WSI pooling 구조 하나만 다른 채 나머지 전부(backbone/RNA/clinical/
+        # dispersion/cox_add)를 동일하게 맞춘다.
         model = ViT_M4(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-                        precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
+                        precomputed=cfg.data.precomputed, backbone=args.backbone,
+                        use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                        skip_patch_vit=args.skip_patch_vit,
+                        **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A:
         # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
         # patch-level co-attention(MCAT 스타일)을 지금의 최종 레시피와 공정하게 비교하기 위함
