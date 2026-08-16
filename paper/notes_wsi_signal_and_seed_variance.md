@@ -47,6 +47,39 @@ mean=0.614, **std≈0.022, range=0.048**. Split/fold 구성을 아예 없앴는�
 baseline: `PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD` (3seed×5fold pooled)
 **internal=0.6359, external=0.6337**
 
+### 3.1 재현 검증 및 최종 보고 수치 확정 (2026-08-16)
+
+이 baseline이 정확히 언제/어떤 코드 상태에서 나왔는지가 불확실해져(아래 §7 관련) 원본 예측
+파일로 재검증했다. `models/checkpoint/`·`.logs/{kfold_preds,external_preds}/`에 **2026-08-08
+22:23** 타임스탬프로 원본이 남아있었고, 이는 `data/dataset.py`의 stage-stratify 커밋
+(`a9caeaf`, 08-14 13:18)보다 명백히 이전 — 즉 이 baseline은 **stage-stratify 적용 이전(OS
+event 기준 stratify만 하던 시절)** 코드 상태의 산출물이다. **논문에는 이 사실을 방법론
+절에 명시할 것.**
+
+External은 원본 15개(3seed×5fold) 예측 파일이 그대로 남아있어 완전히 재현됨:
+```
+python scripts/pool_multiseed_external_preds.py --dataset cptac \
+    --model PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+```
+**c_index=0.6337, 95% CI(bootstrap, n=2000)=[0.5815, 0.6855]**, HR=1.885 [1.297,2.739],
+log-rank p=0.0007 (개별 15개 실행 평균=0.6090, std=0.0353).
+
+Internal은 seed42의 원본 `kfold_preds`/체크포인트가 이후 세션(08-16)의 재검증 학습에
+파일명이 겹쳐 **덮어써져 유실**됐다 — seed84+126만 복구 가능(2-seed 앙상블 c_index=0.6461,
+95% CI=[0.5769,0.7108], seed간 std=0.0131). 문서상의 0.6359(3seed)와 방향은 일치하나
+정확히 재현은 안 됨. **재발 방지로 남은 원본(seed84/126 체크포인트+kfold_preds 10개,
+seed42/84/126 external_preds 15개)을
+`.logs/_archive_pma_baseline_prestratify_20260808/`·
+`models/checkpoint/_archive_pma_baseline_prestratify_20260808/`에 백업해둠 — 이 디렉토리는
+건드리지 말 것.**
+
+**결정(2026-08-16, 사용자 지시)**: 코드베이스를 stage-stratify로 통일해 재확정하지 않고,
+**이 원본(pre-stage-stratify) 수치를 그대로 최종 보고값으로 채택**한다 — stage-stratify는
+c-index 자체를 올리려던 개입이 아니라 fold별 log-rank p 변동 완화가 목적이었고(§6, c-index는
+flat), 원본 쪽이 이미 CI까지 갖춘 더 나은 수치이기 때문. 최종 보고: **external
+c_index=0.6337 [0.5815, 0.6855]**, internal은 3seed 완전판(0.6359) 서술 유지하되 재현
+근거는 2-seed 부분 검증(0.6461)으로 각주 처리 권장.
+
 | # | 시도 | 가설 | internal | external | 판정 |
 |---|---|---|---|---|---|
 | 1 | Decision-level ensemble(M6+M5+M1_POOL) | 예측 단계 결합이면 안전하지 않을까 | 0.6597(M6+M5만, WSI 넣으면 더 나쁨) | 0.5977(WSI 포함 시) | negative |

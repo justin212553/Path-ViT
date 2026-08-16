@@ -1,0 +1,106 @@
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from C:\Users\wonse\_netrc.
+wandb: Currently logged in as: justin212553 to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run r5t70t3e
+wandb: Tracking run with wandb version 0.28.0
+wandb: Run data is saved locally in D:\wonse\Documents\Job\urban_datalab\PATH-ViT\.wandb\run-20260816_165330-r5t70t3e
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run TCGA_M5_STG_R_FOLD0OF5_seed42_0816::1653
+wandb:  View project at https://wandb.ai/justin212553/Path-ViT
+wandb:  View run at https://wandb.ai/justin212553/Path-ViT/runs/r5t70t3e
+Model: M5_STG_R_FOLD0OF5 (ClinicalOnly) | params=5,313
+Dataset: tcga  (5-fold CV, fold 0)  Train: 90  Val: 31  Test(internal): 31 patients
+lr=1.0e-03 | weight_decay=1.0e-02 | epochs=30 | cox_batch_size=16
+Epoch   1 | lr=3.33e-04 | loss=1.9594 | train_c_index=0.5782 | val_c_index=0.5560 | val_HR=1.280 [0.462, 3.551] | val_logrank_p=0.6321 | val_AUC_mean=0.7690 (auc_365d=0.5003 auc_730d=0.8482 auc_1095d=0.9585)
+  -> checkpoint saved (c_index=0.5560)
+Epoch   2 | lr=6.67e-04 | loss=1.9201 | train_c_index=0.6159 | val_c_index=0.6498 | val_HR=3.150 [1.086, 9.134] | val_logrank_p=0.0267 | val_AUC_mean=0.8238 (auc_365d=0.6515 auc_730d=0.8200 auc_1095d=1.0000)
+  -> checkpoint saved (c_index=0.6498)
+Epoch   3 | lr=1.00e-03 | loss=1.9144 | train_c_index=0.6339 | val_c_index=0.6426 | val_HR=2.294 [0.805, 6.534] | val_logrank_p=0.1124 | val_AUC_mean=0.8228 (auc_365d=0.6194 auc_730d=0.8492 auc_1095d=1.0000)
+Epoch   4 | lr=1.00e-03 | loss=1.8581 | train_c_index=0.6469 | val_c_index=0.6282 | val_HR=2.228 [0.804, 6.173] | val_logrank_p=0.1160 | val_AUC_mean=0.8111 (auc_365d=0.6047 auc_730d=0.8284 auc_1095d=1.0000)
+Epoch   5 | lr=9.97e-04 | loss=1.8345 | train_c_index=0.6611 | val_c_index=0.6245 | val_HR=2.228 [0.804, 6.173] | val_logrank_p=0.1160 | val_AUC_mean=0.8327 (auc_365d=0.6184 auc_730d=0.8798 auc_1095d=1.0000)
+Epoch   6 | lr=9.87e-04 | loss=1.7886 | train_c_index=0.6729 | val_c_index=0.6029 | val_HR=2.273 [0.820, 6.298] | val_logrank_p=0.1067 | val_AUC_mean=0.7836 (auc_365d=0.6029 auc_730d=0.8739 auc_1095d=0.8739)
+Epoch   7 | lr=9.70e-04 | loss=1.8693 | train_c_index=0.6767 | val_c_index=0.5921 | val_HR=2.273 [0.820, 6.298] | val_logrank_p=0.1067 | val_AUC_mean=0.8141 (auc_365d=0.5913 auc_730d=0.9355 auc_1095d=0.9154)
+Epoch   8 | lr=9.47e-04 | loss=1.7308 | train_c_index=0.6850 | val_c_index=0.5812 | val_HR=1.620 [0.598, 4.389] | val_logrank_p=0.3371 | val_AUC_mean=0.7595 (auc_365d=0.5768 auc_730d=0.9005 auc_1095d=0.8011)
+Epoch   9 | lr=9.19e-04 | loss=1.7515 | train_c_index=0.7014 | val_c_index=0.5957 | val_HR=1.878 [0.693, 5.086] | val_logrank_p=0.2116 | val_AUC_mean=0.7455 (auc_365d=0.5972 auc_730d=0.8798 auc_1095d=0.7596)
+Epoch  10 | lr=8.84e-04 | loss=1.7811 | train_c_index=0.7047 | val_c_index=0.5848 | val_HR=1.657 [0.612, 4.481] | val_logrank_p=0.3143 | val_AUC_mean=0.7326 (auc_365d=0.5584 auc_730d=0.8798 auc_1095d=0.7596)
+Epoch  11 | lr=8.45e-04 | loss=1.7452 | train_c_index=0.7114 | val_c_index=0.5848 | val_HR=2.228 [0.804, 6.173] | val_logrank_p=0.1160 | val_AUC_mean=0.7074 (auc_365d=0.5451 auc_730d=0.8590 auc_1095d=0.7181)
+Epoch  12 | lr=8.01e-04 | loss=1.7203 | train_c_index=0.7161 | val_c_index=0.5957 | val_HR=2.228 [0.804, 6.173] | val_logrank_p=0.1160 | val_AUC_mean=0.7520 (auc_365d=0.5521 auc_730d=0.9013 auc_1095d=0.8027)
+Epoch  13 | lr=7.52e-04 | loss=1.7368 | train_c_index=0.7190 | val_c_index=0.5957 | val_HR=2.561 [0.915, 7.169] | val_logrank_p=0.0654 | val_AUC_mean=0.7097 (auc_365d=0.5521 auc_730d=0.8590 auc_1095d=0.7181)
+Epoch  14 | lr=7.01e-04 | loss=1.7195 | train_c_index=0.7257 | val_c_index=0.5632 | val_HR=2.480 [0.884, 6.955] | val_logrank_p=0.0743 | val_AUC_mean=0.6920 (auc_365d=0.4989 auc_730d=0.8590 auc_1095d=0.7181)
+Epoch  15 | lr=6.47e-04 | loss=1.7505 | train_c_index=0.7328 | val_c_index=0.5704 | val_HR=2.480 [0.884, 6.955] | val_logrank_p=0.0743 | val_AUC_mean=0.6713 (auc_365d=0.4990 auc_730d=0.8383 auc_1095d=0.6766)
+Epoch  16 | lr=5.91e-04 | loss=1.6500 | train_c_index=0.7328 | val_c_index=0.5523 | val_HR=2.480 [0.884, 6.955] | val_logrank_p=0.0743 | val_AUC_mean=0.6168 (auc_365d=0.4587 auc_730d=0.7972 auc_1095d=0.5945)
+Epoch  17 | lr=5.34e-04 | loss=1.7056 | train_c_index=0.7399 | val_c_index=0.5668 | val_HR=1.365 [0.524, 3.553] | val_logrank_p=0.5221 | val_AUC_mean=0.5937 (auc_365d=0.4770 auc_730d=0.7680 auc_1095d=0.5361)
+Epoch  18 | lr=4.76e-04 | loss=1.6450 | train_c_index=0.7466 | val_c_index=0.5596 | val_HR=1.317 [0.506, 3.430] | val_logrank_p=0.5714 | val_AUC_mean=0.5507 (auc_365d=0.4450 auc_730d=0.7081 auc_1095d=0.4991)
+Epoch  19 | lr=4.19e-04 | loss=1.6033 | train_c_index=0.7500 | val_c_index=0.5343 | val_HR=1.317 [0.506, 3.430] | val_logrank_p=0.5714 | val_AUC_mean=0.4810 (auc_365d=0.4135 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  20 | lr=3.63e-04 | loss=1.6177 | train_c_index=0.7513 | val_c_index=0.5451 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4749 (auc_365d=0.4332 auc_730d=0.6362 auc_1095d=0.3554)
+Epoch  21 | lr=3.09e-04 | loss=1.6202 | train_c_index=0.7504 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4749 (auc_365d=0.4331 auc_730d=0.6362 auc_1095d=0.3554)
+Epoch  22 | lr=2.58e-04 | loss=1.6222 | train_c_index=0.7504 | val_c_index=0.5523 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4769 (auc_365d=0.4392 auc_730d=0.6362 auc_1095d=0.3554)
+Epoch  23 | lr=2.09e-04 | loss=1.5846 | train_c_index=0.7508 | val_c_index=0.5451 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4727 (auc_365d=0.4266 auc_730d=0.6362 auc_1095d=0.3554)
+Epoch  24 | lr=1.65e-04 | loss=1.6091 | train_c_index=0.7496 | val_c_index=0.5415 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4635 (auc_365d=0.4197 auc_730d=0.6155 auc_1095d=0.3554)
+Epoch  25 | lr=1.26e-04 | loss=1.5902 | train_c_index=0.7500 | val_c_index=0.5451 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4852 (auc_365d=0.4262 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  26 | lr=9.14e-05 | loss=1.6048 | train_c_index=0.7504 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4875 (auc_365d=0.4330 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  27 | lr=6.27e-05 | loss=1.6427 | train_c_index=0.7508 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4875 (auc_365d=0.4330 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  28 | lr=3.99e-05 | loss=1.5830 | train_c_index=0.7500 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4875 (auc_365d=0.4330 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  29 | lr=2.33e-05 | loss=1.6262 | train_c_index=0.7492 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4875 (auc_365d=0.4330 auc_730d=0.6350 auc_1095d=0.3945)
+Epoch  30 | lr=1.33e-05 | loss=1.6075 | train_c_index=0.7492 | val_c_index=0.5487 | val_HR=1.341 [0.515, 3.490] | val_logrank_p=0.5460 | val_AUC_mean=0.4875 (auc_365d=0.4330 auc_730d=0.6350 auc_1095d=0.3945)
+
+=== Internal Test (best checkpoint epoch 2) ===
+test_c_index=0.6316 | test_HR=1.481 [0.563, 3.898] | test_logrank_p=0.4236 | test_AUC_mean=0.6481 (auc_365d=0.7230 auc_730d=0.5813 auc_1095d=0.6400)
+  -> fold predictions saved: D:\wonse\Documents\Job\urban_datalab\PATH-ViT\.logs\kfold_preds\tcga_M5_STG_R_FOLD0OF5_seed42_fold0of5.csv
+wandb: updating run metadata
+wandb: uploading history steps 21-29, summary, console lines 27-38
+wandb: 
+wandb: Run history:
+wandb:              train/c_index ▁▃▃▄▄▅▅▅▆▆▆▇▇▇▇▇██████████████
+wandb:                 train/loss █▇▇▆▆▅▆▄▄▅▄▄▄▄▄▂▃▂▁▂▂▂▁▁▁▁▂▁▂▁
+wandb:                   train/lr ▃▆██████▇▇▇▇▆▆▅▅▅▄▄▃▃▃▂▂▂▂▁▁▁▁
+wandb:   val_performance/auc_mean ▇████▇█▇▆▆▆▆▆▅▅▄▃▃▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:    val_performance/c_index ▂██▇▆▅▅▄▅▄▄▅▅▃▃▂▃▃▁▂▂▂▂▁▂▂▂▂▂▂
+wandb:         val_performance/hr ▁█▅▅▅▅▅▂▃▂▅▅▆▅▅▅▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb: val_performance/log_rank_p █▁▂▂▂▂▂▅▃▄▂▂▁▂▂▂▇▇▇▇▇▇▇▇▇▇▇▇▇▇
+wandb: 
+wandb: Run summary:
+wandb:               best_epoch 2
+wandb:         best_val_c_index 0.64982
+wandb:            test_auc_mean 0.64809
+wandb:             test_c_index 0.63158
+wandb:                  test_hr 1.48104
+wandb:          test_log_rank_p 0.4236
+wandb:            train/c_index 0.74916
+wandb:               train/loss 1.60752
+wandb:                 train/lr 1e-05
+wandb: val_performance/auc_mean 0.48751
+wandb:                       +3 ...
+wandb: 
+wandb:  View run TCGA_M5_STG_R_FOLD0OF5_seed42_0816::1653 at: https://wandb.ai/justin212553/Path-ViT/runs/r5t70t3e
+wandb:  View project at: https://wandb.ai/justin212553/Path-ViT
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: .\.wandb\run-20260816_165330-r5t70t3e\logs
+
+=== External Test (cptac 전체 코호트) ===
+external_c_index=0.5036 | external_HR=1.150 [0.796, 1.662] | external_logrank_p=0.4620 | external_AUC_mean=0.5172 (auc_365d=0.4442 auc_730d=0.5221 auc_1095d=0.5853)
+wandb: setting up run sa1nzwvp
+wandb: Tracking run with wandb version 0.28.0
+wandb: Run data is saved locally in D:\wonse\Documents\Job\urban_datalab\PATH-ViT\.wandb\run-20260816_165414-sa1nzwvp
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run TCGA_XM5_STG_R_FOLD0OF5_seed42_0816::1653
+wandb:  View project at https://wandb.ai/justin212553/Path-ViT
+wandb:  View run at https://wandb.ai/justin212553/Path-ViT/runs/sa1nzwvp
+wandb: updating run metadata; uploading summary
+wandb: uploading wandb-metadata.json; uploading requirements.txt; uploading wandb-summary.json; uploading config.yaml
+wandb: 
+wandb: Run history:
+wandb:   external/auc_mean ▁
+wandb:    external/c_index ▁
+wandb:         external/hr ▁
+wandb: external/log_rank_p ▁
+wandb: 
+wandb: Run summary:
+wandb:   external/auc_mean 0.51721
+wandb:    external/c_index 0.50359
+wandb:         external/hr 1.15025
+wandb: external/log_rank_p 0.46197
+wandb: 
+wandb:  View run TCGA_XM5_STG_R_FOLD0OF5_seed42_0816::1653 at: https://wandb.ai/justin212553/Path-ViT/runs/sa1nzwvp
+wandb:  View project at: https://wandb.ai/justin212553/Path-ViT
+wandb: Synced 4 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: .\.wandb\run-20260816_165414-sa1nzwvp\logs
