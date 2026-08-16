@@ -108,6 +108,7 @@ class ViT_M2_Pool(ViT_M1):
         chunk_size: int | None = None,
         rna_context: torch.Tensor | None = None,  # 사용 안 함(train.py 호출 시그니처 호환용)
         tile_cache: dict | None = None,
+        tumor_type: torch.Tensor | None = None,  # 사용 안 함(train.py 호출 시그니처 호환용)
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         ctx_tokens = self.vit(patch_tokens, coords)

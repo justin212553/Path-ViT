@@ -143,3 +143,43 @@ M4+skip-patch-vit/M4A+skip-patch-vit/M4+avgpool 전부에서 seed126이 다른 �
 낮게 나오는 경향이 반복 관찰됨(예: M4-NOVIT internal seed42=0.6885 vs seed126=0.5832).
 seed126이 우연히 나쁜 draw인지, 아니면 실제로 이상치인지 확인하기 위해 seed 3개를
 추가로 더 돌려 분포를 볼 계획(진행 예정, 아직 결과 없음).
+
+## 9. 모달리티별 internal/external 비대칭 가설 (2026-08-15, 사용자 제안·seed42 한정)
+
+**가설(사용자 원문 요지)**: clinical(이산적, 코호트 간 기술적 노이즈가 적은 값)을
+강화/추가하면 external이 오르고, WSI(연속적이고 스캐너·염색·기관별 기술 노이즈가 낀
+값)를 강화/추가하면 internal이 오른다 — WSI는 노이즈까지 같이 흡수하지만 그 안에
+필요한 도메인 정보도 섞여 있어 학습 코호트 안에서는 유리하고, clinical은 노이즈가
+적어 다른 코호트로도 잘 옮겨간다는 것. 3개 모달리티를 다 쓰는 M4는 이 두 축의
+스윗스팟(sweet spot)일 수 있다는 해석.
+
+**독립적으로 재현된 세 비교(전부 seed42, uni2 backbone, 5-fold pooled)**:
+
+| 비교 | 무엇을 더했나 | internal 변화 | external 변화 |
+|---|---|---|---|
+| M6(RNA only, 0.6221/0.5893) → M7(+Clinical, 0.6025/0.5958) | Clinical 추가 | -0.0196 | **+0.0065** |
+| M6(RNA only) → M3(+WSI, 0.6488/0.5667) | WSI 추가 | **+0.0267** | -0.0226 |
+| PMA-noclinical(WSI+RNA, 0.6020/0.5428) → PMA-full(+Clinical, cox_add, 0.5984/0.6015) | Clinical 추가 | -0.0036(거의 flat) | **+0.0587** |
+
+세 비교 모두 방향이 정확히 일치 — clinical 추가는 internal 정체/소폭 하락 + external
+뚜렷한 상승, WSI 추가는 internal 상승 + external 하락(거울상). 서로 다른 아키텍처
+(단순화 M-사다리 vs PMA의 4성분 pooling+co-attention)에서 독립적으로 나온 결과라
+우연으로 보기 어렵다.
+
+**lr-mult 개입 실험(같은 절 15-19 참조)에서도 방향이 일치**: `--clinical-lr-mult`로
+M2의 clinical 브랜치를 강화하면 internal +0.014/external **+0.040**(external이 더 큼).
+`--rna-lr-mult`로 M3의 RNA 브랜치를 강화하면 internal +0.003(거의 flat)/external
+**+0.032**.
+
+**RNA는 "연속형"인데도 clinical 쪽 패턴을 따름 — 가설의 정제**: 위 rna-lr-mult
+결과가 시사하듯, 진짜 축은 "WSI vs 그 외"가 아니라 "코호트/기관별 **기술적** 노이즈가
+얼마나 끼어있는가"로 보인다. RNA-seq도 batch effect가 있지만 WSI의 스캐너·염색·조직
+처리 편차만큼 크지 않아서, 이 노이즈 축에서는 WSI보다 clinical에 훨씬 가깝게
+행동하는 것 같다.
+
+**한계**: 전부 seed42 단일 시드 결과 — 이 문서의 다른 절(noise floor ±0.02~0.05)을
+고려하면 개별 delta 중 일부(특히 M6→M7의 +0.0065처럼 작은 값)는 noise floor 안에
+들어갈 수 있다. 다만 방향이 세 개 독립 비교 + 두 개 lr-mult 개입에서 전부 일치한다는
+점이 우연으로 보기엔 너무 일관적 — multi-seed로 재확인이 필요하지만, 나중에
+실험 자체가 뒤집히더라도 그 자체로 흥미로운 방법론적 관찰(모달리티의 "기술적 노이즈
+프로파일"이 internal/external 성능 배분을 예측할 수 있다는 것)로 남을 만하다.

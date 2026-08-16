@@ -98,6 +98,27 @@ def _identity_collate(batch: list) -> list:
     return batch[0]
 
 
+# 2026-08-15: --clinical-lr-mult/--rna-lr-mult(optimizer param_group lr 분리)와
+# --auto-branch-balance(매 스텝 gradient norm 실시간 보정) 둘 다 같은 브랜치 정의를 공유한다.
+_BRANCH_ATTRS = {
+    "clinical": ("clinical_encoder", "clinical_linear"),
+    "rna": ("rna_encoder", "rna_linear"),
+}
+
+
+def _branch_param_groups(model) -> dict[str, list]:
+    """모델 파라미터를 clinical/rna/other 3개 그룹으로 나눈다(각 브랜치가 없는 모델이면 해당
+    리스트는 빈 리스트)."""
+    groups: dict[str, list] = {"clinical": [], "rna": [], "other": []}
+    attr_to_key = {attr: key for key, attrs in _BRANCH_ATTRS.items() for attr in attrs}
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        top = name.split(".")[0]
+        groups[attr_to_key.get(top, "other")].append(p)
+    return groups
+
+
 def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] | None:
     """patient_slides[0]에 STAGE_FIELDS(with_staging=True로 로드된 경우만)가 있으면 device로 옮겨
     {field: () 스칼라 long} dict로 반환한다 - "미상"은 -1(data/dataset.py 규약). with_staging=False로
@@ -122,11 +143,17 @@ def _patient_risk(
     shuffle_patches: bool = False, tile_cache: dict | None = None,
     patch_subsample_generator: torch.Generator | None = None,
     modality_dropout_p: float = 0.0,
+    branch_risk_out: dict | None = None,
 ):
     """환자 1명이 보유한 슬라이드 전부를 forward해 임베딩을 평균 풀링한 뒤 risk score(scalar)를 계산한다.
     Returns: (risk, aux_loss, stage_aux_loss) — aux_loss는 model.rna_aux_head가 있을 때만 텐서
     (--rna-aux-weight, models/rna_predictor.py 참조), stage_aux_loss는 model.stage_aux_head가
     있을 때만 텐서(--stage-aux-weight, models/stage_predictor.py 참조), 둘 다 없으면 None.
+
+    branch_risk_out: --ogm-ge 전용(2026-08-15). dict를 넘기면 combine_mode="cox_add"일 때
+    WSI 단독 항("wsi", clinical/rna cox_add 가산 *전* risk_head 출력)과 clinical 단독 항
+    ("clinical", model.clinical_linear 출력)을 이 dict에 곁다리로 채워넣는다(반환값 자체는
+    안 바뀜 — 기존 호출부 전부와 호환). None이면 아무 동작 안 함(기본값, 부작용 없음).
 
     [patch_keep_frac, --patch-keep-frac(PatchDropout)] model.training(=True, train_one_epoch에서
     호출될 때만)일 때만 슬라이드 패치를 이 비율만큼 랜덤 서브샘플한다 — val/test/external
@@ -346,18 +373,26 @@ def _patient_risk(
             patient_embed = torch.cat([patient_embed, patient_spatial_feat], dim=-1)
 
         risk = model.risk_head(patient_embed.unsqueeze(0)).view(1)  # (1,)
+        if branch_risk_out is not None:
+            branch_risk_out["wsi"] = risk
         if getattr(model, "combine_mode", "concat") == "cox_add":
             # models/vit_pma.py::ViT_PMA combine_mode="cox_add" — clinical은 위 patient_embed에
             # 안 섞여 있고(combine_with_clinical_rna가 concat 안 함), 여기서 고전적 Cox 가산항으로
             # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
             clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
-            risk = risk + model.clinical_linear(clin_raw).view(1)
+            clinical_term = model.clinical_linear(clin_raw).view(1)
+            if branch_risk_out is not None:
+                branch_risk_out["clinical"] = clinical_term
+            risk = risk + clinical_term
         if getattr(model, "rna_combine_mode", "concat") == "cox_add":
             # 2026-08-09: models/vit_pma.py::ViT_PMA rna_combine_mode="cox_add" — z_rna는 여전히
             # component_coattn의 query로 WSI pooling을 guide했지만(combine_with_clinical_rna에서
             # 이미 반영됨), risk_head에는 직결 concat되지 않았으므로 여기서 별도 Cox 가산항으로
             # 더한다. clinical cox_add와 완전히 같은 관례 — z_rna는 위에서 이미 계산돼 있음.
-            risk = risk + model.rna_linear(z_rna).view(1)
+            rna_term = model.rna_linear(z_rna).view(1)
+            if branch_risk_out is not None:
+                branch_risk_out["rna"] = rna_term
+            risk = risk + rna_term
     return risk, aux_loss, stage_aux_loss
 
 
@@ -367,6 +402,10 @@ def train_one_epoch(
     shuffle_patches: bool = False, tile_cache: dict | None = None,
     patch_subsample_generator: torch.Generator | None = None,
     modality_dropout_p: float = 0.0,
+    branch_groups: dict[str, list] | None = None,
+    auto_balance_enabled: bool = False,
+    ogm_ge_alpha: float | None = None,
+    ogm_ge_epoch_progress: float = 0.0,
     desc: str = "train",
 ) -> float:
     model.train()
@@ -378,6 +417,7 @@ def train_one_epoch(
     batch_size    = cfg.train.cox_batch_size
 
     risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
+    ogm_risks_wsi, ogm_risks_clinical = [], []
     is_sam = isinstance(optimizer, SAM)
 
     def _compute_loss(risk_list, time_t, event_t, aux_list, stage_aux_list):
@@ -410,8 +450,77 @@ def train_one_epoch(
                 stage_aux2.append(s2)
         return risks2, aux2, stage_aux2
 
+    def _rescale_branch_grads():
+        """--auto-branch-balance: clinical/rna 브랜치의 gradient norm을 나머지(WSI 등) 파라미터의
+        gradient norm에 맞춰 매 스텝 실시간으로 재조정한다 — --clinical-lr-mult/--rna-lr-mult가
+        고정 배율을 학습 시작 전에 손으로 정하는 것과 달리, 그 스텝의 실제 gradient 크기 차이에
+        맞춰 배율이 매번 달라진다."""
+        if not auto_balance_enabled or branch_groups is None:
+            return
+
+        def _grad_norm(params):
+            sq = sum(p.grad.norm().item() ** 2 for p in params if p.grad is not None)
+            return sq ** 0.5
+
+        ref_norm = _grad_norm(branch_groups["other"])
+        if ref_norm <= 0:
+            return
+        for key in ("clinical", "rna"):
+            params = branch_groups[key]
+            if not params:
+                continue
+            branch_norm = _grad_norm(params)
+            if branch_norm <= 1e-8:
+                continue
+            scale = min(max(ref_norm / branch_norm, 0.1), 100.0)
+            for p in params:
+                if p.grad is not None:
+                    p.grad.mul_(scale)
+
+    def _ogm_ge_modulate():
+        """--ogm-ge: Peng et al. CVPR 2022(OGM-GE, "Balanced Multimodal Learning via On-the-fly
+        Gradient Modulation")를 우리 Cox 구조에 맞게 이식한 근사 버전 — 원논문은 task별로
+        별도 loss가 있는 세팅을 전제하는데, 우리는 Cox loss 하나뿐이라 논문의 정확한 수식을
+        그대로 쓸 수 없다. 대신 combine_mode="cox_add"에서 WSI 항(risk_head 출력, cox_add
+        가산 *전*)과 clinical 항(clinical_linear 출력)이 깨끗하게 분리되는 지점(_patient_risk의
+        branch_risk_out)을 이용해, 이번 배치에서 각 브랜치 단독으로 순위를 얼마나 잘
+        설명하는지(-Cox loss, 클수록 잘 맞음)를 "판별력 점수"로 삼는다. 더 잘 맞히는(=이미
+        앞서가는) 쪽의 gradient를 tanh 계수로 억제하고(GradNorm/PCGrad와 달리 별도 task loss나
+        공유 파라미터 위 gradient 충돌 없이도 성립), 억제한 만큼 작은 gaussian 노이즈를 더해
+        (GE, epoch가 진행될수록 anneal) 그 브랜치가 이 배치의 우연에 안주하지 않게 한다.
+        RNA는 기본 레시피(FiLM guided attention)에서 WSI pooling에 얽혀 있어 이 방식으로
+        분리되지 않으므로(--rna-combine-mode cox_add일 때만 분리됨) 이 파일럿에선 다루지 않는다.
+        """
+        if ogm_ge_alpha is None or branch_groups is None or not ogm_risks_wsi or not ogm_risks_clinical:
+            return
+        with torch.no_grad():
+            risk_wsi_batch = torch.cat(ogm_risks_wsi)
+            risk_clin_batch = torch.cat(ogm_risks_clinical)
+            time_t = torch.cat(times).to(device)
+            event_t = torch.cat(events).to(device)
+            score_wsi = -cox_ph_loss(risk_wsi_batch, time_t, event_t).item()
+            score_clin = -cox_ph_loss(risk_clin_batch, time_t, event_t).item()
+            if not (math.isfinite(score_wsi) and math.isfinite(score_clin)):
+                return
+
+            diff = score_wsi - score_clin
+            dominant_key = "other" if diff > 0 else "clinical"
+            k = max(1.0 - math.tanh(ogm_ge_alpha * abs(diff)), 0.0)
+
+            dominant_params = branch_groups[dominant_key]
+            for p in dominant_params:
+                if p.grad is not None:
+                    p.grad.mul_(k)
+
+            noise_scale = (1.0 - k) * (1.0 - ogm_ge_epoch_progress) * 0.01
+            if noise_scale > 0:
+                for p in dominant_params:
+                    if p.grad is not None:
+                        p.grad.add_(torch.randn_like(p.grad) * noise_scale * p.grad.std().clamp(min=1e-8))
+
     def _flush():
         nonlocal risks, times, events, aux_losses, stage_aux_losses, patient_batch, total_loss, total_batches
+        nonlocal ogm_risks_wsi, ogm_risks_clinical
         if not risks:
             return
         time_t  = torch.cat(times).to(device)
@@ -420,6 +529,8 @@ def train_one_epoch(
         loss = _compute_loss(risks, time_t, event_t, aux_losses, stage_aux_losses)
         optimizer.zero_grad()
         loss.backward()
+        _rescale_branch_grads()
+        _ogm_ge_modulate()
 
         # 2026-07-26: cptac 방향 학습(dispersion 병행) 중 특정 배치에서 loss가 NaN으로 발산해
         # 그 순간부터 가중치 전체가 영구히 오염되는 현상 발견(RNA/clinical 원본 데이터엔 NaN/Inf
@@ -434,6 +545,8 @@ def train_one_epoch(
             risks2, aux2, stage_aux2 = _refresh_batch(patient_batch)
             loss2 = _compute_loss(risks2, time_t, event_t, aux2, stage_aux2)
             loss2.backward()
+            _rescale_branch_grads()
+            _ogm_ge_modulate()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             if not (torch.isfinite(loss2) and torch.isfinite(grad_norm)):
                 print(f"  [경고] non-finite loss2(={loss2.item()})/grad_norm(={grad_norm.item()}) 배치 스킵(SAM)")
@@ -452,16 +565,19 @@ def train_one_epoch(
                 total_loss    += loss.item()
                 total_batches += 1
         risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
+        ogm_risks_wsi, ogm_risks_clinical = [], []
 
     # mininterval=30: data/patch_utils.py::build_tile_cache와 동일한 이유(비-TTY 로그 폭주 방지).
     for patient_slides in tqdm(loader, desc=desc, unit="patient", mininterval=30):  # 환자 1명 분량의 슬라이드 리스트
         if len(patient_slides) == 0:
             continue
+        branch_risk_out = {} if ogm_ge_alpha is not None else None
         risk, aux_loss, stage_aux_loss = _patient_risk(
             model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
             shuffle_patches=shuffle_patches, tile_cache=tile_cache,
             patch_subsample_generator=patch_subsample_generator,
             modality_dropout_p=modality_dropout_p,
+            branch_risk_out=branch_risk_out,
         )
 
         risks.append(risk)
@@ -471,6 +587,9 @@ def train_one_epoch(
             aux_losses.append(aux_loss)
         if stage_aux_loss is not None:
             stage_aux_losses.append(stage_aux_loss)
+        if branch_risk_out and "wsi" in branch_risk_out and "clinical" in branch_risk_out:
+            ogm_risks_wsi.append(branch_risk_out["wsi"].detach())
+            ogm_risks_clinical.append(branch_risk_out["clinical"].detach())
         if is_sam:
             patient_batch.append(patient_slides)
 
@@ -663,6 +782,46 @@ def _parse_args() -> argparse.Namespace:
         help="--clinical-lr-mult와 동일 관례, rna_encoder/rna_linear(M3/M4/PMA)에 적용. "
              "clinical-lr-mult가 fold1에서 확인된 효과가 RNA 브랜치에도 적용되는지 검증. "
              "켜면 model_prefix에 _RLR{배율}이 붙는다.",
+    )
+    parser.add_argument(
+        "--lr-mult-warmup-epochs", type=int, default=0,
+        help="2026-08-15: --clinical-lr-mult/--rna-lr-mult 전용. 배율을 학습 시작부터 목표값(예: "
+             "20배) 그대로 쓰는 대신, 이 epoch 수에 걸쳐 1.0배에서 목표 배율까지 선형으로 올린다. "
+             "M4+RLR20 fold2/3 실측 — 20배를 처음부터 쓰면 rna_encoder가 1~2 epoch 만에 31명짜리 "
+             "val set에 우연히 잘 맞는(하지만 불안정한) 지점으로 점프해버리고 그 뒤로 val이 단조 "
+             "하락(과적합)하는 패턴이 확인됨(baseline은 val이 8~11 epoch에 걸쳐 서서히 정점에 "
+             "도달). 0(기본)이면 기존과 동일(warmup 없이 목표 배율 그대로). 켜면 model_prefix에 "
+             "_LRMW{epochs}가 붙는다.",
+    )
+    parser.add_argument(
+        "--warm-start-clinical", type=str, default=None,
+        help="2026-08-15: ClinicalOnly(--M5) 체크포인트 경로. 학습 시작 전 model.clinical_encoder를 "
+             "이 체크포인트의 clinical_encoder 가중치로 초기화한다(0부터 WSI와 경쟁하며 학습하는 "
+             "대신, 이미 clinical 단독으로 수렴한 지점에서 joint fine-tuning을 시작). "
+             "clinical_encoder가 없는 모델(cox_add 등)에서 쓰면 에러.",
+    )
+    parser.add_argument(
+        "--warm-start-rna", type=str, default=None,
+        help="--warm-start-clinical과 동일 관례, RNAOnly(--M6) 체크포인트로 model.rna_encoder를 "
+             "초기화한다.",
+    )
+    parser.add_argument(
+        "--auto-branch-balance", action="store_true",
+        help="2026-08-15: --clinical-lr-mult/--rna-lr-mult처럼 고정 배율을 손으로 정하는 대신, "
+             "매 optimizer step 직전에 clinical_encoder/rna_encoder 브랜치의 gradient norm을 "
+             "나머지(WSI 등) 파라미터의 gradient norm에 맞춰 실시간으로 재조정한다(스케일 배율을 "
+             "[0.1, 100] 범위로 clamp). 학습 내내 배율이 고정되지 않고 각 스텝의 실제 gradient "
+             "크기 차이에 맞춰 자동으로 움직인다는 점이 lr-mult와의 차이 — 둘을 동시에 켜도 된다.",
+    )
+    parser.add_argument(
+        "--ogm-ge-alpha", type=float, default=None,
+        help="2026-08-15: Peng et al. CVPR 2022(OGM-GE)를 우리 Cox 구조에 맞게 이식(train.py::"
+             "train_one_epoch::_ogm_ge_modulate 참조). --combine-mode cox_add 전용(WSI/clinical "
+             "항이 additive로 깨끗이 분리되는 유일한 지점). 이번 배치에서 WSI/clinical 단독 "
+             "risk의 -Cox loss를 '판별력 점수'로 삼아, 더 앞서가는 쪽의 gradient를 "
+             "tanh(alpha*|score차|) 계수로 억제하고 억제한 만큼 노이즈를 더한다(GE, epoch가 "
+             "진행될수록 anneal). None(기본)이면 꺼짐. alpha가 클수록 억제가 강함 — 처음엔 "
+             "1.0 근처로 시도.",
     )
     parser.add_argument(
         "--swa", action="store_true",
@@ -1790,6 +1949,16 @@ def main():
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     if args.rna_lr_mult != 1.0:
         model_prefix += f"_RLR{args.rna_lr_mult:g}"
+    if args.lr_mult_warmup_epochs > 0:
+        model_prefix += f"_LRMW{args.lr_mult_warmup_epochs}"
+    if args.warm_start_clinical:
+        model_prefix += "_WSCLIN"
+    if args.warm_start_rna:
+        model_prefix += "_WSRNA"
+    if args.auto_branch_balance:
+        model_prefix += "_ABB"
+    if args.ogm_ge_alpha is not None:
+        model_prefix += f"_OGM{args.ogm_ge_alpha:g}"
     if args.modality_dropout_p > 0:
         model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
     if args.lr is not None:
@@ -2086,6 +2255,10 @@ def main():
                          skip_patch_vit=args.skip_patch_vit,
                          use_tumor_type_embed=args.tumor_type_embed,
                          use_tile_risk_head=args.tile_risk_head,
+                         use_coord_embed=args.coord_embed, coord_embed_concat=args.coord_embed_concat,
+                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
+                         coord_embed_shuffle=args.coord_embed_shuffle,
+                         use_wsi_extra_mlp=args.wsi_extra_mlp,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -2239,6 +2412,28 @@ def main():
             print(f"  -> external(soup) predictions saved: {pred_path}")
         return
 
+    # 2026-08-15: clinical_encoder/rna_encoder를 처음부터 공동학습하지 않고 M5(clinical 단독)/
+    # M6(RNA 단독)의 이미 수렴한 가중치로 초기화한 뒤 joint fine-tuning을 시작한다 —
+    # --clinical-lr-mult/--rna-lr-mult(브랜치가 WSI와 경쟁에서 밀리는 걸 lr로 보정)와 상호보완적인
+    # 접근: "0부터 경쟁 시작"이 아니라 "이미 각자 최선인 지점에서 시작"하게 한다.
+    if args.warm_start_clinical:
+        if not hasattr(model, "clinical_encoder"):
+            raise ValueError("--warm-start-clinical인데 이 모델엔 clinical_encoder가 없습니다.")
+        ckpt = torch.load(args.warm_start_clinical, map_location=device, weights_only=False)
+        prefix = "clinical_encoder."
+        sub_state = {k[len(prefix):]: v for k, v in ckpt["model_state_dict"].items() if k.startswith(prefix)}
+        model.clinical_encoder.load_state_dict(sub_state)
+        print(f"clinical_encoder warm-start: {args.warm_start_clinical}")
+    if args.warm_start_rna:
+        if not hasattr(model, "rna_encoder"):
+            raise ValueError("--warm-start-rna인데 이 모델엔 rna_encoder가 없습니다.")
+        ckpt = torch.load(args.warm_start_rna, map_location=device, weights_only=False)
+        prefix = "rna_encoder."
+        sub_state = {k[len(prefix):]: v for k, v in ckpt["model_state_dict"].items() if k.startswith(prefix)}
+        model.rna_encoder.load_state_dict(sub_state)
+        print(f"rna_encoder warm-start: {args.warm_start_rna}")
+
+    lr_mult_warmup_targets: list[tuple[int, float]] = []
     if args.sam and args.sam_wsi_only:
         # WSI 브랜치 파라미터만 rho=args.sam_rho, 나머지는 rho=0(=perturbation 없음, 사실상
         # AdamW) — SAM(utils/sam.py)이 param_group마다 다른 rho를 이미 지원해서(first_step의
@@ -2268,31 +2463,17 @@ def main():
         # 20배로 fold1 internal 0.4433->0.5355 확인. rna_encoder/rna_linear에도 같은 논리가
         # 적용될 수 있어(M3/M4) --rna-lr-mult로 동일하게 지원 — 여러 브랜치를 동시에 다른
         # 배율로 올릴 수 있게 일반화(--sam-wsi-only와 동일 관례로 param_group 분리).
-        _LR_MULT_BRANCHES = [
-            ("clinical", ("clinical_encoder", "clinical_linear"), args.clinical_lr_mult),
-            ("rna", ("rna_encoder", "rna_linear"), args.rna_lr_mult),
-        ]
-        attr_to_branch = {
-            attr: (key, mult) for key, attrs, mult in _LR_MULT_BRANCHES if mult != 1.0 for attr in attrs
-        }
-        branch_params = {key: [] for key, _, mult in _LR_MULT_BRANCHES if mult != 1.0}
-        other_params = []
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            top = name.split(".")[0]
-            if top in attr_to_branch:
-                key, _ = attr_to_branch[top]
-                branch_params[key].append(p)
-            else:
-                other_params.append(p)
-        param_groups = [{"params": other_params, "lr": cfg.train.lr}]
-        for key, attrs, mult in _LR_MULT_BRANCHES:
+        branch_groups = _branch_param_groups(model)
+        param_groups = [{"params": branch_groups["other"], "lr": cfg.train.lr}]
+        # 2026-08-15: --lr-mult-warmup-epochs용 — 어느 param_group index가 어떤 배율을 목표로
+        # 하는지 기억해 둔다(매 epoch 시작 시 실제 배율을 1.0->목표까지 선형으로 올리는 데 사용).
+        for key, mult in (("clinical", args.clinical_lr_mult), ("rna", args.rna_lr_mult)):
             if mult == 1.0:
                 continue
-            if not branch_params[key]:
-                raise ValueError(f"--{key}-lr-mult != 1.0인데 {attrs} 파라미터가 없는 모델입니다.")
-            param_groups.append({"params": branch_params[key], "lr": cfg.train.lr * mult})
+            if not branch_groups[key]:
+                raise ValueError(f"--{key}-lr-mult != 1.0인데 {_BRANCH_ATTRS[key]} 파라미터가 없는 모델입니다.")
+            param_groups.append({"params": branch_groups[key], "lr": cfg.train.lr * mult})
+            lr_mult_warmup_targets.append((len(param_groups) - 1, mult))
         optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
     else:
         optimizer = torch.optim.AdamW(
@@ -2300,6 +2481,9 @@ def main():
             lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
         )
     scheduler = _build_scheduler(optimizer, cfg)
+    auto_balance_groups = (
+        _branch_param_groups(model) if (args.auto_branch_balance or args.ogm_ge_alpha is not None) else None
+    )
 
     mode = "precomputed features" if cfg.data.precomputed else "raw image (--image)"
     print(f"Mode: {mode}")
@@ -2477,12 +2661,25 @@ def main():
     epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
         lr_now        = optimizer.param_groups[0]["lr"]
+        if args.lr_mult_warmup_epochs > 0 and lr_mult_warmup_targets:
+            # 매 epoch 시작 시, 이미 scheduler.step()이 반영된 "other" 그룹의 현재 lr(lr_now =
+            # base_lr * warmup/cosine factor)을 기준으로, 배율 자체를 1.0->목표까지 이 epoch
+            # 진행도만큼 선형 보간해 boosted param_group의 lr을 다시 계산한다 — 기존 warmup/cosine
+            # 스케줄과 배율-warmup을 곱셈으로 합성.
+            progress = min((epoch + 1) / args.lr_mult_warmup_epochs, 1.0)
+            for group_idx, target_mult in lr_mult_warmup_targets:
+                effective_mult = 1.0 + (target_mult - 1.0) * progress
+                optimizer.param_groups[group_idx]["lr"] = lr_now * effective_mult
         loss          = train_one_epoch(model, train_loader, optimizer, cfg, device, amp_ctx, train_ds.transform,
                                          patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
                                          stage_aux_weight=args.stage_aux_weight,
                                          shuffle_patches=args.shuffle_patches, tile_cache=tile_cache,
                                          patch_subsample_generator=patch_subsample_generator,
                                          modality_dropout_p=args.modality_dropout_p,
+                                         branch_groups=auto_balance_groups,
+                                         auto_balance_enabled=args.auto_branch_balance,
+                                         ogm_ge_alpha=args.ogm_ge_alpha,
+                                         ogm_ge_epoch_progress=epoch / max(cfg.train.epochs - 1, 1),
                                          desc=f"epoch {epoch+1} train")
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
         # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
@@ -2603,6 +2800,22 @@ def main():
             wandb.run.summary["final_epoch_test_hr"]          = final_test_metrics["hr"]
             wandb.run.summary["final_epoch_test_log_rank_p"]  = final_test_metrics["log_rank_p"]
             wandb.run.summary["final_epoch_test_auc_mean"]    = final_test_td_auc["auc_mean"]
+        # 2026-08-15: best-val 체크포인트 선택이 작은 val set(31명) 노이즈에 취약하다는 게
+        # 반복 확인돼(M3/M4 fold2/3 등), best 대신 마지막 epoch 모델의 예측을 pooling할 수 있게
+        # best-checkpoint와 동일한 CSV 포맷으로 별도 저장한다(_FINALEPOCH 접미사로 구분 —
+        # scripts/pool_multiseed_kfold_preds.py --model 인자에 이 태그를 그대로 쓰면 됨).
+        if args.fold is not None:
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{args.dataset}_{model_prefix}_FINALEPOCH_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(final_test_metrics["case_ids"], final_test_metrics["risks"],
+                                            final_test_metrics["times"], final_test_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> final-epoch fold predictions saved: {pred_path}")
     if external_ds is not None:
         final_external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, external_ds.transform,
                                            tile_cache=external_tile_cache, desc="final external")

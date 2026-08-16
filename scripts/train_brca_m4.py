@@ -49,6 +49,7 @@ from models.rna_predictor import RNAPredictionHead
 from models.clinical_encoder import age_stats_from_csv
 from train import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
+    _branch_param_groups,
 )
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
@@ -94,6 +95,15 @@ def main():
                               "쓴다(use_nystrom/use_spatial_embed 자동 False).")
     parser.add_argument("--knn-k", type=int, default=8,
                          help="--knn-bias-attention 사용 시 패치당 kNN 이웃 수(기본 8).")
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="train.py --clinical-lr-mult 이식 — clinical_encoder 파라미터그룹 lr을 "
+                              "base lr의 이 배수로. PAAD에서 20x가 branch-competition을 해소한 효과가 "
+                              "BRCA(표본 7배)에서도 재현되는지 확인.")
+    parser.add_argument("--rna-lr-mult", type=float, default=1.0,
+                         help="train.py --rna-lr-mult 이식 — rna_encoder 파라미터그룹 lr 배수.")
+    parser.add_argument("--wsi-extra-mlp", action="store_true",
+                         help="train.py --wsi-extra-mlp 이식(models/vit_m1.py::ViT_M1, ViT_PMA가 상속) "
+                              "— patch_tokens에 잔차 MLP 한 층 추가.")
     parser.add_argument("--group-ts", type=str, default=None)
     args = parser.parse_args()
 
@@ -146,7 +156,7 @@ def main():
 
     model = ViT_PMA(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
-        precomputed=True, backbone="uni",
+        precomputed=True, backbone="uni", use_wsi_extra_mlp=args.wsi_extra_mlp,
     ).to(device)
     if args.rna_aux_weight > 0:
         model.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, rna_input_dim).to(device)
@@ -162,6 +172,12 @@ def main():
         model_prefix += "_RELBIAS"
     if args.knn_bias_attention:
         model_prefix += "_KNNATTN"
+    if args.wsi_extra_mlp:
+        model_prefix += "_XMLP"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     print(f"Model: ViT_PMA (uni backbone, use_nystrom={cfg.model.use_nystrom}, "
           f"use_spatial_embed={cfg.model.use_spatial_embed}) | "
           f"params={sum(p.numel() for p in model.parameters()):,}")
@@ -185,14 +201,29 @@ def main():
                 "use_spatial_embed": cfg.model.use_spatial_embed,
                 "use_rel_bias_attn": cfg.model.use_rel_bias_attn,
                 "use_knn_bias_attn": cfg.model.use_knn_bias_attn,
+                "wsi_extra_mlp": args.wsi_extra_mlp,
+                "clinical_lr_mult": args.clinical_lr_mult, "rna_lr_mult": args.rna_lr_mult,
                 "model": model_prefix, "dataset": "brca",
             },
         )
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
-    )
+    if args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0:
+        groups = _branch_param_groups(model)
+        param_groups = []
+        if groups["clinical"]:
+            param_groups.append({"params": groups["clinical"], "lr": cfg.train.lr * args.clinical_lr_mult})
+        if groups["rna"]:
+            param_groups.append({"params": groups["rna"], "lr": cfg.train.lr * args.rna_lr_mult})
+        if groups["other"]:
+            param_groups.append({"params": groups["other"], "lr": cfg.train.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
+        print(f"branch-lr-mult 적용: clinical={args.clinical_lr_mult}x({len(groups['clinical'])}개 텐서), "
+              f"rna={args.rna_lr_mult}x({len(groups['rna'])}개 텐서), other=1x({len(groups['other'])}개 텐서)")
+    else:
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+        )
     scheduler = _build_scheduler(optimizer, cfg)
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"

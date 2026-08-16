@@ -218,6 +218,14 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-folds", type=int, default=5, help="--fold와 함께 쓰는 전체 fold 개수.")
     parser.add_argument(
+        "--full-train", action="store_true",
+        help="2026-08-16: train.py --full-train와 동일 관례 — 6:2:2/k-fold split 없이 코호트 "
+             "전체를 train으로 쓴다(val/internal test 자체가 없음). val이 없어 best-val "
+             "체크포인트 선택이 불가능하므로 마지막 epoch 모델로 external을 정확히 1회 평가한다 "
+             "(--external과 함께 써야 의미가 있다). M1~M4(train.py)에서 k-fold pooled 앙상블과 "
+             "거의 동일한 external 결과를 낸 게 확인돼(±0.01 이내), M5/M6/M7에도 동일하게 적용.",
+    )
+    parser.add_argument(
         "--rna-genes", type=str, default="subtype",
         choices=[
             "subtype", "literature_1000", "literature_1500", "literature_2000",
@@ -588,9 +596,10 @@ def main():
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
                       restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
-    val_ds   = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)
-    test_ds  = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs, **split_kwargs)
+    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),
+                                   **ds_kwargs, **split_kwargs)
+    val_ds   = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)
+    test_ds  = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test",  **ds_kwargs, **split_kwargs)
     external_ds = (
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
@@ -599,8 +608,8 @@ def main():
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
-    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
-    test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
+    val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs) if val_ds  is not None else None
+    test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs) if test_ds is not None else None
     external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds else None
 
     if args.eval_external_ckpt:
@@ -632,8 +641,12 @@ def main():
 
     split_desc = f"{args.n_folds}-fold CV, fold {args.fold}" if args.fold is not None else "6:2:2 stratified split"
     print(f"Model: {model_prefix} ({type(model).__name__}) | params={sum(p.numel() for p in model.parameters()):,}")
-    print(f"Dataset: {args.dataset}  ({split_desc})  "
-          f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
+    if args.full_train:
+        print(f"Dataset: {args.dataset}  (--full-train: split 없이 코호트 전체를 train으로 사용)  "
+              f"Train: {len(train_ds)} patients (val/internal test 없음)")
+    else:
+        print(f"Dataset: {args.dataset}  ({split_desc})  "
+              f"Train: {len(train_ds)}  Val: {len(val_ds)}  Test(internal): {len(test_ds)} patients")
     print(f"lr={cfg.light.lr:.1e} | weight_decay={cfg.light.weight_decay:.1e} | "
           f"epochs={cfg.light.epochs} | cox_batch_size={cfg.light.cox_batch_size}")
 
@@ -653,12 +666,23 @@ def main():
         lr_now = optimizer.param_groups[0]["lr"]
         loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size)
         train_metrics = evaluate(model, train_eval_loader, device)
+        scheduler.step()
+
+        if val_ds is None:
+            # --full-train: val 자체가 없음 — train 지표만 기록하고 다음 epoch으로.
+            print(f"Epoch {epoch+1:3d} | lr={lr_now:.2e} | loss={loss:.4f} | "
+                  f"train_c_index={train_metrics['c_index']:.4f}")
+            if WANDB_AVAILABLE:
+                wandb.log({
+                    "train/loss": loss, "train/lr": lr_now, "train/c_index": train_metrics["c_index"],
+                }, step=epoch + 1)
+            continue
+
         metrics = evaluate(model, val_loader, device)
         val_td_auc = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"], metrics["times"], metrics["events"], metrics["risks"],
             eval_days=auc_days,
         )
-        scheduler.step()
 
         c_index = metrics.get("c_index", float("nan"))
         score = c_index if not math.isnan(c_index) else -1.0
@@ -689,37 +713,46 @@ def main():
                       f"best epoch {best_metrics.get('epoch', '-')} c_index={best_score:.4f})")
                 break
 
-    ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    train_metrics_final = evaluate(model, train_eval_loader, device)
-    test_metrics = evaluate(model, test_loader, device)
-    test_td_auc = compute_time_dependent_auc(
-        train_metrics_final["times"], train_metrics_final["events"],
-        test_metrics["times"], test_metrics["events"], test_metrics["risks"],
-        eval_days=auc_days,
-    )
-    print(f"\n=== Internal Test (best checkpoint epoch {ckpt['epoch']}) ===")
-    print(_log_line("test", test_metrics, test_td_auc))
+    if not args.full_train:
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        train_metrics_final = evaluate(model, train_eval_loader, device)
+        test_metrics = evaluate(model, test_loader, device)
+        test_td_auc = compute_time_dependent_auc(
+            train_metrics_final["times"], train_metrics_final["events"],
+            test_metrics["times"], test_metrics["events"], test_metrics["risks"],
+            eval_days=auc_days,
+        )
+        print(f"\n=== Internal Test (best checkpoint epoch {ckpt['epoch']}) ===")
+        print(_log_line("test", test_metrics, test_td_auc))
 
-    if args.fold is not None:
-        import csv
-        pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
-        pred_dir.mkdir(parents=True, exist_ok=True)
-        pred_path = pred_dir / f"{args.dataset}_{model_prefix}_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
-        with open(pred_path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
-            for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
-                                        test_metrics["times"], test_metrics["events"]):
-                writer.writerow([cid, risk, t, e])
-        print(f"  -> fold predictions saved: {pred_path}")
+        if args.fold is not None:
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{args.dataset}_{model_prefix}_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
+                                            test_metrics["times"], test_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> fold predictions saved: {pred_path}")
 
-    if WANDB_AVAILABLE:
-        wandb.run.summary["test_c_index"] = test_metrics["c_index"]
-        wandb.run.summary["test_hr"] = test_metrics["hr"]
-        wandb.run.summary["test_log_rank_p"] = test_metrics["log_rank_p"]
-        wandb.run.summary["test_auc_mean"] = test_td_auc["auc_mean"]
-        wandb.finish()
+        if WANDB_AVAILABLE:
+            wandb.run.summary["test_c_index"] = test_metrics["c_index"]
+            wandb.run.summary["test_hr"] = test_metrics["hr"]
+            wandb.run.summary["test_log_rank_p"] = test_metrics["log_rank_p"]
+            wandb.run.summary["test_auc_mean"] = test_td_auc["auc_mean"]
+            wandb.finish()
+    else:
+        # --full-train: val/test 자체가 없어 best-val 체크포인트 선택이 불가능하므로, 학습 루프
+        # 종료 직후(메모리 상의 model이 곧 마지막 epoch 가중치) train_metrics를 그대로 재사용하고
+        # model도 리로드하지 않는다 — 아래 external 평가가 자연히 "마지막 epoch 모델" 기준으로
+        # 정확히 1회 수행된다(train.py --full-train와 동일 관례).
+        train_metrics_final = train_metrics
+        if WANDB_AVAILABLE:
+            wandb.finish()
 
     external_metrics, external_td_auc = None, None
     if external_ds is not None:

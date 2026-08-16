@@ -63,9 +63,18 @@ class ViT_PMA(ViT_M1):
         skip_patch_vit: bool = False,
         use_tumor_type_embed: bool = False,
         use_tile_risk_head: bool = False,
+        use_coord_embed: bool = False,
+        coord_embed_concat: bool = False,
+        coord_embed_learnable_scale: bool = False,
+        coord_embed_shuffle: bool = False,
+        use_wsi_extra_mlp: bool = False,
     ):
         super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit,
-                          use_tumor_type_embed=use_tumor_type_embed)
+                          use_tumor_type_embed=use_tumor_type_embed,
+                          use_coord_embed=use_coord_embed, coord_embed_concat=coord_embed_concat,
+                          coord_embed_learnable_scale=coord_embed_learnable_scale,
+                          coord_embed_shuffle=coord_embed_shuffle,
+                          use_wsi_extra_mlp=use_wsi_extra_mlp)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         if rna_combine_mode not in ("concat", "cox_add"):
@@ -188,6 +197,17 @@ class ViT_PMA(ViT_M1):
         tumor_type: torch.Tensor | None = None,
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
+        if self.use_coord_embed:
+            coord_input = coords[torch.randperm(coords.shape[0], device=coords.device)] if self.coord_embed_shuffle else coords
+            pos = self.coord_embed(coord_input)  # (N, D)
+            if self.coord_embed_concat:
+                patch_tokens = self.coord_fusion(torch.cat([patch_tokens, pos], dim=-1))
+            elif hasattr(self, "coord_embed_scale"):
+                patch_tokens = patch_tokens + self.coord_embed_scale * pos
+            else:
+                patch_tokens = patch_tokens + pos
+        if self.use_wsi_extra_mlp:
+            patch_tokens = self.wsi_extra_mlp(patch_tokens)
         ctx_tokens = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords, tumor_type=tumor_type)
         components, attn_weights, risk_stats = self.attn_pool(ctx_tokens)  # (4, D), (N,), (10,) 또는 None
         # meanpool_embed: --rna-aux-weight(models/rna_predictor.py) 보조과제 입력 전용.
