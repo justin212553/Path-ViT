@@ -60,8 +60,10 @@ class ViT_M1_Pool(ViT_M1):
         backbone: str = "resnet50",
         num_heads: int = 2,
         use_attn_dispersion: bool = False,
+        use_wsi_extra_mlp: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion)
+        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
+                          use_wsi_extra_mlp=use_wsi_extra_mlp)
         self.multi_pool = MultiComponentPooling(cfg.embed_dim)
         self.component_selfattn = SelfAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
         del self.attn_pool  # ViT_M1의 단일-벡터 ABMIL은 안 쓴다(multi_pool로 대체)
@@ -84,6 +86,8 @@ class ViT_M1_Pool(ViT_M1):
         tumor_type: torch.Tensor | None = None,  # 사용 안 함(train.py 호출 시그니처 호환용)
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
+        if self.use_wsi_extra_mlp:
+            patch_tokens = self.wsi_extra_mlp(patch_tokens)
         ctx_tokens = self.vit(patch_tokens, coords)
         components, attn_weights, _ = self.multi_pool(ctx_tokens)  # (4, D), (N,), risk_stats(미사용)
         out = {

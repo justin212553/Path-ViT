@@ -48,8 +48,10 @@ class ViT_M2_Pool(ViT_M1):
         use_attn_dispersion: bool = False,
         pooling_mode: str = "coattn",
         combine_mode: str = "concat",
+        use_wsi_extra_mlp: bool = False,
     ):
-        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion)
+        super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
+                          use_wsi_extra_mlp=use_wsi_extra_mlp)
         if pooling_mode not in ("coattn", "selfattn"):
             raise ValueError(f"알 수 없는 pooling_mode: {pooling_mode}")
         if combine_mode not in ("concat", "cox_add"):
@@ -111,6 +113,8 @@ class ViT_M2_Pool(ViT_M1):
         tumor_type: torch.Tensor | None = None,  # 사용 안 함(train.py 호출 시그니처 호환용)
     ) -> dict:
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
+        if self.use_wsi_extra_mlp:
+            patch_tokens = self.wsi_extra_mlp(patch_tokens)
         ctx_tokens = self.vit(patch_tokens, coords)
         components, attn_weights, _ = self.multi_pool(ctx_tokens)  # (4, D), (N,), risk_stats(미사용)
         out = {

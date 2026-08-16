@@ -2279,12 +2279,14 @@ def main():
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M1_POOL:
         model = ViT_M1_Pool(cfg.model, precomputed=cfg.data.precomputed, backbone=args.backbone,
-                             use_attn_dispersion=args.attn_dispersion).to(device)
+                             use_attn_dispersion=args.attn_dispersion,
+                             use_wsi_extra_mlp=args.wsi_extra_mlp).to(device)
     elif args.M2_POOL:
         model = ViT_M2_Pool(cfg.model, age_mean=age_mean, age_std=age_std,
                              precomputed=cfg.data.precomputed, backbone=args.backbone,
                              use_attn_dispersion=args.attn_dispersion,
                              pooling_mode=args.pooling_mode, combine_mode=args.combine_mode,
+                             use_wsi_extra_mlp=args.wsi_extra_mlp,
                              **margin_kwargs).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
