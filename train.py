@@ -650,6 +650,21 @@ def _parse_args() -> argparse.Namespace:
              "나은지 확인하는 ablation. --sam 없이 쓰면 무시된다.",
     )
     parser.add_argument(
+        "--clinical-lr-mult", type=float, default=1.0,
+        help="2026-08-15: clinical_encoder(combine-mode=concat)/clinical_linear(cox_add) "
+             "param group에만 이 배율을 곱한 lr을 준다(1.0=끄기, --sam과 동시 사용 불가). "
+             "scripts/diagnose_m2_branch_swap.py 실측 — 공동학습된 clinical 브랜치가 M5(clinical "
+             "단독) 대비 internal -0.075/external -0.018 떨어지는데 WSI 브랜치는 M1 대비 거의 "
+             "안 상한다 — 파라미터 수가 훨씬 적은 clinical이 WSI와 같은 lr로 경쟁하면 밀려난다는 "
+             "가설을 검증. 켜면 model_prefix에 _CLR{배율}이 붙는다.",
+    )
+    parser.add_argument(
+        "--rna-lr-mult", type=float, default=1.0,
+        help="--clinical-lr-mult와 동일 관례, rna_encoder/rna_linear(M3/M4/PMA)에 적용. "
+             "clinical-lr-mult가 fold1에서 확인된 효과가 RNA 브랜치에도 적용되는지 검증. "
+             "켜면 model_prefix에 _RLR{배율}이 붙는다.",
+    )
+    parser.add_argument(
         "--swa", action="store_true",
         help="2026-07-27: SWA(Stochastic Weight Averaging) — 학습 후반부(--swa-start-frac 이후) "
              "매 epoch의 가중치를 평균 낸 별도 모델을 유지하고, 학습 종료 후 이 평균 모델도 "
@@ -796,6 +811,22 @@ def _parse_args() -> argparse.Namespace:
         help="--coord-embed 전용 세부옵션(--coord-embed-concat과는 배타적, concat이면 무시됨). "
              "dispersion_scale과 동일 관례로 잔차 add 전에 학습되는 스칼라 배율(0.2 초기화)을 "
              "곱한다. 켜면 model_prefix에 _SC가 붙는다.",
+    )
+    parser.add_argument(
+        "--coord-embed-shuffle", action="store_true",
+        help="--coord-embed 전용 대조군. forward마다 patch 순서를 무작위로 섞은 coords를 "
+             "coord_embed에 넣어(슬라이드 전체 좌표 분포는 그대로, patch-position 대응만 "
+             "파괴) coord-embed-concat의 개선이 진짜 위치 정보 때문인지 coord_fusion 레이어 "
+             "자체의 capacity/정규화 효과인지 구분한다. 켜면 model_prefix에 _SHUF가 붙는다.",
+    )
+    parser.add_argument(
+        "--wsi-extra-mlp", action="store_true",
+        help="--coord-embed와 무관, 독립 플래그(models/vit_m1.py::ViT_M1). "
+             "coord-embed-concat의 이득이 좌표(--coord-embed-shuffle로 확인)와 무관하게 "
+             "coord_fusion이라는 추가 비선형 레이어 자체에서 왔다는 결론을 가장 순수한 "
+             "형태로 재검증 — 좌표 인코딩을 아예 계산하지 않고 patch_tokens에 곧바로 "
+             "Linear(D->D)->LayerNorm->GELU 레이어 하나만 추가로 통과시킨다. 켜면 "
+             "model_prefix에 _XMLP가 붙는다.",
     )
     parser.add_argument(
         "--top-frac", type=float, default=0.1,
@@ -1751,6 +1782,14 @@ def main():
             model_prefix += "_CAT"
         elif args.coord_embed_learnable_scale:
             model_prefix += "_SC"
+        if args.coord_embed_shuffle:
+            model_prefix += "_SHUF"
+    if args.wsi_extra_mlp:
+        model_prefix += "_XMLP"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     if args.modality_dropout_p > 0:
         model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
     if args.lr is not None:
@@ -2019,6 +2058,8 @@ def main():
                         skip_patch_vit=args.skip_patch_vit, use_clinical=not args.no_clinical,
                         use_coord_embed=args.coord_embed, coord_embed_concat=args.coord_embed_concat,
                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
+                        coord_embed_shuffle=args.coord_embed_shuffle,
+                        use_wsi_extra_mlp=args.wsi_extra_mlp,
                         **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A:
         # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
@@ -2080,6 +2121,8 @@ def main():
                         skip_patch_vit=args.skip_patch_vit,
                         use_coord_embed=args.coord_embed, coord_embed_concat=args.coord_embed_concat,
                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
+                        coord_embed_shuffle=args.coord_embed_shuffle,
+                        use_wsi_extra_mlp=args.wsi_extra_mlp,
                         **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
@@ -2095,7 +2138,9 @@ def main():
                         skip_patch_vit=args.skip_patch_vit,
                         use_coord_embed=args.coord_embed,
                         coord_embed_concat=args.coord_embed_concat,
-                        coord_embed_learnable_scale=args.coord_embed_learnable_scale).to(device)
+                        coord_embed_learnable_scale=args.coord_embed_learnable_scale,
+                        coord_embed_shuffle=args.coord_embed_shuffle,
+                        use_wsi_extra_mlp=args.wsi_extra_mlp).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
@@ -2214,6 +2259,41 @@ def main():
             torch.optim.AdamW, rho=args.sam_rho,
             lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
         )
+    elif args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0:
+        # 2026-08-15: scripts/diagnose_m2_branch_swap.py(fold1, 정상 학습된 체크포인트) 실측 —
+        # M2 공동학습 후 clinical_encoder를 M5(clinical 단독)의 risk_head로 채점하면 M5 네이티브
+        # 대비 internal -0.075/external -0.018로 떨어지는 반면, WSI 브랜치는 M1 네이티브 대비
+        # 거의 안 상한다(+0.021/-0.005). clinical_encoder/clinical_linear(파라미터 수가 WSI
+        # 브랜치보다 훨씬 적음)가 같은 lr로 WSI와 경쟁하면 밀려난다는 가설 — --clinical-lr-mult
+        # 20배로 fold1 internal 0.4433->0.5355 확인. rna_encoder/rna_linear에도 같은 논리가
+        # 적용될 수 있어(M3/M4) --rna-lr-mult로 동일하게 지원 — 여러 브랜치를 동시에 다른
+        # 배율로 올릴 수 있게 일반화(--sam-wsi-only와 동일 관례로 param_group 분리).
+        _LR_MULT_BRANCHES = [
+            ("clinical", ("clinical_encoder", "clinical_linear"), args.clinical_lr_mult),
+            ("rna", ("rna_encoder", "rna_linear"), args.rna_lr_mult),
+        ]
+        attr_to_branch = {
+            attr: (key, mult) for key, attrs, mult in _LR_MULT_BRANCHES if mult != 1.0 for attr in attrs
+        }
+        branch_params = {key: [] for key, _, mult in _LR_MULT_BRANCHES if mult != 1.0}
+        other_params = []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            top = name.split(".")[0]
+            if top in attr_to_branch:
+                key, _ = attr_to_branch[top]
+                branch_params[key].append(p)
+            else:
+                other_params.append(p)
+        param_groups = [{"params": other_params, "lr": cfg.train.lr}]
+        for key, attrs, mult in _LR_MULT_BRANCHES:
+            if mult == 1.0:
+                continue
+            if not branch_params[key]:
+                raise ValueError(f"--{key}-lr-mult != 1.0인데 {attrs} 파라미터가 없는 모델입니다.")
+            param_groups.append({"params": branch_params[key], "lr": cfg.train.lr * mult})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
     else:
         optimizer = torch.optim.AdamW(
             filter(lambda p: p.requires_grad, model.parameters()),

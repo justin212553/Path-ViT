@@ -123,7 +123,8 @@ class ViT_M1(nn.Module):
     def __init__(self, cfg: ModelConfig, precomputed: bool = True, backbone: str = "resnet50",
                  use_attn_dispersion: bool = False, skip_patch_vit: bool = False,
                  use_tumor_type_embed: bool = False, use_coord_embed: bool = False,
-                 coord_embed_concat: bool = False, coord_embed_learnable_scale: bool = False):
+                 coord_embed_concat: bool = False, coord_embed_learnable_scale: bool = False,
+                 coord_embed_shuffle: bool = False, use_wsi_extra_mlp: bool = False):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -163,6 +164,23 @@ class ViT_M1(nn.Module):
                          배율(0.2로 초기화)을 곱해, sinusoidal 원값의 크기가 patch_tokens
                          스케일과 안 맞을 가능성(attn_dispersion에서 실제로 발견된 버그
                          클래스)에 대비해 최적 배율을 backprop이 찾게 한다.
+            coord_embed_shuffle: use_coord_embed=True일 때만 의미 있음. 2026-08-15 — 대조군.
+                         coord-embed-concat이 M1에서 개선된 게 "진짜 위치 정보"를 써서인지,
+                         아니면 coord_fusion이라는 추가 비선형 레이어(파라미터/capacity) 자체가
+                         정규화 효과를 낸 것인지 구분한다. True면 forward마다 patch 순서를
+                         무작위로 섞은 coords를 self.coord_embed에 넣는다 — 슬라이드 전체의
+                         좌표 분포(marginal statistics)는 그대로 보존하면서 "이 패치가 실제로
+                         어디 있는가"라는 patch-position 대응만 파괴한다. coord_fusion의
+                         구조/파라미터 수는 진짜 좌표를 쓸 때와 완전히 동일 — 이걸로도 개선되면
+                         capacity 효과, 개선이 사라지면 진짜 위치 정보가 쓰인다는 뜻.
+            use_wsi_extra_mlp: 2026-08-15 — coord_embed_shuffle 대조군이 fold0/5-fold 전체 다
+                         진짜 좌표 버전과 거의 동일한 결과(entropy도 동일, T-stage와도 무관)를
+                         내면서, coord-embed-concat의 이득이 위치 정보가 아니라 coord_fusion이라는
+                         추가 비선형 레이어 자체의 정규화/capacity 효과임이 확인됐다. 그 결론을
+                         가장 순수한 형태로 다시 검증하는 버전 — coords/좌표 인코딩을 아예 계산조차
+                         하지 않고, patch_tokens에 곧바로 Linear(D->D)->LayerNorm->GELU 레이어
+                         하나만 추가로 통과시킨다(coord_fusion처럼 concat해서 2D->D로 줄이는 게
+                         아니라 D->D). "좌표"라는 개념 자체를 완전히 제거한 최소 형태.
         """
         super().__init__()
         self.precomputed = precomputed
@@ -177,6 +195,7 @@ class ViT_M1(nn.Module):
         self.skip_patch_vit = skip_patch_vit
         self.use_coord_embed = use_coord_embed
         self.coord_embed_concat = coord_embed_concat
+        self.coord_embed_shuffle = coord_embed_shuffle
         if use_coord_embed:
             self.coord_embed = SpatialPositionEmbedding(cfg.embed_dim)
             if coord_embed_concat:
@@ -187,6 +206,13 @@ class ViT_M1(nn.Module):
                 )
             elif coord_embed_learnable_scale:
                 self.coord_embed_scale = nn.Parameter(torch.tensor(0.2))
+        self.use_wsi_extra_mlp = use_wsi_extra_mlp
+        if use_wsi_extra_mlp:
+            self.wsi_extra_mlp = nn.Sequential(
+                nn.Linear(cfg.embed_dim, cfg.embed_dim),
+                nn.LayerNorm(cfg.embed_dim),
+                nn.GELU(),
+            )
         self.tile_decode_workers = getattr(cfg, "tile_decode_workers", 4)
         if use_attn_dispersion:
             # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
@@ -308,13 +334,16 @@ class ViT_M1(nn.Module):
         """
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         if self.use_coord_embed:
-            pos = self.coord_embed(coords)  # (N, D)
+            coord_input = coords[torch.randperm(coords.shape[0], device=coords.device)] if self.coord_embed_shuffle else coords
+            pos = self.coord_embed(coord_input)  # (N, D)
             if self.coord_embed_concat:
                 patch_tokens = self.coord_fusion(torch.cat([patch_tokens, pos], dim=-1))
             elif hasattr(self, "coord_embed_scale"):
                 patch_tokens = patch_tokens + self.coord_embed_scale * pos
             else:
                 patch_tokens = patch_tokens + pos
+        if self.use_wsi_extra_mlp:
+            patch_tokens = self.wsi_extra_mlp(patch_tokens)
         ctx_tokens   = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords, tumor_type=tumor_type)  # (N, D)
         wsi_embed, attn_weights = self.attn_pool(ctx_tokens, context=rna_context)  # (D,), (N,)
         # meanpool_embed: RNA-free mean pooling (attn_pool의 RNA 개입과 무관) — --rna-aux-weight
