@@ -1,23 +1,30 @@
 # M1~M7 3-seed×5-fold 앙상블 — 최종 보고 수치 (95% CI 포함)
 
-2026-08-16 작성. 사용자가 보내준 스프레드시트 캡처(seed×3, k-fold k=5, C-index Ensembled)를
-원본 예측 파일로 재검증하고 bootstrap 95% CI를 추가한 버전. 전부 `data/dataset.py`의
-stage-stratify 커밋(`a9caeaf`, 2026-08-14 13:18) **이전** 코드 상태(OS event 기준 stratify만
-적용) — 원본 실행 시각은 2026-08-08 22:23(external 일괄 평가 기준). 이 시점 명시는
-`paper/notes_wsi_signal_and_seed_variance.md` §3.1과 동일 결정(원본 pre-stratify 수치를
-최종 보고값으로 채택)에 따른 것.
+2026-08-16 작성, 2026-08-16 갱신(M5/M6/M7 최종 재현 완료). 사용자가 보내준 스프레드시트
+캡처(seed×3, k-fold k=5, C-index Ensembled)를 원본 예측 파일로 재검증하고 bootstrap 95% CI를
+추가한 버전.
+
+**M1~M4는 아직 pre-stratify(2026-08-08, stage-stratify 커밋 `a9caeaf` 이전) 값** — HPC
+(`sbatch/final_m1m4_3seed_kfold_hpc/`, uni2native backbone)에서 현재 코드베이스 기준 재현
+중, 끝나는 대로 이 표를 교체한다.
+
+**M5/M6/M7은 현재 코드베이스(stage-stratify 반영 후, uni v2 그대로 — WSI 없어서 uni2native
+해당 없음) 기준 최종 재현 완료**(`scripts/final_m5m6m7_3seed_kfold_local.sh`, 2026-08-16
+16:53~17:47 로컬 실행). pre-stratify 원본(0.564/0.532, 0.659/0.617, 0.637/0.622)과 비교해
+M7 internal(+0.024)을 제외하면 전부 오차범위 안 — WSI가 없는 모델은 stratify 변경에 상대적
+으로 둔감했다.
 
 ## 결과 표
 
-| Model | Input Data | Internal C-index (95% CI) | External C-index (95% CI) | Model Structure |
-|---|---|---|---|---|
-| M1 | WSI only | 0.5698 [0.5055, 0.6351]¹ | 0.5147 [0.4602, 0.5671] | self-attention |
-| M2 | WSI + Clinic | 0.5196 [0.4495, 0.5908] | 0.5199 [0.4532, 0.5840] | self-attention + MLP + concat |
-| M3 | WSI + RNAseq | 0.6481 [0.5814, 0.7111] | 0.6130 [0.5561, 0.6705] | co-attention + MLP + auxiliary task + concat |
-| M4 | WSI + Clinic + RNAseq | 0.6461 [0.5769, 0.7108]¹ | 0.6337 [0.5815, 0.6855] | co-attention + MLP + auxiliary task + concat + cox_add |
-| M5 | Clinic only | 0.564² | 0.532² | MLP |
-| M6 | RNAseq only | 0.659² | 0.617² | MLP |
-| M7 | Clinic + RNAseq | 0.637² | 0.622² | MLP + cox_add |
+| Model | Input Data | Internal C-index (95% CI) | External C-index (95% CI) | Model Structure | 코드 상태 |
+|---|---|---|---|---|---|
+| M1 | WSI only | 0.5698 [0.5055, 0.6351]¹ | 0.5147 [0.4602, 0.5671] | self-attention | pre-stratify(교체 예정) |
+| M2 | WSI + Clinic | 0.5196 [0.4495, 0.5908] | 0.5199 [0.4532, 0.5840] | self-attention + MLP + concat | pre-stratify(교체 예정) |
+| M3 | WSI + RNAseq | 0.6481 [0.5814, 0.7111] | 0.6130 [0.5561, 0.6705] | co-attention + MLP + auxiliary task + concat | pre-stratify(교체 예정) |
+| M4 | WSI + Clinic + RNAseq | 0.6461 [0.5769, 0.7108]¹ | 0.6337 [0.5815, 0.6855] | co-attention + MLP + auxiliary task + concat + cox_add | pre-stratify(교체 예정) |
+| M5 | Clinic only | **0.5647 [0.4934, 0.6353]** | **0.5400 [0.4829, 0.5975]** | MLP | **최종(stage-stratify 반영)** |
+| M6 | RNAseq only | **0.6626 [0.5911, 0.7269]** | **0.6235 [0.5669, 0.6809]** | MLP | **최종(stage-stratify 반영)** |
+| M7 | Clinic + RNAseq | **0.6612 [0.5901, 0.7283]** | **0.6267 [0.5711, 0.6826]** | MLP + cox_add | **최종(stage-stratify 반영)** |
 
 ¹ **M1/M4 Internal은 3seed가 아니라 2seed(84,126) 재구성값이다.** seed42의 원본 held-out
 예측(`kfold_preds`)과 체크포인트가 이후 세션 작업(2026-08-16, M1_POOL/PMA 재검증 학습)에
@@ -26,11 +33,16 @@ stage-stratify 커밋(`a9caeaf`, 2026-08-14 13:18) **이전** 코드 상태(OS e
 External은 두 모델 다 3seed 전체가 그대로 살아있어 스프레드시트 원본값과 정확히 일치한다
 (M1=0.5147≈0.5150, M4=0.6337≈0.634).
 
-² **M5/M6/M7은 CI 계산 불가.** 이 세 모델의 2026-08-08 원본 환자 단위 예측 파일이 이번
-세션 중(2026-08-15, M5/M6/M7 stratify-이후 재검증 작업) 동일 파일명으로 덮어써져 raw
-prediction이 남아있지 않다 — bootstrap resample에 필요한 환자 단위 risk score 자체가 없다.
-표의 값은 `.logs/multiseed_summary_20260808_222325.log`에 인쇄된 점추정치 그대로다(재계산
-아님, 이 로그 자체는 안전).
+## 재현 커맨드 (M5~M7, 최종/현재 코드베이스)
+
+```bash
+python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M5_STG_R --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M6_INT1500 --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M7_INT1500_STG_R_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_external_preds.py --dataset cptac --model M5_STG_R --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_external_preds.py --dataset cptac --model M6_INT1500 --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_external_preds.py --dataset cptac --model M7_INT1500_STG_R_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+```
 
 ## 재현 커맨드 (M1~M4, 원본 예측 파일 기준)
 
