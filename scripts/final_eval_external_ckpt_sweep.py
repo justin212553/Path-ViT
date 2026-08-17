@@ -52,9 +52,15 @@ def _find_ckpt(seed: int, fold: int, include: str, exclude: str | None, suffix: 
         p for p in CKPT_DIR.glob(pattern)
         if f"seed{seed}_" in p.name and include in p.name and (exclude is None or exclude not in p.name)
     ]
-    if len(candidates) != 1:
-        print(f"  [SKIP] seed={seed} fold={fold} include={include!r}: {len(candidates)}개 매칭(1개여야 함)")
+    if len(candidates) == 0:
+        print(f"  [SKIP] seed={seed} fold={fold} include={include!r}: 매칭 0개")
         return None
+    if len(candidates) > 1:
+        # 이전 세션(예: uni2native 파일럿, paper notes 5번 항목)에 같은 태그로 이미 돌려둔 옛날
+        # 체크포인트가 남아있어 겹치는 경우 — mtime이 가장 최근(오늘 새로 학습한 것)을 택한다.
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        print(f"  [WARN] seed={seed} fold={fold} include={include!r}: {len(candidates)}개 매칭 -> "
+              f"최신 파일 선택: {candidates[0].name} (mtime={candidates[0].stat().st_mtime:.0f})")
     return candidates[0]
 
 
