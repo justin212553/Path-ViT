@@ -25,6 +25,8 @@
 
 cd /pub/wonseukl/Path-ViT/
 
+mkdir -p paper/.hpc
+
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
