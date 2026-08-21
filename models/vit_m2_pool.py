@@ -28,7 +28,7 @@ from .vit_m1 import ViT_M1
 from .vit_m1_pool import SelfAttentionPooling
 from .vit_m4a import CoAttentionPooling
 from .multi_component_pooling import MultiComponentPooling
-from .clinical_encoder import ClinicalEncoder
+from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
 from .spatial_features import attention_dispersion
 from config import ModelConfig
 
@@ -44,6 +44,8 @@ class ViT_M2_Pool(ViT_M1):
         num_heads: int = 2,
         use_margin: bool = False,
         margin_stats: tuple[float, float] | None = None,
+        use_staging: bool = False,
+        stage_stats: dict[str, tuple[float, float]] | None = None,
         use_age_sex: bool = True,
         use_attn_dispersion: bool = False,
         pooling_mode: str = "coattn",
@@ -59,6 +61,10 @@ class ViT_M2_Pool(ViT_M1):
         self.pooling_mode = pooling_mode
         self.combine_mode = combine_mode
         self.use_margin = use_margin
+        # 2026-08-17: M4(--clinical-staging --clinical-margin)와 clinical branch 정보량을
+        # 공정하게 맞추기 위해 staging(T/N/M/grade) 지원 추가 — models/vit_m2.py와 동일 관례
+        # (ClinicalEncoder는 이미 use_staging을 지원하므로 여기선 그대로 통과시키기만 하면 됨).
+        self.use_staging = use_staging
         self.use_age_sex = use_age_sex
         self.multi_pool = MultiComponentPooling(cfg.embed_dim)
         del self.attn_pool  # ViT_M1의 단일-벡터 ABMIL은 안 쓴다(multi_pool로 대체)
@@ -69,7 +75,7 @@ class ViT_M2_Pool(ViT_M1):
         if need_clinical_encoder:
             self.clinical_encoder = ClinicalEncoder(
                 cfg.embed_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
-                use_age_sex=use_age_sex,
+                use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
             )
 
         if pooling_mode == "coattn":
@@ -87,9 +93,18 @@ class ViT_M2_Pool(ViT_M1):
                 m_mean, m_std = margin_stats
                 self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
                 self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
-            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0)
+            if use_staging:
+                if stage_stats is None:
+                    raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
+                for field in STAGE_FIELDS:
+                    mean, std = stage_stats[field]
+                    short = _STAGE_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + \
+                (2 * len(STAGE_FIELDS) if use_staging else 0)
             if raw_dim == 0:
-                raise ValueError("use_age_sex=False이고 use_margin=False면 clinical 입력이 없습니다.")
+                raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
             self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 없는 M1_POOL과 동일
 
@@ -130,12 +145,17 @@ class ViT_M2_Pool(ViT_M1):
         patient_embed: torch.Tensor,  # (4, D) — 환자 단위로 평균 풀링된 4개 관점
         age_years: torch.Tensor,
         sex_idx: torch.Tensor,
+        stage_ord: dict[str, torch.Tensor] | None = None,  # self.use_staging=True일 때만 필요
         margin_ord: torch.Tensor | None = None,  # self.use_margin=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,  # (spatial_feat_dim,)
     ) -> torch.Tensor:
         z_clinical = None
         if hasattr(self, "clinical_encoder"):
-            clinical_kwargs = {} if margin_ord is None else {"margin_ord": margin_ord.unsqueeze(0)}
+            clinical_kwargs = {}
+            if stage_ord is not None:
+                clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+            if margin_ord is not None:
+                clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
             z_clinical = self.clinical_encoder(
                 age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
             ).squeeze(0)  # (D,)
@@ -157,8 +177,7 @@ class ViT_M2_Pool(ViT_M1):
                        margin_ord: torch.Tensor | None = None,
                        stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """combine_mode="cox_add" 전용 — models/vit_m2.py::ViT_M2._clinical_raw와 동일 관례.
-        stage_ord는 M2_POOL이 staging을 지원하지 않아 시그니처 호환용으로만 받는다(train.py의
-        공용 dispatch가 모든 cox_add 모델에 동일한 인자로 호출한다)."""
+        2026-08-17: staging 지원 추가(이전엔 시그니처 호환용으로만 받고 무시했음)."""
         feats = []
         if self.use_age_sex:
             age_z = (age_years.float() - self.age_mean) / self.age_std
@@ -168,4 +187,13 @@ class ViT_M2_Pool(ViT_M1):
             known = (ordv >= 0).float()
             z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
             feats += [z, known]
+        if self.use_staging:
+            for field in STAGE_FIELDS:
+                short = _STAGE_BUFFER_NAMES[field]
+                ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
         return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)

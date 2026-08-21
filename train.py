@@ -323,11 +323,19 @@ def _patient_risk(
                 _margin_ord_from_patient(patient_slides, device)
                 if getattr(model, "use_margin", False) else None
             )
-            # M2_POOL은 staging을 지원하지 않는다 — 아래 공용 cox_add 블록이 모든 분기에서
-            # stage_ord를 참조하므로(2026-08-07, margin_ord와 같은 버그 클래스) None으로 정의해둔다.
-            stage_ord = None
+            # 2026-08-17: M2_POOL도 staging 지원 추가(models/vit_m2_pool.py) — combine_with_clinical
+            # 분기(아래)와 동일 관례로 clinical_encoder.use_staging까지 함께 확인한다(margin_ord와
+            # 같은 이유, clinical_encoder 자체가 없는 cox_add+selfattn 조합 대비).
+            _clinical_enc = getattr(model, "clinical_encoder", None)
+            stage_ord = (
+                _stage_ord_from_patient(patient_slides, device)
+                if getattr(model, "use_staging", False) or
+                   (_clinical_enc is not None and getattr(_clinical_enc, "use_staging", False))
+                else None
+            )
             patient_embed = model.combine_with_clinical_pool(
-                patient_embed, age_years, sex_idx, margin_ord=margin_ord, spatial_feat=patient_spatial_feat,
+                patient_embed, age_years, sex_idx, stage_ord=stage_ord, margin_ord=margin_ord,
+                spatial_feat=patient_spatial_feat,
             )  # (2D,) (+ spatial_feat_dim). combine_mode="cox_add"면 (D,)/(D+1,) — clinical은
             # 여기서 안 섞이고 아래 공용 블록에서 더해짐(models/vit_m2_pool.py 2026-08-07).
         elif hasattr(model, "combine_with_clinical"):
@@ -1645,11 +1653,11 @@ def main():
         )
     if args.clinical_staging and not (
         args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
-        or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5
+        or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M2_POOL
     ):
         raise ValueError(
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
-            "--PMA/--M4A_FF/--M2_FF/--M5)에서만 사용 가능합니다."
+            "--PMA/--M4A_FF/--M2_FF/--M5/--M2_POOL)에서만 사용 가능합니다."
         )
     if (args.rna_dim is not None or args.clinical_dim is not None) and not args.PMA:
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
@@ -2287,7 +2295,7 @@ def main():
                              use_attn_dispersion=args.attn_dispersion,
                              pooling_mode=args.pooling_mode, combine_mode=args.combine_mode,
                              use_wsi_extra_mlp=args.wsi_extra_mlp,
-                             **margin_kwargs).to(device)
+                             **stage_kwargs, **margin_kwargs).to(device)
     elif args.M2:
         model = ViT_M2(cfg.model, age_mean=age_mean, age_std=age_std,
                         precomputed=cfg.data.precomputed, backbone=args.backbone,
