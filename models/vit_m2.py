@@ -79,23 +79,14 @@ class ViT_M2(ViT_M1):
             # Late Fusion risk head: [z_wsi ‖ z_clinical] (2D,) [+ dispersion(1,)] → risk_score (1,)
             risk_input_dim = cfg.embed_dim * 2 + (1 if use_attn_dispersion else 0)
         else:  # cox_add
-            self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
-            self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
-            if use_margin:
-                m_mean, m_std = margin_stats
-                self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
-                self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
-            if use_staging:
-                if stage_stats is None:
-                    raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
-                for field in STAGE_FIELDS:
-                    mean, std = stage_stats[field]
-                    short = _STAGE_BUFFER_NAMES[field]
-                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
-                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
-            # age/sex(2) [+ margin(2)] [+ staging(8)]
-            raw_dim = 2 + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
-            self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
+            # 2026-08-20: RNA cox_add(rna_linear가 RNAEncoder 출력을 받음)와 비대칭이었던 버그
+            # 수정 — raw feature를 직접 clinical_linear에 넣던 것을 concat 모드와 동일한
+            # ClinicalEncoder(MLP)를 거치도록 바꾼다.
+            self.clinical_encoder = ClinicalEncoder(
+                cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
+                use_margin=use_margin, margin_stats=margin_stats,
+            )
+            self.clinical_linear = nn.Linear(cfg.embed_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 없는 M1과 동일
             # cox_add는 risk_head에 clinical을 넣지 않는다 — z_wsi(+dispersion)만.
             risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
@@ -144,24 +135,14 @@ class ViT_M2(ViT_M1):
             fused = torch.cat([fused, spatial_feat], dim=-1)
         return fused
 
-    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
-                       margin_ord: torch.Tensor | None = None,
-                       stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_raw와 동일 관례."""
-        age_z = (age_years.float() - self.age_mean) / self.age_std
-        feats = [age_z, sex_idx.float()]
-        if self.use_margin:
-            ordv = margin_ord.float()
-            known = (ordv >= 0).float()
-            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
-            feats += [z, known]
-        if self.use_staging:
-            for field in STAGE_FIELDS:
-                short = _STAGE_BUFFER_NAMES[field]
-                ordv = stage_ord[field].float()
-                known = (ordv >= 0).float()
-                mean = getattr(self, f"{short}_mean")
-                std = getattr(self, f"{short}_std")
-                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
-                feats += [z, known]
-        return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)
+    def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
+                         margin_ord: torch.Tensor | None = None,
+                         stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례
+        (2026-08-20, raw feature 직접 반환에서 ClinicalEncoder(MLP) 임베딩 반환으로 교체)."""
+        clinical_kwargs = {}
+        if stage_ord is not None:
+            clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        if margin_ord is not None:
+            clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
+        return self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs)  # (1, D)

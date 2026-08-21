@@ -387,8 +387,8 @@ def _patient_risk(
             # models/vit_pma.py::ViT_PMA combine_mode="cox_add" — clinical은 위 patient_embed에
             # 안 섞여 있고(combine_with_clinical_rna가 concat 안 함), 여기서 고전적 Cox 가산항으로
             # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
-            clin_raw = model._clinical_raw(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
-            clinical_term = model.clinical_linear(clin_raw).view(1)
+            clin_embed = model._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
+            clinical_term = model.clinical_linear(clin_embed).view(1)
             if branch_risk_out is not None:
                 branch_risk_out["clinical"] = clinical_term
             risk = risk + clinical_term
