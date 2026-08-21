@@ -26,6 +26,10 @@ CONFIGS = [
     ("M2_hybrid", ["--M2_POOL", "--backbone", "uni2native", "--attn-dispersion", "--patch-keep-frac", "0.8",
                    "--wsi-extra-mlp", "--clinical-lr-mult", "20.0"],
      "M2_POOL_uni2native_SS_DISP_XMLP_CLR20", None, "m2_pool"),
+    # 2026-08-21: 최종 채택 M2 레시피(selfattn pooling + cox_add raw feature, clinical-margin/staging 포함).
+    ("M2_final", ["--M2_POOL", "--backbone", "uni2native", "--attn-dispersion", "--patch-keep-frac", "0.8",
+                  "--clinical-margin", "--clinical-staging", "--pooling-mode", "selfattn", "--combine-mode", "cox_add"],
+     "M2_POOL_uni2native_SS_STG_R_DISP_COX_ADD_SELFATTN", None, "m2_pool"),
     ("M3_baseline", ["--PMA", "--no-clinical", "--rna-genes", "literature_1500_intersection",
                       "--backbone", "uni2native", "--patch-keep-frac", "0.8", "--attn-dispersion",
                       "--rna-aux-weight", "1.0"],

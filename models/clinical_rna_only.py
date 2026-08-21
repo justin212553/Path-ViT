@@ -32,6 +32,18 @@ findings_backlog.md 13번 항목 참조) — 원래의 단순 선형(LayerNorm�
 이 비율을 다시 바꿀 일은 거의 없을 것이므로 --rna-dim/--clinical-dim 인자 없이도 안전한
 기본값(64/64, 균일)으로 코드 자체를 고정한다. 필요하면 여전히 --rna-dim/--clinical-dim으로
 덮어쓸 수 있다.
+
+2026-08-20~21: RNA 인코더를 RNAEncoderExtend(레퍼런스 이식)에서 RNAEncoder(M3/M4/M6와 동일,
+hidden=256)로 교체 — M3/M4/M6와 다른 구조를 썼던 게 부당 비교였다는 지적(사용자)에 따른 것.
+동시에 clinical cox_add/film을 raw feature 직결에서 ClinicalEncoder(MLP) 경유로 바꿔 RNA
+cox_add(rna_linear가 RNAEncoder 출력을 받음)와 대칭을 맞췄으나, 두 변경을 분리한 2x2
+ablation(--legacy-rna-encoder/--legacy-clinical-coxadd, 각 2seed×5fold) 결과 internal
+c-index 하락(-0.027)의 거의 전부(-0.025)가 clinical의 ClinicalEncoder 경유 때문으로 확인됨
+(RNA 인코더 교체는 -0.006으로 거의 무해). 결론: RNA 인코더 교체는 유지하고, clinical
+cox_add는 raw feature 직결 방식으로 원복(clinical 신호가 약해 MLP를 거치면 오히려 과적합만
+늘어난다는 뜻 — RNA는 신호가 강해 인코더가 도움되지만 clinical은 반대). ablation용
+--legacy-rna-encoder/--legacy-clinical-coxadd 플래그는 결론이 났으므로 삭제하고, raw feature
+직결을 cox_add의 유일한/영구 구현으로 고정한다.
 """
 import torch
 import torch.nn as nn
@@ -96,11 +108,10 @@ class ClinicalRNAOnly(nn.Module):
         # 프로젝트의 다른 모델들과 같은 절대 폭(64)으로 맞춰볼 수 있다.
         clinical_dim = clinical_dim or CLINICAL_EMBED_DIM
         rna_dim = rna_dim or RNA_EMBED_DIM
-        # 2026-08-20: 레퍼런스 이식(RNAEncoderExtend, hidden=rna_dim, dropout=0.25)을 버리고
-        # M3/M4/M6와 동일한 RNAEncoder(hidden_dim=256 기본값, dropout=0.3 기본값)로 통일 —
-        # "레퍼런스는 어디까지나 레퍼런스, 본 연구의 M1~M7 비교는 전부 같은 설정으로" (사용자
-        # 지시). rna_dim(출력 차원, 64)은 그대로 유지 — cfg.embed_dim과 이미 같은 값이라 여기선
-        # hidden_dim/dropout/인코더 구조만 바뀐다.
+        # 레퍼런스 이식(RNAEncoderExtend)을 버리고 M3/M4/M6와 동일한 RNAEncoder(hidden_dim=256
+        # 기본값, dropout=0.3 기본값)로 통일 — "레퍼런스는 어디까지나 레퍼런스, 본 연구의 M1~M7
+        # 비교는 전부 같은 설정으로"(사용자 지시). rna_dim(출력 차원, 64)은 그대로 유지 —
+        # cfg.embed_dim과 이미 같은 값이라 여기선 hidden_dim/dropout/인코더 구조만 바뀐다.
         self.rna_encoder = RNAEncoder(rna_input_dim, rna_dim, dropout=0.3)
 
         if combine_mode == "concat":
@@ -133,34 +144,67 @@ class ClinicalRNAOnly(nn.Module):
                     nn.Linear(risk_hidden_dim, 1),
                 )
         else:
-            # 2026-08-20: film/cox_add 둘 다 raw feature를 직접 쓰던 것을, RNA(rna_encoder,
-            # RNAEncoder MLP를 항상 거침)와 대칭 맞춰 ClinicalEncoder(MLP)를 거친 임베딩을
-            # 쓰도록 통일 — 이전엔 clinical만 encoder 없이 z-score 원본을 곧장 얕은
-            # linear/gamma/beta에 넣어 RNA 대비 표현력이 비대칭이었다(사용자 지적).
-            self.clinical_encoder = ClinicalEncoder(
-                clinical_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
-                use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
-            )
             self.risk_head = nn.Sequential(
                 nn.LayerNorm(rna_dim),
                 nn.Linear(rna_dim, 1),
             )
-            if combine_mode == "film":
+            if combine_mode == "cox_add":
+                # raw z-score feature를 clinical_linear(bias 없음, zero-init)에 직접 넣는다 —
+                # ClinicalEncoder(MLP) 경유는 ablation에서 internal -0.025로 확인되어 채택하지 않음
+                # (models/vit_pma.py::ViT_PMA cox_add 분기와 동일 관례).
+                self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
+                self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+                if use_margin:
+                    m_mean, m_std = margin_stats
+                    self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
+                    self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
+                if use_staging:
+                    for field in STAGE_FIELDS:
+                        mean, std = stage_stats[field]
+                        short = _STAGE_BUFFER_NAMES[field]
+                        self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                        self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+                raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+                self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
+                nn.init.zeros_(self.clinical_linear.weight)
+            else:  # film — cox_add ablation과 무관, ClinicalEncoder 경유 유지
+                self.clinical_encoder = ClinicalEncoder(
+                    clinical_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
+                    use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
+                )
                 self.film_gamma = nn.Linear(clinical_dim, 1)
                 self.film_beta = nn.Linear(clinical_dim, 1)
                 nn.init.zeros_(self.film_gamma.weight)
                 nn.init.constant_(self.film_gamma.bias, 1.0)  # γ≈1(항등) 근처에서 시작
                 nn.init.zeros_(self.film_beta.weight)
                 nn.init.zeros_(self.film_beta.bias)            # β≈0(항등) 근처에서 시작
-            else:  # cox_add
-                self.clinical_linear = nn.Linear(clinical_dim, 1, bias=False)
-                nn.init.zeros_(self.clinical_linear.weight)          # 초기엔 risk_head(z_rna)와 동일
 
     def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                          margin_ord: torch.Tensor | None = None,
                          stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """film/cox_add 전용 — 2026-08-20, raw feature 직접 반환에서 ClinicalEncoder(MLP)
-        임베딩 반환으로 교체(models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례)."""
+        """film/cox_add 전용. cox_add는 raw z-score feature를 (1, raw_dim)으로 직접 반환하고
+        (models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례), film은 ClinicalEncoder(MLP)
+        임베딩 (1, D)을 반환한다."""
+        if self.combine_mode == "cox_add":
+            feats = []
+            if self.use_age_sex:
+                age_z = (age_years.float() - self.age_mean) / self.age_std
+                feats += [age_z, sex_idx.float()]
+            if self.use_margin:
+                ordv = margin_ord.float()
+                known = (ordv >= 0).float()
+                z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+                feats += [z, known]
+            if self.use_staging:
+                for field in STAGE_FIELDS:
+                    short = _STAGE_BUFFER_NAMES[field]
+                    ordv = stage_ord[field].float()
+                    known = (ordv >= 0).float()
+                    mean = getattr(self, f"{short}_mean")
+                    std = getattr(self, f"{short}_std")
+                    z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                    feats += [z, known]
+            return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)
         clinical_kwargs = {}
         if margin_ord is not None:
             clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)

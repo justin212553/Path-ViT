@@ -2537,8 +2537,12 @@ def main():
     elif args.M1_POOL:
         print(f"Model: ViT_M1_Pool (ViT+다성분 pooling + CoAttention(학습된 고정 query), WSI 단독)")
     elif args.M2_POOL:
-        print(f"Model: ViT_M2_Pool (ViT+다성분 pooling + CoAttention(Clinical query, R={args.clinical_margin}) + "
-              f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f})")
+        pooling_desc = ("CoAttention(Clinical query)" if args.pooling_mode == "coattn"
+                         else "SelfAttention(clinical 미개입)")
+        combine_desc = ("Clinical MLP concat" if args.combine_mode == "concat"
+                         else "Clinical raw feature cox_add")
+        print(f"Model: ViT_M2_Pool (ViT+다성분 pooling + {pooling_desc} + {combine_desc}, "
+              f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")
     elif args.M2:
         print(f"Model: ViT_M2 (ViT+ABMIL + Clinical age/sex MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f})")

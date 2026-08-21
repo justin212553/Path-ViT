@@ -20,6 +20,12 @@ self-attention(clinical 개입 없음)으로 하고, clinical은 ViT_PMA/ViT_M2�
   - combine_mode="concat"(기본, 기존 동작): z_clinical을 risk_head 입력에 concat.
   - combine_mode="cox_add": clinical을 임베딩하지 않고 risk_head(z_wsi) 스칼라에 zero-init
     가산항으로 직접 더한다(train.py의 공용 cox_add 처리 블록, ViT_PMA/ViT_M2와 동일 관례).
+
+2026-08-21: pooling_mode="selfattn" + combine_mode="cox_add" 조합을 M2의 최종 레시피로 채택.
+이 조합에서는 ClinicalEncoder를 아예 만들지 않는다(clinical이 pooling에 관여하지 않고, cox_add도
+raw feature를 직접 씀) — M2는 baseline/floor 모델이라 M3/M4를 이길 일이 없으므로 복잡한
+co-attention/MLP 구조보다 단순한 조합을 선택. (한때 대칭성을 위해 모든 조합에서 ClinicalEncoder를
+항상 생성하도록 바꿨으나, M7 ablation에서 raw feature 직결 방식이 더 낫다고 확인되어 원복.)
 """
 import torch
 import torch.nn as nn
@@ -69,14 +75,17 @@ class ViT_M2_Pool(ViT_M1):
         self.multi_pool = MultiComponentPooling(cfg.embed_dim)
         del self.attn_pool  # ViT_M1의 단일-벡터 ABMIL은 안 쓴다(multi_pool로 대체)
 
-        # z_clinical 임베딩은 (a) co-attention query로 쓰거나 (b) concat하거나 (c) cox_add 가산항의
-        # 입력으로 쓸 때 필요 — 2026-08-20 이전엔 cox_add+selfattn 조합만 안 만들고 raw feature를
-        # _clinical_raw()로 직접 clinical_linear에 넣었으나, RNA cox_add(rna_linear가 RNAEncoder
-        # 출력을 받음)와 비대칭이라 모든 조합에서 만들도록 통일했다.
-        self.clinical_encoder = ClinicalEncoder(
-            cfg.embed_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
-            use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
-        )
+        # z_clinical 임베딩(ClinicalEncoder)은 (a) co-attention query로 쓰거나 (b) concat할 때만
+        # 필요하다. combine_mode="cox_add"는 raw feature를 _clinical_embed()로 직접 clinical_linear에
+        # 넣으므로 ClinicalEncoder가 필요 없다(2026-08-20: 한때 대칭성을 위해 항상 생성하도록 바꿨으나
+        # ablation에서 internal -0.025로 확인되어 원복 — clinical 신호가 약해 MLP를 거치면 과적합만
+        # 늘어난다).
+        need_clinical_encoder = (pooling_mode == "coattn") or (combine_mode == "concat")
+        if need_clinical_encoder:
+            self.clinical_encoder = ClinicalEncoder(
+                cfg.embed_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
+                use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
+            )
 
         if pooling_mode == "coattn":
             self.component_coattn = CoAttentionPooling(
@@ -86,10 +95,26 @@ class ViT_M2_Pool(ViT_M1):
             self.component_selfattn = SelfAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
 
         if combine_mode == "cox_add":
-            # models/vit_m2.py::ViT_M2 cox_add 분기와 동일 관례 — 2026-08-20, clinical_linear가
-            # raw feature가 아니라 위 self.clinical_encoder(항상 생성됨)의 출력(cfg.embed_dim)을
-            # 받도록 수정.
-            self.clinical_linear = nn.Linear(cfg.embed_dim, 1, bias=False)
+            # models/vit_pma.py::ViT_PMA cox_add 분기와 동일 관례 — raw z-score feature를 직접
+            # clinical_linear(bias 없음, zero-init)에 넣는다.
+            self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
+            self.register_buffer("age_std", torch.tensor(age_std, dtype=torch.float32))
+            if use_margin:
+                m_mean, m_std = margin_stats
+                self.register_buffer("margin_mean", torch.tensor(m_mean, dtype=torch.float32))
+                self.register_buffer("margin_std", torch.tensor(m_std, dtype=torch.float32))
+            if use_staging:
+                if stage_stats is None:
+                    raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
+                for field in STAGE_FIELDS:
+                    mean, std = stage_stats[field]
+                    short = _STAGE_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+            if raw_dim == 0:
+                raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
+            self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 없는 M1_POOL과 동일
 
         # risk_head 입력: [z_wsi(D)] (+ z_clinical(D), combine_mode="concat"일 때만) (+ dispersion(1,))
@@ -150,7 +175,7 @@ class ViT_M2_Pool(ViT_M1):
             z_wsi = self.component_selfattn(patient_embed)  # clinical 개입 없음(models/vit_m1_pool.py와 동일)
 
         if self.combine_mode == "cox_add":
-            fused = z_wsi  # clinical은 여기서 안 섞이고, 호출부(train.py)가 _clinical_raw()로 별도 계산해 더함
+            fused = z_wsi  # clinical은 여기서 안 섞이고, 호출부(train.py)가 _clinical_embed()로 별도 계산해 더함
         else:
             fused = torch.cat([z_wsi, z_clinical], dim=-1)  # (2D,)
         if spatial_feat is not None:
@@ -160,11 +185,24 @@ class ViT_M2_Pool(ViT_M1):
     def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                          margin_ord: torch.Tensor | None = None,
                          stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """combine_mode="cox_add" 전용 — models/vit_m2.py::ViT_M2._clinical_embed와 동일 관례.
-        2026-08-20: raw feature 직접 반환에서 ClinicalEncoder(MLP) 임베딩 반환으로 교체."""
-        clinical_kwargs = {}
-        if stage_ord is not None:
-            clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
-        if margin_ord is not None:
-            clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
-        return self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs)  # (1, D)
+        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례
+        (raw z-score feature를 (1, raw_dim)으로 반환). stage_ord: self.use_staging=True일 때만 필요."""
+        feats = []
+        if self.use_age_sex:
+            age_z = (age_years.float() - self.age_mean) / self.age_std
+            feats += [age_z, sex_idx.float()]
+        if self.use_margin:
+            ordv = margin_ord.float()
+            known = (ordv >= 0).float()
+            z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
+            feats += [z, known]
+        if self.use_staging:
+            for field in STAGE_FIELDS:
+                short = _STAGE_BUFFER_NAMES[field]
+                ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
+        return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)
