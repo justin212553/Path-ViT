@@ -6,7 +6,11 @@ hybrid, M4 baseline/hybrid)가 --external로 학습은 했지만, train.py의 �
 --eval-external-ckpt로 다시 읽어 external만 재평가/CSV 저장한다(재학습 없음).
 
 HPC에서 실행: python -m scripts.final_eval_external_ckpt_sweep
+전체 실행 시간이 3시간을 넘겨 SLURM --time에 잘리는 일이 반복돼서(2026-08-30, CONFIGS가
+늘어날수록 심해짐) --only로 라벨을 골라 일부만 재실행할 수 있게 했다:
+    python -m scripts.final_eval_external_ckpt_sweep --only M4_baseline,M4_hybrid,M4_noaux,M4_nodisp
 """
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -85,8 +89,23 @@ def _find_ckpt(seed: int, fold: int, include: str, exclude: str | None, suffix: 
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--only", type=str, default=None,
+                         help="콤마로 구분한 label 목록(CONFIGS의 첫 항목, 예: M4_baseline,M4_noaux). "
+                              "생략하면 전체 CONFIGS를 순서대로 실행(기존 동작).")
+    args = parser.parse_args()
+
+    configs = CONFIGS
+    if args.only:
+        wanted = set(args.only.split(","))
+        known = {c[0] for c in CONFIGS}
+        unknown = wanted - known
+        if unknown:
+            raise ValueError(f"CONFIGS에 없는 label: {sorted(unknown)} (있는 것: {sorted(known)})")
+        configs = [c for c in CONFIGS if c[0] in wanted]
+
     n_ok, n_skip, n_fail = 0, 0, 0
-    for label, train_args, include, exclude, suffix in CONFIGS:
+    for label, train_args, include, exclude, suffix in configs:
         print(f"\n########## {label} ##########")
         for seed in SEEDS:
             for fold in range(N_FOLDS):
@@ -105,7 +124,7 @@ def main():
                 else:
                     n_fail += 1
                     print(f"  [FAIL] seed={seed} fold={fold} (exit {result.returncode})")
-    print(f"\n=== 완료: 성공 {n_ok} / 실패 {n_fail} / 체크포인트 못 찾음(skip) {n_skip} (전체 {len(CONFIGS) * len(SEEDS) * N_FOLDS}) ===")
+    print(f"\n=== 완료: 성공 {n_ok} / 실패 {n_fail} / 체크포인트 못 찾음(skip) {n_skip} (전체 {len(configs) * len(SEEDS) * N_FOLDS}) ===")
 
 
 if __name__ == "__main__":
