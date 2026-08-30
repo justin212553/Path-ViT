@@ -10,12 +10,18 @@
 # 저장되는 건 동일하니, 완료 즉시 백업할 것).
 #
 # 완료 후:
-#   python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M5_STG_R --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+#   python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M5_STG_R_RAWLIN --seeds 42,84,126 --n-folds 5 --bootstrap 2000
 #   python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M6_INT1500 --seeds 42,84,126 --n-folds 5 --bootstrap 2000
 #   python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M7_INT1500_STG_R_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
-#   python scripts/pool_multiseed_external_preds.py --dataset cptac --model M5_STG_R --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+#   python scripts/pool_multiseed_external_preds.py --dataset cptac --model M5_STG_R_RAWLIN --seeds 42,84,126 --n-folds 5 --bootstrap 2000
 #   python scripts/pool_multiseed_external_preds.py --dataset cptac --model M6_INT1500 --seeds 42,84,126 --n-folds 5 --bootstrap 2000
 #   python scripts/pool_multiseed_external_preds.py --dataset cptac --model M7_INT1500_STG_R_COX_ADD --seeds 42,84,126 --n-folds 5 --bootstrap 2000
+#
+# 2026-08-21: M5는 raw_linear(ClinicalEncoder MLP 없이 raw feature -> Linear(1) 직결, 고전적
+# Cox 회귀)를 최종으로 채택 — M2/M4/M7의 clinical cox_add도 전부 raw feature 직결이라(2026-08-21
+# 원복), M5만 MLP를 쓸 architectural 근거가 없다는 사용자 지적(성능도 raw_linear가 오차범위 내로
+# 동일/소폭 하락이라 통일하는 게 이득). 이제 clinical 브랜치는 전 모델에서 예외 없이 raw feature
+# 직결 — RNA/WSI만 학습되는 인코더(RNAEncoder/ViT)를 쓴다는 일관된 아키텍처 원칙이 완성됨.
 #
 # 사용법: bash scripts/final_m5m6m7_3seed_kfold_local.sh
 set -e
@@ -26,7 +32,7 @@ SEEDS=(42 84 126)
 N_FOLDS=5
 
 declare -A MODEL_ARGS
-MODEL_ARGS[M5]="--M5 --clinical-margin --clinical-staging"
+MODEL_ARGS[M5]="--M5 --clinical-margin --clinical-staging --raw-linear"
 MODEL_ARGS[M6]="--M6 --rna-genes literature_1500_intersection"
 MODEL_ARGS[M7]="--M7 --rna-genes literature_1500_intersection --clinical-margin --clinical-staging --combine-mode cox_add"
 

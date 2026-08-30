@@ -106,10 +106,12 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
         )
     if has_rna:
         return model(p["rna"].to(device, non_blocking=True))
+    # 2026-08-21: ClinicalOnly(M5)의 raw_linear=True 버전은 clinical_encoder 자체가 없다
+    # (models/clinical_only.py) — M7과 동일하게 model 자체의 use_margin/use_staging을 본다.
     margin_kwargs = {}
-    if getattr(model.clinical_encoder, "use_margin", False):
+    if getattr(model, "use_margin", False):
         margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
-    if getattr(model.clinical_encoder, "use_staging", False):
+    if getattr(model, "use_staging", False):
         margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
     return model(
         p["age_years"].to(device, non_blocking=True),
@@ -317,6 +319,15 @@ def _parse_args() -> argparse.Namespace:
              "비교하려는 용도. 켜면 model_prefix에 _STG 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--raw-linear", action="store_true",
+        help="--M5 전용, 2026-08-21 — ClinicalEncoder(MLP) 없이 raw z-score feature를 바로 "
+             "Linear(1)에 넣는 고전적 Cox 회귀로 M5를 만든다. M7의 clinical cox_add ablation에서 "
+             "clinical 신호가 약할 땐 MLP 경유가 raw feature 직결보다 못하다는 결과(internal "
+             "-0.025)가 나와서, M5도 MLP 유무 자체가 성능에 영향을 주는지 참고 삼아 확인하는 "
+             "ablation(models/clinical_only.py::ClinicalOnly raw_linear 참조). 켜면 model_prefix에 "
+             "_RAWLIN 접미사가 붙는다.",
+    )
+    parser.add_argument(
         "--clinical-dim", type=int, default=None,
         help="--M7 전용: clinical_encoder 출력 차원(기본 None=모듈 상수, models/"
              "clinical_rna_only.py — 2026-08-05부터 64, M1~M6와 균일). 필요하면 이 인자로 "
@@ -415,6 +426,9 @@ def main():
             "TCGA 전체를 external test)에서만 의미가 있습니다 — CPTAC train split만으로 뽑힌 "
             "유전자셋이라 다른 조합에서 쓰면 코호트 불일치로 결과 해석이 잘못됩니다."
         )
+
+    if args.raw_linear and not args.M5:
+        raise ValueError("--raw-linear는 --M5 전용입니다.")
 
     with_clinical = args.M5 or args.M7
     with_rna = args.M6 or args.M6X or args.M7
@@ -518,6 +532,8 @@ def main():
         if args.no_age_sex:
             # M5_R_ONLY — margin 단독(age/sex 제외).
             model_prefix += "_ONLY"
+    if args.raw_linear:
+        model_prefix += "_RAWLIN"
     if args.lr is not None and args.lr != 1e-3:
         # _LR{lr} = cfg.light.lr(기본 1e-3) 이외 값 사용 표시 - train.py의 _EX/_SS/_AUX와 같은 관례.
         model_prefix += f"_LR{args.lr:.0e}"
@@ -548,7 +564,8 @@ def main():
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
                               use_margin=args.clinical_margin, margin_stats=margin_stats,
                               use_age_sex=not args.no_age_sex,
-                              use_staging=args.clinical_staging, stage_stats=stage_stats).to(device)
+                              use_staging=args.clinical_staging, stage_stats=stage_stats,
+                              raw_linear=args.raw_linear).to(device)
     elif args.M6:
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:

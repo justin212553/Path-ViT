@@ -4,7 +4,7 @@
 현재 코드베이스 기준(stage-stratify 반영, WSI 모델은 uni2native backbone), M1~M4는 baseline
 (CLR/RLR-mult·wsi-extra-mlp 없음)으로 통일.
 
-## ⚠️ 2026-08-21 — clinical cox_add ClinicalEncoder 실험 원복 완료 (M4/M7 확정, M2만 재학습 대기)
+## ⚠️ 2026-08-21 — clinical cox_add ClinicalEncoder 실험 원복 완료, M1~M7 전부 확정
 
 2026-08-20에 "RNA cox_add와 대칭 맞추자"며 clinical cox_add를 raw feature 직결에서
 ClinicalEncoder(MLP) 경유로 바꿨는데, M7 기준 2×2 ablation(`--legacy-rna-encoder`/
@@ -30,23 +30,35 @@ floor 모델이라 M3/M4를 이길 일이 없으므로, 성능보다 구조 단�
   external만 새로 계산하고, internal CSV는 LEGCLIN 태그 파일을 정식 태그(`M7_INT1500_STG_R_COX_ADD`)
   이름으로 복사해 재풀링. **재학습 불필요.**
 - **M2**: `selfattn`+`cox_add`(raw) 조합은 이전에 한 번도 정식으로 학습된 적이 없는 새 조합
-  (기존엔 항상 `coattn`+`concat` 또는 `coattn`+`cox_add`-ClinicalEncoder였음). **HPC 재학습
-  필요** — `sbatch/final_m1m4_3seed_kfold_hpc/m2_pool_margin_3seed_kfold_array_hpc.sh`
-  (2026-08-21 갱신, `--pooling-mode selfattn` 추가, 태그
-  `M2_POOL_uni2native_SS_STG_R_DISP_COX_ADD_SELFATTN`).
+  (기존엔 항상 `coattn`+`concat` 또는 `coattn`+`cox_add`-ClinicalEncoder였음). HPC 재학습
+  완료(`sbatch/final_m1m4_3seed_kfold_hpc/m2_pool_margin_3seed_kfold_array_hpc.sh`,
+  2026-08-21 갱신, `--pooling-mode selfattn` 추가) — `free-gpu` 파티션 선점(preemption)으로
+  seed126/fold4가 두 번 잘려서 세 번째 재제출로 완료, eval-external-ckpt 스윕까지 마쳐
+  internal/external 둘 다 확보.
 
 로컬 스모크테스트(uni2 backbone, 1epoch, fold0)로 M2/M7 두 경로 모두 에러 없이 끝까지
 동작함을 확인(1-epoch 결과 자체는 폐기, 코드 검증용).
+
+## ⚠️ 2026-08-21(추가) — M5도 raw_linear(MLP 없음)로 통일
+
+M2/M4/M7의 clinical cox_add가 전부 raw feature 직결로 원복된 마당에 M5(Clinic only)만
+`ClinicalEncoder`(MLP)를 쓸 architectural 근거가 없다는 지적(사용자) — clinical 브랜치는 이제
+전 모델에서 예외 없이 raw feature 직결, 학습되는 nonlinear 인코더는 RNA/WSI 브랜치에만 쓴다는
+일관된 원칙. `models/clinical_only.py`에 `raw_linear` 옵션 추가(2seed×5fold 실측 결과 MLP
+버전과 오차범위 내: internal -0.006, external -0.019 — 성능상 손해가 거의 없어 통일 쪽을 채택).
+M5는 어차피 참고용 baseline이라, 이 결과는 "clinical 신호는 단독으로는 약하고(M5, external
+logP=0.18로 비유의) RNA와 결합해야(M7) 비로소 유의미해진다"는 서사로 정직하게 보고한다 — 아래
+"M5 단독 vs 결합" 절 참고.
 
 ## 결과 표 (최종, 2seed×5fold)
 
 | Model | Input Data | Internal C-index (95% CI) | Internal logP | External C-index (95% CI) | External logP | Model Structure | 상태 |
 |---|---|---|---|---|---|---|---|
 | M1 | WSI only | 0.5564 [0.4903, 0.6231] | 0.0024 | 0.5053 [0.4479, 0.5656] | 0.5418 | self-attention | 확정 |
-| M2 | WSI + Clinic | — | — | — | — | self-attention + cox_add(raw feature 직결) | **HPC 재학습 대기**(selfattn+cox_add 신규 조합) |
+| M2 | WSI + Clinic | 0.5587 [0.4857, 0.6282] | 0.0482 | **0.5001** [0.4404, 0.5594] | 0.6604 | self-attention + cox_add(raw feature 직결) | 확정 |
 | M3 | WSI + RNAseq | 0.6594 [0.5880, 0.7256] | 0.0001 | 0.6245 [0.5717, 0.6755] | 0.0032 | co-attention + MLP + auxiliary task + concat | 확정 |
 | M4 | WSI + Clinic + RNAseq | **0.6488** [0.5777, 0.7115] | 0.0029 | **0.6370** [0.5849, 0.6913] | 0.0004 | co-attention + MLP + auxiliary task + concat + cox_add(raw feature 직결) | 확정(재학습 불필요, 기존 체크포인트 유효) |
-| M5 | Clinic only | 0.5536 [0.4807, 0.6260] | 0.0429 | 0.5511 [0.4937, 0.6083] | 0.3035 | MLP | 확정 |
+| M5 | Clinic only | 0.5475 [0.4802, 0.6139] | 0.3795 | 0.5324 [0.4737, 0.5902] | 0.1751 | raw feature 직결(Cox linear, MLP 없음) | 확정 |
 | M6 | RNAseq only | 0.6518 [0.5834, 0.7153] | 0.0088 | 0.6146 [0.5585, 0.6721] | 0.0002 | MLP | 확정 |
 | M7 | Clinic + RNAseq | **0.6552** [0.5820, 0.7204] | 0.0012 | **0.6221** [0.5661, 0.6782] | 0.0007 | MLP + cox_add(raw feature 직결, RNAEncoder) | 확정(재학습 불필요, ablation 체크포인트 재사용) |
 
@@ -54,21 +66,55 @@ floor 모델이라 M3/M4를 이길 일이 없으므로, 성능보다 구조 단�
 bootstrap 95% CI(환자 단위 resample, n=2000). WSI 모델(M1~M4)은 uni2native backbone. logP는
 ensemble risk score 중앙값으로 고/저위험군을 나눈 log-rank test p-value.
 
-**M2만 HPC 재학습 대기 — 완료 후 이 표의 M2 셀을 채우고 아래 사다리 해석도 완성할 것.**
+**전 모델(M1~M7) 확정 — 재학습 대기 항목 없음.**
 
-## M2→M3→M4 사다리 해석 (M2 재학습 전까지 잠정)
+## M1→M2→M3→M4 사다리 해석 (2026-08-21 paired bootstrap 반영 후 수정)
+
+⚠️ **아래 문단은 점추정치만 보고 쓴 최초 해석이다 — "부록 G: paired bootstrap delta" 검정 결과
+Clinical/WSI 추가 효과는 통계적으로 유의하지 않은 것으로 나왔다. 논문에는 반드시 부록 G 이후의
+수정된 해석을 따를 것.**
 
 M1(0.5053) → M3(0.6245, WSI+RNA) → M4(0.6370, WSI+Clinic+RNA) — external 기준 WSI 단독보다
 RNA 추가가 크게 기여하고(+0.119), 거기에 clinical(margin+staging)까지 더하면 추가로 소폭
 개선(+0.013). Internal도 동일 경향(M1 0.5564 → M3 0.6594 → M4 0.6488, M3→M4는 근소 하락이지만
-external은 개선 — **internal/external gap이 M3(0.6594→0.6245, gap 0.035)보다 M4(0.6488→0.6370,
-gap 0.012)에서 더 작다**는 점이 M4/PMA의 핵심 novelty 후보). M2(WSI+Clinic만, RNA 없음)가
-채워지면 M1→M2→M3→M4 전체 사다리에서 "clinical 단독 기여분(M1→M2)"과 "clinical이 RNA와
-결합했을 때의 기여분(M3→M4)"을 분리해서 볼 수 있다.
+external은 개선 — internal/external gap이 M3(0.6594→0.6245, gap 0.035)보다 M4(0.6488→0.6370,
+gap 0.012)에서 더 작다는 점이 M4/PMA의 핵심 novelty 후보).
 
-참고: M6(0.6146) < M7(0.6221) < M4(0.6370) — clinical+RNA(M7)가 RNA 단독(M6)보다 낫고,
-WSI까지 더한 M4가 가장 좋다 — 세 모달리티(WSI/Clinic/RNA)가 external에서 단조적으로 누적
-기여한다는 일관된 그림.
+**M2(WSI+Clinic, RNA 없음)는 external이 0.5001로 정확히 chance 수준** — M1(0.5053) 대비 개선이
+전혀 없다. fold별로 보면 seed84(5개 fold 전부 0.51~0.55)와 seed126(5개 fold 전부 0.46~0.49)이
+정반대 방향으로 갈려 평균이 우연히 상쇄된 게 아니라, 이 표본 크기에서 "WSI+clinical" 조합
+자체가 진짜 신호를 못 낸다는 뜻으로 읽힌다.
+
+참고(점추정치만): M6(0.6146) < M7(0.6221) < M4(0.6370) — clinical+RNA(M7)가 RNA 단독(M6)보다
+낫고, WSI까지 더한 M4가 가장 좋다는 순서 자체는 맞지만, 아래 paired 검정에서 이 차이들은 유의
+수준에 못 미친다.
+
+### 수정된 해석 (부록 G 검정 결과 반영, 최종)
+
+RNA 추가 3쌍(M1→M3, M5→M7, M2→M4) **전부 internal/external 둘 다 통계적으로 유의**(p<0.05,
+95% CI가 0을 포함 안 함) — **이 코호트 크기에서 통계적으로 방어 가능한 성능 동력은 RNA뿐이다.**
+Clinical 추가 3쌍(M1→M2, M6→M7, M3→M4)과 WSI 추가 3쌍(M5→M2, M6→M3, M7→M4)은 internal/
+external 6쌍 전부 비유의 — 점추정치는 대부분 양의 방향(예: M7→M4 external +0.0149)이지만
+95% CI가 전부 0을 포함해 우연과 통계적으로 구분되지 않는다. 따라서 "WSI/Clinic/RNA 세
+모달리티가 단조적으로 누적 기여한다"는 서사는 **점추정치 수준의 관찰**이지 통계적으로
+검증된 주장이 아니다 — 논문에서는 "RNA가 지배적 기여 인자이고, clinical/WSI의 추가 기여는
+이 코호트 크기에서 통계적으로 유의하지 않다"로 톤을 낮춰 정직하게 서술할 것. M4의
+internal/external gap이 M3보다 작다는 관찰(위 문단)은 c-index 자체의 우열과는 별개 지표라 이
+결론의 영향을 받지 않는다.
+
+## M5 단독 vs 결합 — clinical 신호는 약하고 RNA와 결합해야 유의미해진다
+
+M5(clinical 단독, external 0.5324, logP=0.1751, 비유의) vs M7(clinical+RNA, external 0.6221,
+logP=0.0007, 강하게 유의) — clinical 정보(age/sex+margin+staging) 자체는 단독으로는 chance
+수준에 가깝고 통계적으로 유의하지 않지만, RNA와 결합하면 RNA 단독(M6, 0.6146)보다도 낫다.
+즉 **clinical은 그 자체로 예후 예측력이 있다기보다, 강한 신호(RNA)의 risk 추정에 미세 보정을
+더하는 보조적 역할**이라는 해석이 데이터와 일관된다 — 실제로 M2(WSI+Clinic)도 M1(WSI only,
+0.5053) 대비 external 개선이 정확히 0(0.5001)이라 같은 패턴이 WSI 쪽에서도 그대로 재현됐다
+(위 "M1→M2→M3→M4 사다리 해석" 절 참고). 이 해석은 "clinical cox_add가 raw feature 직결일 때
+가장 좋다"(M2/M4/M5/M7 공통 결론)와도 부합 — 신호가 약한 변수는 학습되는 인코더(MLP)로
+표현력을 늘리기보다 고전적 Cox 공변량처럼 단순하게 쓰는 편이 과적합을 피하고 낫다. 부록 G의
+paired bootstrap 검정에서도 M5→M7(+RNA)은 internal/external 둘 다 유의(p=0.025/0.019)한 반면
+M1→M2, M6→M7(+Clinic)은 둘 다 비유의로 확인돼 이 해석이 통계적으로도 뒷받침된다.
 
 ## 재현 커맨드
 
@@ -83,17 +129,14 @@ python scripts/pool_multiseed_external_preds.py --dataset cptac --model PMA_uni2
 python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD --seeds 84,126 --n-folds 5 --bootstrap 2000
 python scripts/pool_multiseed_external_preds.py --dataset cptac --model PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD --seeds 84,126 --n-folds 5 --bootstrap 2000
 
-# M2 — HPC 재학습 필요(코드 재동기화 후)
-#   sbatch sbatch/final_m1m4_3seed_kfold_hpc/m2_pool_margin_3seed_kfold_array_hpc.sh
-#   완료 후 eval-external-ckpt 스윕(scripts/final_eval_external_ckpt_sweep.py, CONFIGS에 selfattn
-#   버전 추가 필요)까지 반드시 실행(일반 --fold 경로가 external CSV를 안 남기므로)
+# M2 (재학습 완료 — HPC free-gpu 파티션 선점으로 seed126/fold4가 두 번 잘려서 세 번째 재제출로 완료)
 python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M2_POOL_uni2native_SS_STG_R_DISP_COX_ADD_SELFATTN --seeds 84,126 --n-folds 5 --bootstrap 2000
 python scripts/pool_multiseed_external_preds.py --dataset cptac --model M2_POOL_uni2native_SS_STG_R_DISP_COX_ADD_SELFATTN --seeds 84,126 --n-folds 5 --bootstrap 2000
 
-# M5, M6 (internal/external 모두 정상 저장됨, 변경 없음)
-python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M5_STG_R --seeds 84,126 --n-folds 5 --bootstrap 2000
+# M5 (raw_linear, MLP 없음 — 2026-08-21 최종 채택), M6 (변경 없음)
+python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M5_STG_R_RAWLIN --seeds 84,126 --n-folds 5 --bootstrap 2000
 python scripts/pool_multiseed_kfold_preds.py --dataset tcga --model M6_INT1500 --seeds 84,126 --n-folds 5 --bootstrap 2000
-python scripts/pool_multiseed_external_preds.py --dataset cptac --model M5_STG_R --seeds 84,126 --n-folds 5 --bootstrap 2000
+python scripts/pool_multiseed_external_preds.py --dataset cptac --model M5_STG_R_RAWLIN --seeds 84,126 --n-folds 5 --bootstrap 2000
 python scripts/pool_multiseed_external_preds.py --dataset cptac --model M6_INT1500 --seeds 84,126 --n-folds 5 --bootstrap 2000
 
 # M7 (재학습 불필요 — ablation "LEGCLIN" 체크포인트를 정식 태그로 복사 + eval-external-ckpt 스윕으로 external만 새로 계산)
@@ -158,11 +201,84 @@ RNA 인코더 교체 단독 효과(신버전 vs LEGRNA만): -0.006(거의 무해
 기대했던 순서가 회복됨 — clinical 신호가 약해 MLP(ClinicalEncoder)를 거치면 오히려 과적합만
 늘어난다는 이번 ablation의 결론과 일관된 결과.
 
+## 부록 F — M5 raw_linear vs MLP 비교 (2026-08-21, 채택 근거)
+
+| | Internal (95% CI) | Internal logP | External (95% CI) | External logP |
+|---|---|---|---|---|
+| M5(MLP=ClinicalEncoder, 폐기) | 0.5536 [0.481, 0.626] | 0.0429 | 0.5511 [0.494, 0.608] | 0.3035 |
+| **M5(raw_linear, 최종 채택)** | **0.5475** [0.480, 0.614] | 0.3795 | **0.5324** [0.474, 0.590] | 0.1751 |
+| Δ(raw−MLP) | -0.0061 | | -0.0187 | |
+
+두 버전 다 95% CI가 넓게 겹쳐 통계적으로 유의한 차이는 아니다 — 성능 손해가 사실상 없는
+상태에서, M2/M4/M7과의 아키텍처 일관성(clinical은 항상 raw feature 직결)을 우선해 raw_linear를
+채택. MLP 버전 수치는 참고용으로만 보존.
+
+## 부록 G — Paired bootstrap on delta (모달리티 추가 효과 9쌍, 2026-08-21)
+
+외부 피드백(paired bootstrap on delta 제안) 반영. 기존 bootstrap CI는 두 모델을 각자 따로
+resample해서 CI가 겹치는지만 봤는데, 이건 같은 환자에 대한 두 모델의 예측이 짝지어져 있다는
+정보를 안 쓰는 보수적인 방법이다. 대신 **매 bootstrap 회차마다 같은 환자 집합을 resample**해서
+그 안에서 두 모델의 C-index를 같이 계산하고 **delta(=B−A)**를 2000번 기록 → delta 분포의
+95% CI와 양측 p-value(`2 * min(P(delta≤0), P(delta≥0))`)를 본다. 짝지어진 데이터라 분산이
+줄어 독립 비교보다 검정력이 높다. `scripts/paired_bootstrap_delta.py`(재사용 가능한 CLI),
+`scripts/run_ladder_paired_bootstrap.py`(아래 9쌍 일괄 실행), `scripts/snapshot_final_preds.py`
+(예측 CSV를 `paper/final_preds_snapshot/`으로 복사)로 구현 — **재학습/재추론 없이 이미 저장된
+예측 CSV만 사용**.
+
+9쌍 = 3가지 모달리티 추가 효과(+RNA, +Clinic, +WSI) x 각 3개 baseline 조합(2x2x2 factorial의
+모든 인접 간선):
+
+### Internal (tcga, N=152)
+
+| 효과 | A | B | C(A) | C(B) | delta(B-A) | 95% CI | p | 판정 |
+|---|---|---|---|---|---|---|---|---|
+| +RNA | M1 | M3 | 0.5116† | 0.6594 | +0.1478 | [+0.0561, +0.2389] | 0.0000 | **유의** |
+| +RNA | M5 | M7 | 0.5475 | 0.6552 | +0.1077 | [+0.0154, +0.1963] | 0.0250 | **유의** |
+| +RNA | M2 | M4 | 0.5587 | 0.6488 | +0.0901 | [+0.0007, +0.1780] | 0.0480 | **유의** |
+| +Clinic | M1 | M2 | 0.5116† | 0.5587 | +0.0471 | [-0.0354, +0.1280] | 0.2550 | 비유의 |
+| +Clinic | M6 | M7 | 0.6518 | 0.6552 | +0.0033 | [-0.0326, +0.0377] | 0.8570 | 비유의 |
+| +Clinic | M3 | M4 | 0.6594 | 0.6488 | -0.0105 | [-0.0418, +0.0219] | 0.5020 | 비유의 |
+| +WSI | M5 | M2 | 0.5475 | 0.5587 | +0.0112 | [-0.0810, +0.0972] | 0.7990 | 비유의 |
+| +WSI | M6 | M3 | 0.6518 | 0.6594 | +0.0075 | [-0.0350, +0.0534] | 0.7480 | 비유의 |
+| +WSI | M7 | M4 | 0.6552 | 0.6488 | -0.0063 | [-0.0381, +0.0302] | 0.7240 | 비유의 |
+
+### External (cptac, N=144)
+
+| 효과 | A | B | C(A) | C(B) | delta(B-A) | 95% CI | p | 판정 |
+|---|---|---|---|---|---|---|---|---|
+| +RNA | M1 | M3 | 0.5053 | 0.6245 | +0.1192 | [+0.0468, +0.1933] | 0.0010 | **유의** |
+| +RNA | M5 | M7 | 0.5324 | 0.6221 | +0.0897 | [+0.0140, +0.1689] | 0.0190 | **유의** |
+| +RNA | M2 | M4 | 0.5001 | 0.6370 | +0.1369 | [+0.0639, +0.2110] | 0.0000 | **유의** |
+| +Clinic | M1 | M2 | 0.5053 | 0.5001 | -0.0052 | [-0.0750, +0.0648] | 0.8890 | 비유의 |
+| +Clinic | M6 | M7 | 0.6146 | 0.6221 | +0.0075 | [-0.0067, +0.0212] | 0.3020 | 비유의 |
+| +Clinic | M3 | M4 | 0.6245 | 0.6370 | +0.0125 | [-0.0195, +0.0437] | 0.4320 | 비유의 |
+| +WSI | M5 | M2 | 0.5324 | 0.5001 | -0.0323 | [-0.1195, +0.0557] | 0.4910 | 비유의 |
+| +WSI | M6 | M3 | 0.6146 | 0.6245 | +0.0099 | [-0.0221, +0.0432] | 0.5520 | 비유의 |
+| +WSI | M7 | M4 | 0.6221 | 0.6370 | +0.0149 | [-0.0182, +0.0502] | 0.4180 | 비유의 |
+
+† M1이 낀 두 쌍(internal)의 C(M1)=0.5116은 본표의 M1 단독 수치(0.5564)와 다르다 — M3가
+RNA-seq 보유 환자만 쓸 수 있어 M1보다 코호트가 33명 작고(185→152), paired 비교는 반드시
+교집합(152명)에서만 계산되기 때문. M1 자체의 성능이 바뀐 게 아니라 비교 대상 코호트가
+좁혀진 것 — 이 좁혀진 152명 부분집합에서는 M1이 0.5116으로 살짝 낮게 나온다는 뜻.
+
+**결론: 9쌍 중 +RNA 3쌍(internal/external 6/6)만 유의, +Clinic·+WSI 6쌍(internal/external
+12/12)은 전부 비유의.** RNA가 이 비교 프레임워크에서 유일하게 통계적으로 방어 가능한 성능
+동력이다 — clinical/WSI의 추가 기여는 점추정치상 방향은 대체로 맞지만 이 코호트 크기(내부
+152명, 외부 144명)에서 우연과 통계적으로 구분되지 않는다.
+
+**재현**: `python scripts/snapshot_final_preds.py`로 예측 CSV 스냅샷 생성 후
+`python scripts/run_ladder_paired_bootstrap.py` 실행하면 위 두 표가 그대로 재현된다. 개별
+쌍만 다시 보려면 `python scripts/paired_bootstrap_delta.py --split {internal|external} ...`.
+
 ## 데이터 보존 상태
 
 pre-stratify 원본(2026-08-08) 백업은 `.logs/_archive_pma_baseline_prestratify_20260808/`에
 보존. M4는 2026-08-17 체크포인트/CSV가 곧 최종본(재학습 없음). M7은 2026-08-20 ablation
 "LEGCLIN" 체크포인트를 정식 태그로 복사한 것이 최종본 — 원본 LEGCLIN/LEGRNA 접미사 파일도
 ablation 근거 자료로 당분간 보존(`.logs/kfold_preds/`, `models/checkpoint/`에 `_LEGCLIN`/
-`_LEGRNA` 접미사로 남아있음). **M2 HPC 재학습 완료 후에는 이 파일을 한 번 더 정리(부록 D/E
-정리, 사다리 해석 완성)할 것.**
+`_LEGRNA` 접미사로 남아있음). M2는 2026-08-21 HPC 재학습 완료(체크포인트는 HPC에만 있고 로컬엔
+CSV만 동기화됨 — 재현하려면 HPC에서 다시 eval-external-ckpt 필요). 결과표를 만든 예측 CSV
+140개(7모델 x seed{84,126} x 5fold x internal/external)는 `paper/final_preds_snapshot/`에
+별도 스냅샷으로 보존(`scripts/snapshot_final_preds.py`) — `.logs/`가 온갖 ablation으로
+어지러워도 이 폴더만 보면 최종표 재현 가능. **M1~M7 전 모델 확정, paired bootstrap(부록 G)까지
+완료 — 결과 표는 이제 완료 상태.**

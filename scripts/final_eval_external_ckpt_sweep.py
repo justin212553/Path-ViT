@@ -47,6 +47,22 @@ CONFIGS = [
                     "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add",
                     "--wsi-extra-mlp", "--clinical-lr-mult", "20.0", "--rna-lr-mult", "20.0"],
      "PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD_XMLP_CLR20_RLR20", None, "pma"),
+    # 2026-08-30: RNA 예측 보조과제(--rna-aux-weight) 효과만 분리해서 보는 ablation — M4_baseline과
+    # 나머지는 전부 동일, --rna-aux-weight만 뺐다(sbatch/final_m1m4_3seed_kfold_hpc/
+    # m4_pma_noaux_kfold_hpc.sh). seed 84/126만 2seed로 돌림 — SEEDS 상수를 덮어쓸 수 없으니
+    # seed42 체크포인트가 없어 [SKIP]으로 자동 건너뛰어진다(의도된 동작).
+    ("M4_noaux", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
+                  "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
+                  "--attn-dispersion", "--combine-mode", "cox_add"],
+     "PMA_uni2native_INT1500_SS_STG_R_DISP_COX_ADD", "XMLP", "pma"),
+    # 2026-08-30: attention dispersion 특징(--attn-dispersion) 효과만 분리해서 보는 ablation —
+    # M4_baseline과 나머지는 전부 동일, --attn-dispersion만 뺐다(sbatch/final_m1m4_3seed_kfold_hpc/
+    # m4_pma_nodisp_kfold_hpc.sh). M4_noaux와 마찬가지로 seed 84/126만 2seed — seed42 체크포인트가
+    # 없어 [SKIP]으로 자동 건너뛰어진다(의도된 동작).
+    ("M4_nodisp", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
+                   "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
+                   "--rna-aux-weight", "1.0", "--combine-mode", "cox_add"],
+     "PMA_uni2native_INT1500_SS_AUX_STG_R_COX_ADD", "XMLP", "pma"),
 ]
 
 
