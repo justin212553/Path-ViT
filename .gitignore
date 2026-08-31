@@ -20,7 +20,6 @@ checkpoint
 reference_repo
 scripts/_rna_fpkm_uq_cache
 
-brca*
 data/rna_brca.csv
 data/rna_brca_raw_log2.csv
 data/tile_cache_*
