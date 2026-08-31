@@ -65,6 +65,7 @@ def main():
     )
     args = parser.parse_args()
     external_tss = None if args.external_tss.lower() == "none" else args.external_tss
+    ext_tag = f"_EXTTSS{external_tss}" if external_tss else ""  # None이면 파일명에 접미사 없음
 
     cfg = Config()
     cfg.data.seed = cfg.light.seed = args.seed
@@ -134,7 +135,7 @@ def main():
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}_seed{args.seed}.pt"
+    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}.pt"
 
     best_score, best_metrics, epochs_since_improvement = -1.0, {}, 0
     for epoch in range(cfg.light.epochs):
@@ -189,7 +190,7 @@ def main():
     import csv
     pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = pred_dir / f"brca_{model_prefix}_EXTTSS{external_tss}_seed{args.seed}.csv"
+    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
     with open(pred_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
@@ -216,7 +217,7 @@ def main():
         import csv
         pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
         pred_dir.mkdir(parents=True, exist_ok=True)
-        pred_path = pred_dir / f"brca_{model_prefix}_EXTTSS{external_tss}_seed{args.seed}.csv"
+        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
         with open(pred_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
