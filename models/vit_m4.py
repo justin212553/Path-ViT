@@ -184,7 +184,7 @@ class ViT_M4(ViT_M1):
         Returns:
             fused: risk_head 입력. combine_mode="concat": (3D,)(+spatial_feat_dim) —
             [z_wsi ‖ z_clinical ‖ z_rna]. "cox_add": (2D,)(+spatial_feat_dim) — [z_wsi ‖ z_rna],
-            clinical은 여기서 안 섞이고 train.py가 _clinical_raw()로 별도 계산해 최종
+            clinical은 여기서 안 섞이고 train.py가 _clinical_embed()로 별도 계산해 최종
             스칼라에 더한다(models/vit_pma.py::ViT_PMA와 동일 관례).
         """
         if self.combine_mode == "cox_add" or not self.use_clinical:
@@ -207,10 +207,16 @@ class ViT_M4(ViT_M1):
             fused = torch.cat([fused, spatial_feat], dim=-1)
         return fused
 
-    def _clinical_raw(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
-                       margin_ord: torch.Tensor | None = None,
-                       stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_raw와 동일 관례.
+    def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
+                         margin_ord: torch.Tensor | None = None,
+                         stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+        """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례.
+        2026-08-31: train.py::_patient_risk가 model._clinical_embed(...)로 호출하는데(공용
+        dispatch, 이름이 vit_pma.py/vit_m2_pool.py/clinical_rna_only.py의 clinical cox_add
+        복원 때 _clinical_raw에서 _clinical_embed로 통일됐음), vit_m4.py는 그때 범위 밖("M4는
+        안 쓸거니까 빼고")이라 옛 이름 _clinical_raw로 남아 있었다 — ViT_MCAT(ViT_M4 상속)을
+        --combine-mode cox_add로 처음 돌릴 때 AttributeError로 드러나 이름만 맞춰 고침(본문
+        로직은 원래도 raw-feature-direct라 변경 없음).
         stage_ord: self.use_staging=True일 때만 필요. {field: () 스칼라 long} — encode_stage_value() 규약."""
         feats = []
         if self.use_age_sex:
