@@ -1544,6 +1544,15 @@ def _parse_args() -> argparse.Namespace:
              "빠르게 재추출할 때 쓴다. --external 없이 쓰면 에러.",
     )
     parser.add_argument(
+        "--eval-internal-ckpt", type=str, default=None,
+        help="2026-08-30: --eval-external-ckpt의 internal 버전 — 학습을 전혀 하지 않고, 이 경로의 "
+             "checkpoint를 로드해 held-out internal test fold에 대해서만 딱 한 번 평가한 뒤 환자별 "
+             "예측을 .logs/kfold_preds/에 정상 학습 경로와 완전히 동일한 파일명으로 저장하고 즉시 "
+             "종료한다(scripts/pool_multiseed_kfold_preds.py 입력용). internal CSV를 실수로 지웠거나 "
+             "재풀링이 필요할 때, 재학습 없이 이미 저장된 checkpoint로부터 복구하는 용도. 다른 모든 "
+             "인자는 그 checkpoint를 만들 때와 정확히 똑같이 줘야 한다. --fold 없이 쓰면 에러.",
+    )
+    parser.add_argument(
         "--eval-soup-ckpts", type=str, default=None,
         help="2026-08-12: [Model soup, Wortsman et al. 2022] 콤마로 구분한 N개 checkpoint 경로를 "
              "받아 state_dict를 파라미터별 단순 평균으로 합친 뒤(재학습 없음) 그 합쳐진 가중치로 "
@@ -2350,6 +2359,35 @@ def main():
             raise ValueError("--stage-aux-weight는 WSI를 쓰는 모델에서만 사용 가능합니다 (--M5/--M6/--M6X 불가).")
         # rna_aux_head와 동일한 이유로 optimizer 생성 이전에 붙인다.
         model.stage_aux_head = StagePredictionHead(cfg.model.embed_dim, stage_stats).to(device)
+
+    if args.eval_internal_ckpt:
+        # [--eval-internal-ckpt] eval-external-ckpt와 동일 관례, internal held-out fold 버전 —
+        # internal CSV를 실수로 지웠을 때 재학습 없이 checkpoint로부터 복구하는 용도(2026-08-30).
+        if test_loader is None:
+            raise ValueError("--eval-internal-ckpt는 --fold와 함께 써야 합니다(test_loader가 없음).")
+        ckpt = torch.load(args.eval_internal_ckpt, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        print(f"--eval-internal-ckpt: {args.eval_internal_ckpt} 로드 완료 "
+              f"(epoch={ckpt.get('epoch')}, val_c_index={ckpt.get('val_c_index')})")
+        test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, test_ds.transform,
+                                 desc="internal(ckpt-eval)")
+        print(f"  internal c_index={test_metrics['c_index']:.4f} | HR={test_metrics['hr']:.3f} "
+              f"[{test_metrics['hr_ci_lower']:.3f}, {test_metrics['hr_ci_upper']:.3f}] | "
+              f"log_rank_p={test_metrics['log_rank_p']:.4f}")
+        import csv
+        pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        # 정상 학습 경로(2963번째 줄 부근)와 완전히 동일한 파일명 — pool_multiseed_kfold_preds.py가
+        # 그대로 찾을 수 있어야 하므로 절대 바꾸지 말 것.
+        pred_path = pred_dir / f"{args.dataset}_{model_prefix}_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+        with open(pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
+                                        test_metrics["times"], test_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> internal predictions saved: {pred_path}")
+        return
 
     if args.eval_external_ckpt:
         # [--eval-external-ckpt] 학습을 건너뛰고 이미 저장된 checkpoint의 external 예측만 다시
