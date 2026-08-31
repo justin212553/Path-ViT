@@ -68,6 +68,7 @@ class ViT_PMA(ViT_M1):
         coord_embed_learnable_scale: bool = False,
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
+        use_coattn: bool = True,
     ):
         super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit,
                           use_tumor_type_embed=use_tumor_type_embed,
@@ -114,9 +115,16 @@ class ViT_PMA(ViT_M1):
         self.use_tile_risk_head = use_tile_risk_head
         self.attn_pool = MultiComponentPooling(cfg.embed_dim, exclude=drop_component, top_frac=top_frac,
                                                 use_tile_risk_head=use_tile_risk_head)
-        self.component_coattn = CoAttentionPooling(
-            cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
-        )
+        # 2026-08-31: co-attention이 WSI가 성능에 안 먹히는 원인 셋(Nystrom self-attn/ABMIL/
+        # co-attention) 중 하나인지 분리 검증하는 ablation용(train.py --no-coattn). False면
+        # component_coattn 자체를 안 만들고, combine_with_clinical_rna()가 RNA-query 가중합 대신
+        # 4개 관점의 단순 평균(z_wsi = patient_embed.mean(dim=0))을 쓴다 — "RNA가 4개 관점 중
+        # 뭘 볼지 고르는 게" 도움이 되는지 vs 그냥 다 균등하게 보는 것과 차이가 없는지 검증.
+        self.use_coattn = use_coattn
+        if use_coattn:
+            self.component_coattn = CoAttentionPooling(
+                cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
+            )
 
         if combine_mode == "concat":
             if self.use_clinical:
@@ -252,7 +260,10 @@ class ViT_PMA(ViT_M1):
             clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
         if margin_ord is not None:
             clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
-        z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
+        if self.use_coattn:
+            z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
+        else:
+            z_wsi = patient_embed.mean(dim=0)  # (D,) — co-attention 없이 4개 관점 단순 평균
         parts = [z_wsi]
         if self.use_clinical and self.combine_mode == "concat":
             # combine_mode="cox_add"면 clinical은 여기서 임베딩/concat되지 않고, 호출부(train.py)가

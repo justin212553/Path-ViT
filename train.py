@@ -1387,6 +1387,16 @@ def _parse_args() -> argparse.Namespace:
              "wandb/checkpoint에 _RNAGATE 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--no-coattn", action="store_true",
+        help="2026-08-31: --PMA 전용 — WSI가 성능에 안 먹히는 원인이 Nystrom self-attention/"
+             "ABMIL(MultiComponentPooling attn view)/co-attention 중 무엇인지 분리하는 3종 "
+             "ablation의 co-attention 담당(models/vit_pma.py ViT_PMA use_coattn 참조, 나머지 "
+             "둘은 기존 --skip-patch-vit/--drop-component attn로 검증). 켜면 component_coattn "
+             "자체를 안 만들고, RNA-query 가중합 대신 4개 pooling 관점의 단순 평균을 쓴다 — "
+             "RNA가 4관점 중 뭘 볼지 고르는 게 실제로 도움되는지 검증. 켜면 wandb/checkpoint에 "
+             "_NOCOATTN 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--no-clinical", action="store_true",
         help="2026-07-28: --PMA 전용, M3(WSI+RNA, clinical 제외) ablation용 — clinical_encoder "
              "자체를 안 만들고 risk_head 입력에서 z_clinical을 뺀다(risk_head 입력이 [z_wsi, "
@@ -1672,6 +1682,8 @@ def main():
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
     if args.rna_gate_only and not args.PMA:
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
+    if args.no_coattn and not args.PMA:
+        raise ValueError("--no-coattn은 --PMA에서만 사용 가능합니다.")
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -1912,6 +1924,8 @@ def main():
         model_prefix += f"_EMBDIM{args.embed_dim}"
     if args.rna_gate_only:
         model_prefix += "_RNAGATE"
+    if args.no_coattn:
+        model_prefix += "_NOCOATTN"
     if args.no_clinical:
         model_prefix += "_NOCLINICAL"
     if args.shuffle_patches:
@@ -2276,6 +2290,7 @@ def main():
                          coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                          coord_embed_shuffle=args.coord_embed_shuffle,
                          use_wsi_extra_mlp=args.wsi_extra_mlp,
+                         use_coattn=not args.no_coattn,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -2552,7 +2567,9 @@ def main():
         print(f"Model: ViT_PM4 (ViT+다성분 pooling(mean/std/attn/top-k) + RNA post-hoc gate + "
               f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.PMA:
-        print(f"Model: ViT_PMA (ViT+다성분 pooling + CoAttention(RNA query, 4개 관점) + "
+        pooling_combine_desc = ("CoAttention(RNA query, 4개 관점)" if not args.no_coattn
+                                 else "4개 관점 단순 평균(co-attention 없음)")
+        print(f"Model: ViT_PMA (ViT+다성분 pooling + {pooling_combine_desc} + "
               f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M4A_FF:
         print(f"Model: ViT_M4A_FF (M4A에서 Nystromformer FFN 서브레이어 제거, CoAttentionPooling(RNA query) + "

@@ -45,7 +45,7 @@ CONFIGS = [
     ("M4_baseline", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
                       "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
                       "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add"],
-     "PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD", "XMLP", "pma"),
+     "PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD", ("XMLP", "NOATTN", "NOVIT"), "pma"),
     ("M4_hybrid", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
                     "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
                     "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add",
@@ -67,14 +67,33 @@ CONFIGS = [
                    "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
                    "--rna-aux-weight", "1.0", "--combine-mode", "cox_add"],
      "PMA_uni2native_INT1500_SS_AUX_STG_R_COX_ADD", "XMLP", "pma"),
+    # 2026-08-31: WSI가 성능에 안 먹히는 원인이 세 attention 메커니즘(Nystrom self-attn/ABMIL/
+    # co-attention) 중 무엇인지 분리하는 ablation 3종 — M4_baseline과 나머지는 전부 동일,
+    # 한 번에 하나씩만 뺐다. 전부 seed 84/126만 2seed(sbatch/train_brca_*와 무관 — 이건 PAAD).
+    ("M4_no_coattn", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
+                       "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
+                       "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add",
+                       "--no-coattn"],
+     "PMA_uni2native_INT1500_SS_AUX_STG_R_NOCOATTN_DISP_COX_ADD", None, "pma"),
+    ("M4_no_abmil", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
+                      "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
+                      "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add",
+                      "--drop-component", "attn"],
+     "PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD_NOATTN", None, "pma"),
+    ("M4_no_nystrom", ["--PMA", "--rna-genes", "literature_1500_intersection", "--backbone", "uni2native",
+                        "--clinical-staging", "--clinical-margin", "--patch-keep-frac", "0.8",
+                        "--attn-dispersion", "--rna-aux-weight", "1.0", "--combine-mode", "cox_add",
+                        "--skip-patch-vit"],
+     "PMA_uni2native_INT1500_SS_AUX_STG_R_DISP_COX_ADD_NOVIT", None, "pma"),
 ]
 
 
-def _find_ckpt(seed: int, fold: int, include: str, exclude: str | None, suffix: str) -> Path | None:
+def _find_ckpt(seed: int, fold: int, include: str, exclude: str | tuple[str, ...] | None, suffix: str) -> Path | None:
     pattern = f"*_FOLD{fold}OF{N_FOLDS}_best_{suffix}.pt"
+    excludes = (exclude,) if isinstance(exclude, str) else (exclude or ())
     candidates = [
         p for p in CKPT_DIR.glob(pattern)
-        if f"seed{seed}_" in p.name and include in p.name and (exclude is None or exclude not in p.name)
+        if f"seed{seed}_" in p.name and include in p.name and not any(ex in p.name for ex in excludes)
     ]
     if len(candidates) == 0:
         print(f"  [SKIP] seed={seed} fold={fold} include={include!r}: 매칭 0개")
