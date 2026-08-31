@@ -54,7 +54,7 @@ from train import (
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_rna_matrix,
-    MANIFEST_PATH,
+    MANIFEST_PATH, EXTERNAL_TSS,
 )
 
 if WANDB_AVAILABLE:
@@ -105,7 +105,15 @@ def main():
                          help="train.py --wsi-extra-mlp 이식(models/vit_m1.py::ViT_M1, ViT_PMA가 상속) "
                               "— patch_tokens에 잔차 MLP 한 층 추가.")
     parser.add_argument("--group-ts", type=str, default=None)
+    parser.add_argument(
+        "--external-tss", type=str, default=EXTERNAL_TSS,
+        help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
+             f"{EXTERNAL_TSS!r} — 공통 case 1058명 중 가장 큰 단일 기관 142명). "
+             "'none'이면 external 없이 기존 동작(전부 internal 6:2:2)으로 되돌아간다. "
+             "M7과 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
+    )
     args = parser.parse_args()
+    external_tss = None if args.external_tss.lower() == "none" else args.external_tss
 
     cfg = Config()
     cfg.data.seed = cfg.train.seed = args.seed
@@ -136,23 +144,26 @@ def main():
     gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
     rna_input_dim = len(gene_ids)
 
-    cases = load_case_table(args.seed)
+    cases = load_case_table(args.seed, external_tss=external_tss)
     rna_df = load_rna_matrix(gene_ids)
     manifest = pd.read_csv(MANIFEST_PATH)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
-          f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())})")
+          f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
+          f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
     print(f"RNA 유전자 수: {rna_input_dim} (top{args.n_genes}, 고분산 기준, seed={args.seed})")
     print(f"age_mean={age_mean:.2f} age_std={age_std:.2f} (전체 코호트 기준, train.py 관례와 동일)")
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
-    train_ds = BRCASlideDataset(cases[cases["split"] == "train"], rna_df, manifest)
-    val_ds   = BRCASlideDataset(cases[cases["split"] == "val"],   rna_df, manifest)
-    test_ds  = BRCASlideDataset(cases[cases["split"] == "test"],  rna_df, manifest)
+    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest)
+    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest)
+    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest)
+    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
     test_loader       = DataLoader(test_ds,  shuffle=False, **dl_kwargs)
+    external_loader   = DataLoader(external_ds, shuffle=False, **dl_kwargs) if external_ds is not None else None
 
     model = ViT_PMA(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -277,11 +288,53 @@ def main():
     )
     print(f"\n=== BRCA Internal Test (best checkpoint epoch {ckpt['epoch']}) ===")
     print(_log_line("test", test_metrics, test_td_auc))
+    import csv
+    pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
+    pred_dir.mkdir(parents=True, exist_ok=True)
+    pred_path = pred_dir / f"brca_{model_prefix}_EXTTSS{external_tss}_seed{args.seed}.csv"
+    with open(pred_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+        for cid, risk, t, e in zip(test_metrics["case_ids"], test_metrics["risks"],
+                                    test_metrics["times"], test_metrics["events"]):
+            writer.writerow([cid, risk, t, e])
+    print(f"  -> internal predictions saved: {pred_path}")
     if WANDB_AVAILABLE:
         wandb.run.summary["test_c_index"] = test_metrics["c_index"]
         wandb.run.summary["test_hr"] = test_metrics["hr"]
         wandb.run.summary["test_log_rank_p"] = test_metrics["log_rank_p"]
         wandb.run.summary["test_auc_mean"] = test_td_auc["auc_mean"]
+
+    if external_loader is not None:
+        # PAAD/CPTAC 구도(train.py --eval-external-ckpt)와 동일 관례로 CSV까지 저장 —
+        # scripts/pool_multiseed_kfold_preds.py류/paired_bootstrap_delta.py를 그대로 재사용할
+        # 수 있게. BRCA는 institution 기준 external이라 seed/fold 개념이 없어(단일 실행)
+        # 파일명에 fold 표기를 생략한다.
+        external_metrics = evaluate(model, external_loader, cfg, device, amp_ctx, None)
+        external_td_auc = compute_time_dependent_auc(
+            train_metrics_final["times"], train_metrics_final["events"],
+            external_metrics["times"], external_metrics["events"], external_metrics["risks"],
+        )
+        print(f"\n=== BRCA External Test (institution={external_tss}, best checkpoint) ===")
+        print(_log_line("external", external_metrics, external_td_auc))
+        import csv
+        pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        pred_path = pred_dir / f"brca_{model_prefix}_EXTTSS{external_tss}_seed{args.seed}.csv"
+        with open(pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                        external_metrics["times"], external_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> external predictions saved: {pred_path}")
+        if WANDB_AVAILABLE:
+            wandb.run.summary["external_c_index"] = external_metrics["c_index"]
+            wandb.run.summary["external_hr"] = external_metrics["hr"]
+            wandb.run.summary["external_log_rank_p"] = external_metrics["log_rank_p"]
+            wandb.run.summary["external_auc_mean"] = external_td_auc["auc_mean"]
+
+    if WANDB_AVAILABLE:
         wandb.finish()
 
     elapsed = datetime.now() - start_time

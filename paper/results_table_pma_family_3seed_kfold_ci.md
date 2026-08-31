@@ -270,6 +270,43 @@ RNA-seq 보유 환자만 쓸 수 있어 M1보다 코호트가 33명 작고(185�
 `python scripts/run_ladder_paired_bootstrap.py` 실행하면 위 두 표가 그대로 재현된다. 개별
 쌍만 다시 보려면 `python scripts/paired_bootstrap_delta.py --split {internal|external} ...`.
 
+## 부록 H — M4 컴포넌트 ablation: RNA 보조과제(aux)와 attention dispersion (2026-08-30)
+
+M4/PMA에 붙어있는 두 부가 장치(RNA 예측 보조과제 `--rna-aux-weight`, attention 공간 분산 특징
+`--attn-dispersion`)가 실제로 성능에 기여하는지 각각 하나씩만 끄고 재학습해서(2seed×5fold,
+나머지 레시피는 원본 M4와 동일) paired bootstrap으로 검정했다. 원본 M4(둘 다 있음, 본표
+기준선) 대비:
+
+| 효과 | Internal delta | Internal 95% CI | Internal p | External delta | External 95% CI | External p |
+|---|---|---|---|---|---|---|
+| +RNA aux (noaux→원본) | +0.0046 | [-0.0030, +0.0130] | 0.2770 | -0.0001 | [-0.0037, +0.0035] | 1.0000 | 비유의 |
+| +attn-dispersion (nodisp→원본) | +0.0041 | [-0.0100, +0.0189] | 0.5720 | +0.0013 | [-0.0186, +0.0213] | 0.8930 | 비유의 |
+
+각 ablation의 독립 점추정치(참고용, 위 delta의 baseline):
+
+| 모델 | Internal (95% CI) | External (95% CI) |
+|---|---|---|
+| M4 원본(AUX+DISP 둘 다) | 0.6488 [0.5777, 0.7115] | 0.6370 [0.5849, 0.6913] |
+| M4-noaux(DISP만) | 0.6442 [0.5728, 0.7081] | 0.6371 [0.5853, 0.6905] |
+| M4-nodisp(AUX만) | 0.6448 [0.5746, 0.7090] | 0.6357 [0.5808, 0.6939] |
+
+**결론: 둘 다 internal/external 전부 비유의(4/4) — 세 모델의 점추정치가 사실상 오차범위 안에서
+동일하다.** RNA aux/attn-dispersion 둘 다 방향은 대체로 미세하게 양(있는 쪽이 근소 우세)이지만
+delta가 거의 0에 붙어있다(특히 external의 RNA aux는 delta=-0.0001로 사실상 무효과). 앞선
+부록 G의 +Clinic/+WSI 비유의 결과와 같은 패턴 — M4/PMA의 실제 성능은 "WSI+RNA 기본 구조 +
+clinical cox_add"에서 나오고, aux task/dispersion 같은 부가 컴포넌트는 이 코호트 크기에서
+유의한 추가 기여를 확인하지 못했다. 논문에는 "정교화를 시도했으나 유의한 개선은 확인되지
+않았다"로 정직하게 서술할 것.
+
+**재현**: `sbatch/final_m1m4_3seed_kfold_hpc/m4_pma_noaux_kfold_hpc.sh`,
+`m4_pma_nodisp_kfold_hpc.sh`(학습) → `eval_external_ckpt_sweep_hpc.sh`(external, `M4_noaux`/
+`M4_nodisp` 등록됨) → `pool_multiseed_kfold_preds.py`/`pool_multiseed_external_preds.py`
+(태그 `PMA_uni2native_INT1500_SS_STG_R_DISP_COX_ADD`=noaux,
+`PMA_uni2native_INT1500_SS_AUX_STG_R_COX_ADD`=nodisp) → `paired_bootstrap_delta.py`.
+internal CSV가 실수로 삭제됐을 때는 `train.py --eval-internal-ckpt`(2026-08-30 추가,
+`--eval-external-ckpt`와 동일 관례)로 재학습 없이 복구했다 — 원본과 byte 단위로 diff 없이
+동일하게 복구됨을 로컬 스모크테스트로 확인.
+
 ## 데이터 보존 상태
 
 pre-stratify 원본(2026-08-08) 백업은 `.logs/_archive_pma_baseline_prestratify_20260808/`에
