@@ -1,5 +1,74 @@
 # PATH-ViT 발견 사항 및 우선순위 백로그
 
+## 🔴 최상위 발견(2026-08-31) — MCAT 스타일 multi-pathway co-attention(Phase 1)도 실패, gradient는 정상 도달 확인 → "query 개수 부족"이 원인이 아니었다
+
+**상태: 확인됨(seed84 단일 파일럿 + 체크포인트 진단 + 30epoch gradient/loss 추적, 3가지 독립 증거) — PORPOISE(Phase 3)로 진행 결정.**
+
+BRCA 스케일 검증(위 2026-07-22 항목)이 "표본만 늘리면 WSI가 기여한다"는 반례를 보여줬지만, PAAD
+표본을 늘릴 방법이 없는 상황에서 "외부 SOTA 문헌은 이 문제를 어떻게 푸는가"를 조사(`WebSearch`,
+2026-08-31)한 결과, 이 프로젝트가 겪는 현상이 문헌에 이미 "modality imbalance / inter-modality
+capability gap"으로 이름 붙은 알려진 문제라는 걸 확인했다. MCAT(Chen et al. 2021)/SurvPath(Jaume
+et al.)는 RNA를 6~50개의 "pathway 토큰"으로 나눠 **여러 개의 query**가 병렬로 patch 전체에
+co-attention한다 — 이 프로젝트의 기존 `--M4A`(`models/vit_m4a.py::CoAttentionPooling`)는 RNA
+전체를 **단일 벡터 1개**로 압축해 query 1개로만 co-attention했다(스스로 "pathway별로 안 쪼갠
+단순화 버전"이라고 문서화돼 있었음). "query 1개 vs key 4개(PMA 기준)/patch 전체(M4A 기준)라는
+저용량 구조 자체가 attention entropy 붕괴(기존 2026-07-21 2차 발견 (B))의 원인 아니냐"는 가설로,
+사용자가 세운 3단계 계획의 **Phase 1**로 이 구조를 직접 이식해 검증했다.
+
+- **구현**(`models/gene_group_encoder.py`, `models/vit_mcat.py`, `train.py --MCAT`): RNA를
+  PDAC 기능별 8개 유전자 카테고리(`data/select_rnaseq_genes.py::PDAC_LITERATURE_GENE_SETS`, 163개
+  유전자)로 나눠, 카테고리마다 **학습되는 선형결합**(LayerNorm+Linear, hidden layer 없음)으로
+  pathway 토큰 1개씩(총 8개)을 만든다. 예전 `--rna-genes pathway8`(카테고리를 unsigned mean으로
+  뭉갬, external C 0.49~0.52로 실패, 아래 "완료" 섹션 10번) 실패 원인을 구조적으로 피하도록,
+  유전자별 z-score를 뭉개지 않고 그대로 넣어 부호/크기가 다른 학습 가능한 가중치로 합친다. 8개
+  토큰이 `MultiQueryCoAttentionPooling`(M4A의 `CoAttentionPooling`을 다중 query로 확장)을 통해
+  동시에 patch 전체에 cross-attention한다.
+- **파일럿 결과(seed84, fold0, uni2, cox_add+staging+margin+attn-dispersion+rna-aux, M4A/PMA와
+  동일 최종 레시피)**: internal C=**0.4610**(chance 이하), HR=**0.712**(<1, 방향 반전),
+  log-rank p=0.485(무의미). 같은 조건 기존 파일럿 대비 뚜렷이 낮음:
+
+  | 모델 | internal C(seed84, fold0) |
+  |---|---|
+  | PMA(baseline) | 0.68 |
+  | PM4 | 0.66 |
+  | M4A(query 1개) | 0.61 |
+  | **MCAT(query 8개)** | **0.46** |
+
+- **진단 1 — 체크포인트(epoch=17, 30-epoch 학습 완료본) 직접 조사**(`train.py
+  --eval-internal-ckpt`에 추가한 MCAT 전용 진단 블록, `hasattr(model, "gene_group_encoder")`로
+  게이팅): pathway 토큰은 환자간 cosine similarity **0.0039**(0에 가까움, collapse 아님), per-dim
+  std **0.5718**(정상) — GeneGroupEncoder는 의도대로 환자별로 다른 8개 토큰을 만들고 있다. 그런데도
+  co-attention entropy는 **0.9998**(0~1 정규화, 1이면 완전 uniform) — 2026-07-21 2차 발견 (B)의
+  "4-view co-attention이 환자 무관하게 uniform으로 수렴" 패턴이 query를 1개→8개로 늘려도 **똑같이
+  재발**했다. **"query가 부족해서 붕괴한다"는 Phase 1의 핵심 가설이 직접 반박됐다.**
+- **진단 2 — 학습 도중 gradient/loss 추적**(`scripts/diagnose_mcat_gradients.py`,
+  `scripts/diagnose_wsi_gradients.py`를 MCAT용으로 재구성, seed84/uni2/30epoch, 로컬 재현): Cox
+  loss는 2.12(epoch1)→노이즈 속에서 완만히 1.9~2.0대로 하락(최저 1.87 @epoch26, 깔끔한 수렴
+  아니라 거의 평평 + 노이즈). `attn_pool`(cnn/vit와 분리 측정) gradient norm은 **30 epoch 내내
+  0.79~0.86 사이로 거의 일정**(risk_head 대비 ~0.27배) — 시간이 갈수록 죽어가는 패턴이 전혀 없고,
+  gene_group_encoder(0.18배)·clinical_encoder(0.36배)와 비슷한 자릿수라 극단적으로 굶주려 있지도
+  않다. 2026-07-21 2차 발견 (C)에서 PMA의 WSI 브랜치가 RNA 대비 gradient가 **100~250배** 작았던
+  것과는 확연히 다른 패턴 — **gradient는 attn_pool까지 정상적으로, 꾸준히 도달한다.**
+- **종합 해석**: 진단 1(query 8개로 늘려도 attention entropy 붕괴 재발)과 진단 2(gradient는
+  정상 도달)를 합치면, "query 개수가 부족해서/gradient가 안 와서 attention이 못 배운다"는 두
+  가설이 모두 기각된다. gradient가 attn_pool에 꾸준히 오는데도 그 방향으로 움직여도 Cox loss가
+  거의 안 줄어드니(→진단 2의 loss가 노이즈 속에서만 완만히 변함) attention이 뾰족해질 유인 자체가
+  없다는 뜻 — **"이 WSI feature 공간 자체에 patch 단위로 구별해 Cox loss를 낮출 신호가 거의
+  없다"는 2026-07-21 2차 발견의 결론을, 아키텍처를 바꿔가며(4-view co-attention → 8-pathway
+  multi-query co-attention) 또 한 번 독립적으로 재확인한 것에 가깝다.** fusion 구조(query 개수,
+  pooling 방식)를 바꾸는 접근으로는 이 병목을 못 뚫는다는 근거가 하나 더 쌓였다.
+- **다음 방향(사용자 결정)**: attention이 "중요한 patch를 찾아내는" 데 의존하는 구조(M4A/PMA/MCAT
+  전부 이 계열)는 전부 같은 벽에 부딪히므로, attention에 의존하지 않는 PORPOISE(Chen et al.
+  2022, bilinear/Kronecker product pooling으로 WSI×RNA pairwise 상호작용을 직접 포착)로 전환.
+  Self-Enhancement Learning(원래 Phase 2, "약한 브랜치에 보조 loss로 gradient를 더 밀어주는"
+  방식)은 진단 2가 "gradient 크기 자체는 이미 정상"임을 보여줘 전제가 약해져 보류.
+- **관련 파일**: `models/gene_group_encoder.py`, `models/vit_mcat.py`, `train.py`(`--MCAT`,
+  `--eval-internal-ckpt` MCAT 진단 블록), `scripts/diagnose_mcat_gradients.py`,
+  `sbatch/mcat_uni2_coxadd_stg_r_pilot_seed84_fold0_hpc.sh`,
+  `sbatch/mcat_diagnose_pilot_seed84_fold0_hpc.sh`.
+
+---
+
 ## 🔴 최상위 발견(2026-07-22) — TCGA-BRCA로 스케일 검증: 표본이 커지면 WSI가 순증분 기여를 한다
 
 **상태: 확인됨(seed 42 단일 결과) — 다른 시드/더 긴 학습으로 재현성 확인 필요.**
