@@ -2441,6 +2441,41 @@ def main():
                                         test_metrics["times"], test_metrics["events"]):
                 writer.writerow([cid, risk, t, e])
         print(f"  -> internal predictions saved: {pred_path}")
+        if hasattr(model, "gene_group_encoder"):
+            # [MCAT 진단, 2026-08-31] seed84 fold0 파일럿이 internal C=0.46(<chance)+HR=0.712(<1,
+            # 방향 반전)로 나와, 단순히 "구조가 약하다"가 아니라 pathway 토큰/attention이 애초에
+            # 붕괴돼 있는 게 아닌지 --eval-internal-ckpt로 복원한 checkpoint에서 직접 확인한다.
+            # attention entropy 붕괴는 findings_backlog.md 최상위 발견(4개 view co-attention이
+            # 환자 무관하게 0.24~0.27로 수렴)과 동일 패턴이 8개 pathway 토큰에서도 재발했는지 보는 것.
+            model.eval()
+            z_rna_list, entropy_list = [], []
+            with torch.no_grad():
+                for patient_slides in test_loader:
+                    rna = patient_slides[0]["rna"].to(device, non_blocking=True)
+                    z_rna = model.encode_rna(rna)  # (K, D)
+                    z_rna_list.append(z_rna.flatten().cpu())
+                    slide = patient_slides[0]
+                    features = slide.get("features")
+                    out = model(
+                        slide["coords"].to(device, non_blocking=True),
+                        patch_paths=slide.get("patch_paths"),
+                        features=features.to(device, non_blocking=True) if features is not None else None,
+                        transform=test_ds.transform, rna_context=z_rna,
+                    )
+                    p = out["attn_weights"].clamp_min(1e-12)
+                    entropy_list.append((-(p * p.log()).sum() / torch.log(torch.tensor(float(p.numel())))).item())
+            z_stack = torch.stack(z_rna_list)  # (N_patients, K*D)
+            z_norm = torch.nn.functional.normalize(z_stack, dim=-1)
+            sim = z_norm @ z_norm.T
+            n = sim.shape[0]
+            off_diag_mean = ((sim.sum() - n) / (n * n - n)).item()
+            print("\n=== [MCAT 진단] pathway token 분산 / co-attention entropy ===")
+            print(f"  pathway token 환자간 평균 cosine similarity: {off_diag_mean:.4f} "
+                  "(1에 가까우면 환자 무관하게 거의 동일한 토큰 = collapse 의심)")
+            print(f"  pathway token 환자간 per-dim std 평균: {z_stack.std(dim=0).mean().item():.4f} "
+                  "(0에 가까우면 GeneGroupEncoder가 사실상 상수 출력)")
+            print(f"  co-attention entropy 평균(0~1 정규화): {sum(entropy_list) / len(entropy_list):.4f} "
+                  f"| 범위: [{min(entropy_list):.4f}, {max(entropy_list):.4f}] (1에 가까우면 uniform 붕괴)")
         return
 
     if args.eval_external_ckpt:
