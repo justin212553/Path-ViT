@@ -54,7 +54,7 @@ from data.patch_utils import (
     PATCH_TRANSFORM_512, build_tile_cache,
 )
 from models import (
-    ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4_AvgPool, ViT_M4A, ViT_M4B,
+    ViT_M1, ViT_M1_AvgPool, ViT_M1_Pool, ViT_M2_Pool, LateFusionViT, ViT_M2, ViT_M4, ViT_M4_AvgPool, ViT_M4A, ViT_MCAT, ViT_M4B,
     ViT_PM4, ViT_PMA, ViT_M4A_FF, ViT_M2_FF, ViT_PMA_FF, ClinicalOnly, RNAOnly, RNAOnlyExtend,
 )
 from models.rna_predictor import RNAPredictionHead
@@ -1472,6 +1472,18 @@ def _parse_args() -> argparse.Namespace:
              "--fusion과 동시 사용 불가.",
     )
     model_group.add_argument(
+        "--MCAT", action="store_true",
+        help="ViT_MCAT 사용(2026-08-31, models/vit_mcat.py) — ViT_M4A(단일 z_rna 벡터가 "
+             "query 1개로 co-attention)보다 한 발 더 나간, 진짜 MCAT/SurvPath 스타일 — RNA를 "
+             "PDAC 기능별 유전자 8개 카테고리(data/select_rnaseq_genes.py::"
+             "PDAC_LITERATURE_GENE_SETS)로 나눠 카테고리마다 학습되는 pathway 토큰을 만들고, "
+             "이 8개 토큰이 동시에 patch 토큰 전체에 co-attention한다. attention entropy가 "
+             "0.999~1.000으로 붕괴했던 원인(query 1개 vs key 4개짜리 저용량 co-attention, "
+             "findings_backlog.md 최상위 발견)을 query 개수 자체를 늘려 정면으로 해소하려는 "
+             "시도. data/clinical_{tcga,cptac}.csv, data/rna_{tcga,cptac}.csv 필요. "
+             "--fusion과 동시 사용 불가.",
+    )
+    model_group.add_argument(
         "--PM4", action="store_true",
         help="ViT_PM4 사용 (다성분 pooling(mean/std/attn-weighted/top-k) + RNA post-hoc "
              "sigmoid 게이트, 레퍼런스 M3/M4의 Morphology Burden Pooling 이식). "
@@ -1661,22 +1673,22 @@ def main():
         raise ValueError("--fusion은 precomputed(features.pt) 모드에서만 지원됩니다. --image와 함께 사용 불가.")
     if args.M2 and args.fusion:
         raise ValueError("--M2(Clinical fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
-    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF) and args.fusion:
-        raise ValueError("--M4/--M4A/--M4B/--PM4/--PMA(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
+    if (args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.MCAT) and args.fusion:
+        raise ValueError("--M4/--M4A/--M4B/--PM4/--PMA/--MCAT(Clinical+RNA fusion)와 --fusion(Cluster fusion)은 동시에 지원되지 않습니다.")
     if (args.M5 or args.M6 or args.M6X) and args.fusion:
         raise ValueError("--M5/--M6/--M6X(WSI-free)와 --fusion(Cluster fusion, WSI 전제)은 동시에 지원되지 않습니다.")
-    if args.avgpool and (args.M2 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X or args.fusion):
+    if args.avgpool and (args.M2 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X or args.fusion or args.MCAT):
         raise ValueError(
             "--avgpool은 --M1(기본)/--M4에서만 지원됩니다 — "
-            "--M2/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion과 동시 사용 불가."
+            "--M2/--M4A/--M4B/--PM4/--PMA/--M5/--M6/--M6X/--fusion/--MCAT과 동시 사용 불가."
         )
     if args.clinical_staging and not (
         args.M2 or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
-        or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M2_POOL
+        or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M2_POOL or args.MCAT
     ):
         raise ValueError(
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
-            "--PMA/--M4A_FF/--M2_FF/--M5/--M2_POOL)에서만 사용 가능합니다."
+            "--PMA/--M4A_FF/--M2_FF/--M5/--M2_POOL/--MCAT)에서만 사용 가능합니다."
         )
     if (args.rna_dim is not None or args.clinical_dim is not None) and not args.PMA:
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
@@ -1738,7 +1750,7 @@ def main():
     # [Clinical] --M2/--M4/--M4A/--M4B/--PM4/--PMA/--M5 시 age z-score 정규화 통계를 학습 코호트
     # (args.dataset)에서 계산해 고정한다(extract_rna_clinical.py의 "데이터셋 내부 z-score
     # 정규화" 관례와 동일). dataset="both"면 두 코호트 clinical.csv를 합쳐 통계를 계산한다.
-    if args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5:
+    if args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.MCAT:
         if args.dataset == "both":
             import pandas as pd
             ages = pd.concat([
@@ -1786,13 +1798,28 @@ def main():
     # 고른다 — 기본(subtype)은 Bailey/Moffitt subtype 분류용 ~340개, literature_{1000,1500,2000}은
     # data/select_rnaseq_genes.py 산출물(생존 예측에 직접 최적화된 유전자셋). WSISurvivalDataset에
     # 그대로 넘겨 실제 로드되는 컬럼과 rna_input_dim이 항상 일치하게 한다.
-    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
+    uses_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X or args.MCAT
     rna_pathway_categories = None
+    mcat_gene_sets = None
     if uses_rna:
         if args.rna_genes == "pathway8":
             rna_pathway_categories = pathway_category_gene_ids()
             rna_gene_ids  = None
             rna_input_dim = len(rna_pathway_categories)
+        elif args.MCAT:
+            # [MCAT] GeneGroupEncoder는 rna_gene_ids(개별 유전자 z-score 벡터, 1500개 그대로)와
+            # gene_sets(카테고리→유전자ID 매핑)를 둘 다 필요로 한다 — pathway8처럼 미리
+            # 카테고리 스칼라로 뭉개면 안 됨(findings_backlog.md "10. Pathway8 집계 — 실패"
+            # 참조, models/gene_group_encoder.py 참조). rna_pathway_categories(위 pathway8
+            # 분기와 공유하는 변수)에는 절대 대입하지 않는다 — WSISurvivalDataset이
+            # rna_pathway_categories is not None이면 개별 유전자 대신 8개 카테고리 합집합
+            # (163개)으로 컬럼을 줄여버려(data/dataset.py:789), 모델이 기대하는 1500개
+            # gene_ids 인덱스와 실제 rna 텐서 길이가 어긋나 index_select가 범위를 벗어난다
+            # (2026-08-31 로컬 스모크테스트에서 CUDA device-side assert로 실제 발견).
+            # mcat_gene_sets는 오직 ViT_MCAT(gene_sets=...) 생성자에만 넘긴다.
+            rna_gene_ids  = literature_guided_gene_ids_intersection(int(args.rna_genes.split("_")[1]))
+            rna_input_dim = len(rna_gene_ids)
+            mcat_gene_sets = pathway_category_gene_ids()
         elif args.rna_genes.endswith("_tcga_only") or args.rna_genes.endswith("_cptac_only"):
             # 이 분기를 먼저 안 걸러 아래 일반 분기로 흘려보내면 leaky한 both-결합
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서
@@ -1824,6 +1851,8 @@ def main():
         model_prefix = "M4_AVGPOOL" if args.avgpool else "M4"
     elif args.M4A:
         model_prefix = "M4A"
+    elif args.MCAT:
+        model_prefix = "MCAT"
     elif args.M4B:
         model_prefix = "M4B"
     elif args.PM4:
@@ -2051,6 +2080,7 @@ def main():
                 # [LateFusion/Clinical/RNA] 모델 종류 및 군집 수 기록 — ablation 비교용
                 "model":                 ("ViT_M4" if args.M4
                                            else "ViT_M4A" if args.M4A
+                                           else "ViT_MCAT" if args.MCAT
                                            else "ViT_M4B" if args.M4B
                                            else "ViT_PM4" if args.PM4
                                            else "ViT_PMA" if args.PMA
@@ -2100,8 +2130,8 @@ def main():
     # staging 컬럼만 aux head가 참조한다(with_staging=True인데 with_clinical=False면
     # data/dataset.py의 검증에서 에러가 났었음).
     with_clinical = (args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
-                      or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.stage_aux_weight > 0)
-    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X
+                      or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.stage_aux_weight > 0 or args.MCAT)
+    with_rna = args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M6 or args.M6X or args.MCAT
 
     restrict_case_ids = None
     if args.reference_cohort:
@@ -2270,6 +2300,15 @@ def main():
                          use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
                          skip_patch_vit=args.skip_patch_vit,
                          **stage_kwargs, **margin_kwargs).to(device)
+    elif args.MCAT:
+        # 2026-08-31: M4A(단일 query co-attention)를 진짜 MCAT/SurvPath 스타일 multi-pathway-
+        # token co-attention으로 확장 — models/vit_mcat.py 참조.
+        model = ViT_MCAT(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                          gene_ids=rna_gene_ids, gene_sets=mcat_gene_sets,
+                          precomputed=cfg.data.precomputed, backbone=args.backbone,
+                          use_attn_dispersion=args.attn_dispersion, combine_mode=args.combine_mode,
+                          skip_patch_vit=args.skip_patch_vit,
+                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                          precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
@@ -2560,6 +2599,10 @@ def main():
     elif args.M4A:
         print(f"Model: ViT_M4A (ViT+CoAttentionPooling(RNA query) + Clinical age/sex MLP + RNA-seq MLP, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
+    elif args.MCAT:
+        print(f"Model: ViT_MCAT (ViT+MultiQueryCoAttentionPooling(8개 pathway token query) + "
+              f"Clinical age/sex MLP + GeneGroupEncoder, "
+              f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M4B:
         print(f"Model: ViT_M4B (ViT+pre-ViT FiLM(RNA) token conditioning + Clinical age/sex MLP + "
               f"RNA-seq MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
@@ -2675,6 +2718,8 @@ def main():
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna.pt"
     elif args.M4A:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna_coattn.pt"
+    elif args.MCAT:
+        ckpt_path = ckpt_dir / f"survival_{tag}_best_mcat.pt"
     elif args.M4B:
         ckpt_path = ckpt_dir / f"survival_{tag}_best_clinical_rna_film.pt"
     elif args.PM4:
@@ -3064,6 +3109,7 @@ def main():
                     "external_dataset": external_dataset,
                     "model":            ("ViT_M4" if args.M4
                                           else "ViT_M4A" if args.M4A
+                                          else "ViT_MCAT" if args.MCAT
                                           else "ViT_M4B" if args.M4B
                                           else "ViT_PM4" if args.PM4
                                           else "ViT_PMA" if args.PMA
