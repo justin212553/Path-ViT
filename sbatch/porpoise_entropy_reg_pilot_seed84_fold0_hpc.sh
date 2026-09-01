@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-2
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/porpoise_entropy_reg_pilot_seed84_fold0_%a.log
 
 # 2026-08-31: attn_pool의 patch attention entropy(0~1, 1=완전균등)를 Cox loss에 직접 벌점으로
@@ -18,8 +18,8 @@
 # 점이 다르다 — 같은 문제(entropy 붕괴)에 대한 두 가지 다른 접근을 나란히 검증.
 #
 # no_aux 최종 레시피(dispersion 유지, aux 제거, seed84/fold0, baseline entropy_reg=0 internal
-# C=0.7119)에 entropy_reg_weight만 4단계로 스윕 — array index 0/1/2/3 = 0.0(baseline 재확인
-# 용)/0.05/0.1/0.3.
+# C=0.7119 — 이미 확인된 값이라 재확인용 0.0은 뺌, 시간 절약)에 entropy_reg_weight만 3단계로
+# 스윕 — array index 0/1/2 = 0.05/0.1/0.3.
 #
 # 제출: sbatch sbatch/porpoise_entropy_reg_pilot_seed84_fold0_hpc.sh
 
@@ -31,7 +31,7 @@ conda activate Path-ViT
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
-WEIGHTS=(0.0 0.05 0.1 0.3)
+WEIGHTS=(0.05 0.1 0.3)
 IDX=$SLURM_ARRAY_TASK_ID
 W=${WEIGHTS[$IDX]}
 

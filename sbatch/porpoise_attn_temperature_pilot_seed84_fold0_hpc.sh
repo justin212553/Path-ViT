@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=03:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-2
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/porpoise_attn_temperature_pilot_seed84_fold0_%a.log
 
 # 2026-08-31: attn_pool의 softmax 이전 score를 처음부터 낮은 temperature로 학습시키는 ablation
@@ -18,8 +18,9 @@
 # 이번엔 학습 자체를 그 T를 알고 하게 만들어, "raw score가 처음부터 낮은 T에서도 좋게 나오도록
 # 최적화"되는지 확인한다.
 #
-# no_aux 최종 레시피(dispersion 유지, aux 제거, seed84/fold0, baseline T=1.0 internal C=0.7119)에
-# temperature만 4단계로 스윕 — array index 0/1/2/3 = T 1.0(baseline 재확인용)/0.5/0.2/0.1.
+# no_aux 최종 레시피(dispersion 유지, aux 제거, seed84/fold0, baseline T=1.0 internal C=0.7119
+# — 이미 확인된 값이라 재확인용 T=1.0은 뺌, 시간 절약)에 temperature만 3단계로 스윕 —
+# array index 0/1/2 = T 0.5/0.2/0.1.
 #
 # 제출: sbatch sbatch/porpoise_attn_temperature_pilot_seed84_fold0_hpc.sh
 
@@ -31,7 +32,7 @@ conda activate Path-ViT
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
-TEMPS=(1.0 0.5 0.2 0.1)
+TEMPS=(0.5 0.2 0.1)
 IDX=$SLURM_ARRAY_TASK_ID
 T=${TEMPS[$IDX]}
 
