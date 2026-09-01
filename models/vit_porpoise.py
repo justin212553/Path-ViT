@@ -34,6 +34,7 @@ import torch.nn as nn
 
 from .vit_m1 import AttentionPooling
 from .vit_m4 import ViT_M4
+from .vit_m4a import CoAttentionPooling
 from .bilinear_fusion import BilinearFusion
 from config import ModelConfig
 
@@ -84,7 +85,11 @@ class ViT_PORPOISE(ViT_M4):
         fusion_gate: bool = True,
         fusion_dropout: float = 0.25,
         use_meanpool: bool = False,
+        use_coattn: bool = False,
+        num_heads: int = 4,
     ):
+        if use_meanpool and use_coattn:
+            raise ValueError("use_meanpool과 use_coattn은 동시에 켤 수 없습니다(attn_pool 자리가 하나뿐).")
         super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
                           use_staging=use_staging, stage_stats=stage_stats,
                           use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
@@ -92,11 +97,22 @@ class ViT_PORPOISE(ViT_M4):
                           skip_patch_vit=skip_patch_vit, use_clinical=True)
 
         # ViT_M4가 만든 RNA-guided attn_pool(context_dim=embed_dim)을 평범한 gated-ABMIL로
-        # 교체 — PORPOISE는 WSI 풀링 단계에서 RNA를 전혀 참조하지 않는다. use_meanpool=True면
-        # 그 gated-ABMIL마저 무파라미터 MeanPooling으로 바꾼다(위 클래스 docstring 참조 —
-        # attention이 patch를 못 고른다는 게 이미 확인됐으니, "학습되는 균등 근사"를 진짜
-        # 균등으로 바꿔도 성능이 같은지 직접 검증하는 ablation).
-        self.attn_pool = MeanPooling() if use_meanpool else AttentionPooling(cfg.embed_dim)
+        # 교체 — PORPOISE는 원래 WSI 풀링 단계에서 RNA를 전혀 참조하지 않는다.
+        #   use_meanpool=True: 그 gated-ABMIL마저 무파라미터 MeanPooling으로 바꾼다(위 클래스
+        #     docstring 참조 — attention이 patch를 못 고른다는 게 이미 확인됐으니, "학습되는
+        #     균등 근사"를 진짜 균등으로 바꿔도 성능이 같은지 직접 검증하는 ablation).
+        #   use_coattn=True: 2026-08-31 "나이스트롬이 patch 간 차이를 뭉개서 그 뒤의 RNA
+        #     co-attention이 구별을 못 한 것 아니냐" 가설(스크립트: m4a_skip_patch_vit_pilot)을
+        #     BilinearFusion과 결합해서도 검증하는 조합 — models/vit_m4a.py::CoAttentionPooling
+        #     (M4A와 동일 RNA-query cross-attention)을 그대로 재사용, skip_patch_vit=True와
+        #     같이 켜면 "나이스트롬 없는 RNA co-attention + Kronecker fusion"이 된다. M4A는
+        #     concat fusion이라 이 조합(co-attention + Kronecker)은 M4A 단독 실험과 별개다.
+        if use_meanpool:
+            self.attn_pool = MeanPooling()
+        elif use_coattn:
+            self.attn_pool = CoAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
+        else:
+            self.attn_pool = AttentionPooling(cfg.embed_dim)
 
         self.fusion = BilinearFusion(cfg.embed_dim, cfg.embed_dim, mmhid=cfg.embed_dim,
                                       gate=fusion_gate, dropout=fusion_dropout)

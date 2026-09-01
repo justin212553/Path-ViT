@@ -1396,6 +1396,15 @@ def _parse_args() -> argparse.Namespace:
              "균등으로 바꿔도 성능이 같은지(=attention 모듈 자체가 불필요한지) 직접 검증한다.",
     )
     parser.add_argument(
+        "--porpoise-coattn", action="store_true",
+        help="2026-08-31: --PORPOISE 전용, --porpoise-meanpool과 동시 사용 불가 — attn_pool을 "
+             "models/vit_m4a.py::CoAttentionPooling(M4A와 동일, RNA가 query인 cross-attention)"
+             "으로 바꾼다. '나이스트롬이 patch 간 차이를 뭉개서 RNA co-attention이 구별을 "
+             "못 한 것 아니냐'는 가설(--M4A --skip-patch-vit 단독 실험과 별개)을 BilinearFusion "
+             "과 결합해서도 확인 — --skip-patch-vit와 같이 쓰면 '나이스트롬 없는 RNA "
+             "co-attention + Kronecker fusion' 조합이 된다.",
+    )
+    parser.add_argument(
         "--no-coattn", action="store_true",
         help="2026-08-31: --PMA 전용 — WSI가 성능에 안 먹히는 원인이 Nystrom self-attention/"
              "ABMIL(MultiComponentPooling attn view)/co-attention 중 무엇인지 분리하는 3종 "
@@ -1719,6 +1728,10 @@ def main():
         raise ValueError("--no-coattn은 --PMA에서만 사용 가능합니다.")
     if args.porpoise_meanpool and not args.PORPOISE:
         raise ValueError("--porpoise-meanpool은 --PORPOISE에서만 사용 가능합니다.")
+    if args.porpoise_coattn and not args.PORPOISE:
+        raise ValueError("--porpoise-coattn은 --PORPOISE에서만 사용 가능합니다.")
+    if args.porpoise_meanpool and args.porpoise_coattn:
+        raise ValueError("--porpoise-meanpool과 --porpoise-coattn은 동시에 사용할 수 없습니다.")
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -1982,6 +1995,8 @@ def main():
         model_prefix += "_NOCOATTN"
     if args.porpoise_meanpool:
         model_prefix += "_MEANPOOL"
+    if args.porpoise_coattn:
+        model_prefix += "_RNACOATTN"
     if args.no_clinical:
         model_prefix += "_NOCLINICAL"
     if args.shuffle_patches:
@@ -2345,7 +2360,7 @@ def main():
                               precomputed=cfg.data.precomputed, backbone=args.backbone,
                               use_attn_dispersion=args.attn_dispersion,
                               skip_patch_vit=args.skip_patch_vit,
-                              use_meanpool=args.porpoise_meanpool,
+                              use_meanpool=args.porpoise_meanpool, use_coattn=args.porpoise_coattn,
                               **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
