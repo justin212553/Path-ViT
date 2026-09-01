@@ -1387,6 +1387,15 @@ def _parse_args() -> argparse.Namespace:
              "wandb/checkpoint에 _RNAGATE 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--porpoise-meanpool", action="store_true",
+        help="2026-08-31: --PORPOISE 전용 — plain gated-ABMIL(attn_pool)의 patch attention이 "
+             "entropy 0.999(거의 완전 uniform)로 나와(scripts/diagnose_porpoise_reliance.py), "
+             "PAAD(N≈90)뿐 아니라 BRCA(N≈1058) co-attention heatmap에서도 같은 붕괴가 재현된 "
+             "뒤(findings_backlog.md) 나온 ablation — attn_pool을 무파라미터 MeanPooling"
+             "(models/vit_porpoise.py::MeanPooling)으로 바꿔, '학습되는 균등 근사'를 진짜 "
+             "균등으로 바꿔도 성능이 같은지(=attention 모듈 자체가 불필요한지) 직접 검증한다.",
+    )
+    parser.add_argument(
         "--no-coattn", action="store_true",
         help="2026-08-31: --PMA 전용 — WSI가 성능에 안 먹히는 원인이 Nystrom self-attention/"
              "ABMIL(MultiComponentPooling attn view)/co-attention 중 무엇인지 분리하는 3종 "
@@ -1708,6 +1717,8 @@ def main():
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
     if args.no_coattn and not args.PMA:
         raise ValueError("--no-coattn은 --PMA에서만 사용 가능합니다.")
+    if args.porpoise_meanpool and not args.PORPOISE:
+        raise ValueError("--porpoise-meanpool은 --PORPOISE에서만 사용 가능합니다.")
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -1969,6 +1980,8 @@ def main():
         model_prefix += "_RNAGATE"
     if args.no_coattn:
         model_prefix += "_NOCOATTN"
+    if args.porpoise_meanpool:
+        model_prefix += "_MEANPOOL"
     if args.no_clinical:
         model_prefix += "_NOCLINICAL"
     if args.shuffle_patches:
@@ -2332,6 +2345,7 @@ def main():
                               precomputed=cfg.data.precomputed, backbone=args.backbone,
                               use_attn_dispersion=args.attn_dispersion,
                               skip_patch_vit=args.skip_patch_vit,
+                              use_meanpool=args.porpoise_meanpool,
                               **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,

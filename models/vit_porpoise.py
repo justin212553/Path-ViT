@@ -38,6 +38,33 @@ from .bilinear_fusion import BilinearFusion
 from config import ModelConfig
 
 
+class MeanPooling(nn.Module):
+    """무파라미터 mean-pooling — AttentionPooling(gated-ABMIL)과 동일한 (wsi_embed, attn_weights)
+    반환 규약을 지켜 attn_pool 자리에 그대로 꽂아 쓸 수 있다.
+
+    2026-08-31 배경: scripts/diagnose_porpoise_reliance.py로 확인한 plain gated-ABMIL의 patch
+    attention entropy가 0.999(거의 완전 uniform)였다 — RNA 간섭을 없애도 patch를 못 골랐다.
+    그런데 이 결과가 PAAD(N≈90)뿐 아니라 BRCA(N≈1058, findings_backlog.md 2026-07-22 heatmap
+    확인: co-attention 4-관점 가중치 0.24~0.27로 균등)에서도 재현됐다 — 표본을 8배 늘려도
+    attention이 "선택"하는 역할을 한 번도 못 해봤다는 뜻이다. 즉 지금 attn_pool은 사실상
+    비싼(파라미터 있는) mean-pool을 흉내내고 있을 뿐이므로, 아예 진짜 mean-pool로 바꿔도
+    성능이 같아야 한다는 가설을 직접 검증한다 — 같으면 attention 모듈 자체가 이 태스크에
+    불필요하다는 실증이 되고, 파라미터도 줄어 이 표본 규모(91명)의 과적합 위험도 낮아진다.
+
+    attn_weights를 균등분포(1/N)로 반환하는 이유: --attn-dispersion(models/spatial_features.py::
+    attention_dispersion(coords, attn_weights))이 이 값을 그대로 쓰는데, 균등 가중치를 넣으면
+    "전체 patch의 공간적 퍼짐"이라는 여전히 의미 있는 기하학적 통계가 나온다(0으로 채우거나
+    None을 주면 이 항이 깨짐) — dispersion ablation(2026-08-31)에서 dispersion 자체는 PORPOISE
+    성능에 크게 기여한다고 확인됐으므로, mean-pool로 바꿔도 이 경로는 그대로 살려둔다.
+    """
+
+    def forward(self, tokens: torch.Tensor, context: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        n = tokens.shape[0]
+        wsi_embed = tokens.mean(dim=0)
+        attn_weights = tokens.new_full((n,), 1.0 / n)
+        return wsi_embed, attn_weights
+
+
 class ViT_PORPOISE(ViT_M4):
     def __init__(
         self,
@@ -56,6 +83,7 @@ class ViT_PORPOISE(ViT_M4):
         skip_patch_vit: bool = False,
         fusion_gate: bool = True,
         fusion_dropout: float = 0.25,
+        use_meanpool: bool = False,
     ):
         super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
                           use_staging=use_staging, stage_stats=stage_stats,
@@ -64,8 +92,11 @@ class ViT_PORPOISE(ViT_M4):
                           skip_patch_vit=skip_patch_vit, use_clinical=True)
 
         # ViT_M4가 만든 RNA-guided attn_pool(context_dim=embed_dim)을 평범한 gated-ABMIL로
-        # 교체 — PORPOISE는 WSI 풀링 단계에서 RNA를 전혀 참조하지 않는다.
-        self.attn_pool = AttentionPooling(cfg.embed_dim)
+        # 교체 — PORPOISE는 WSI 풀링 단계에서 RNA를 전혀 참조하지 않는다. use_meanpool=True면
+        # 그 gated-ABMIL마저 무파라미터 MeanPooling으로 바꾼다(위 클래스 docstring 참조 —
+        # attention이 patch를 못 고른다는 게 이미 확인됐으니, "학습되는 균등 근사"를 진짜
+        # 균등으로 바꿔도 성능이 같은지 직접 검증하는 ablation).
+        self.attn_pool = MeanPooling() if use_meanpool else AttentionPooling(cfg.embed_dim)
 
         self.fusion = BilinearFusion(cfg.embed_dim, cfg.embed_dim, mmhid=cfg.embed_dim,
                                       gate=fusion_gate, dropout=fusion_dropout)
