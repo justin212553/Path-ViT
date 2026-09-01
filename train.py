@@ -106,6 +106,16 @@ _BRANCH_ATTRS = {
 }
 
 
+def _attn_entropy(p: torch.Tensor) -> torch.Tensor:
+    """p: (N,) 합=1인 attention 분포. 정규화 엔트로피(0~1, 1=완전균등) — 미분 가능(entropy
+    정규화 loss, --entropy-reg-weight에서 씀). N<=1이면 정의상 0(엔트로피 없음)을 반환."""
+    n = p.shape[0]
+    if n <= 1:
+        return p.new_zeros(())
+    ent = -(p.clamp_min(1e-12) * p.clamp_min(1e-12).log()).sum()
+    return ent / torch.log(torch.tensor(float(n), device=p.device))
+
+
 def _branch_param_groups(model) -> dict[str, list]:
     """모델 파라미터를 clinical/rna/other 3개 그룹으로 나눈다(각 브랜치가 없는 모델이면 해당
     리스트는 빈 리스트)."""
@@ -150,10 +160,13 @@ def _patient_risk(
     (--rna-aux-weight, models/rna_predictor.py 참조), stage_aux_loss는 model.stage_aux_head가
     있을 때만 텐서(--stage-aux-weight, models/stage_predictor.py 참조), 둘 다 없으면 None.
 
-    branch_risk_out: --ogm-ge 전용(2026-08-15). dict를 넘기면 combine_mode="cox_add"일 때
-    WSI 단독 항("wsi", clinical/rna cox_add 가산 *전* risk_head 출력)과 clinical 단독 항
-    ("clinical", model.clinical_linear 출력)을 이 dict에 곁다리로 채워넣는다(반환값 자체는
-    안 바뀜 — 기존 호출부 전부와 호환). None이면 아무 동작 안 함(기본값, 부작용 없음).
+    branch_risk_out: --ogm-ge 전용(2026-08-15)이었으나 2026-08-31 --entropy-reg-weight도
+    같은 side-channel을 공유하도록 확장. dict를 넘기면 combine_mode="cox_add"일 때 WSI 단독
+    항("wsi", clinical/rna cox_add 가산 *전* risk_head 출력)과 clinical 단독 항("clinical",
+    model.clinical_linear 출력), 그리고 attn_pool의 슬라이드 평균 patch attention entropy
+    ("attn_entropy", 0~1 정규화, model이 attn_weights를 반환하는 WSI 모델일 때만)를 이 dict에
+    곁다리로 채워넣는다(반환값 자체는 안 바뀜 — 기존 호출부 전부와 호환). None이면 아무 동작
+    안 함(기본값, 부작용 없음).
 
     [patch_keep_frac, --patch-keep-frac(PatchDropout)] model.training(=True, train_one_epoch에서
     호출될 때만)일 때만 슬라이드 패치를 이 비율만큼 랜덤 서브샘플한다 — val/test/external
@@ -217,6 +230,7 @@ def _patient_risk(
         slide_meanpool_embeds = []
         slide_spatial_feats = []
         slide_risk_stats = []
+        slide_attn_entropies = []
         for slide in patient_slides:
             coords = slide["coords"]
             features = slide.get("features")
@@ -259,6 +273,16 @@ def _patient_risk(
                 slide_spatial_feats.append(out["spatial_feat"])
             if "risk_stats" in out:
                 slide_risk_stats.append(out["risk_stats"])
+            if branch_risk_out is not None and "attn_weights" in out:
+                # [--entropy-reg-weight] attn_pool의 patch attention이 균등분포로 붕괴하는
+                # 문제(findings_backlog.md — entropy 0.999+, 코호트 크기·나이스트롬 유무와
+                # 무관하게 재현)를 학습 중에 직접 벌점으로 억제해보는 ablation. branch_risk_out
+                # (--ogm-ge와 동일한 기존 side-channel, 새 반환값 안 늘림)에 슬라이드 평균
+                # entropy를 얹어 train_one_epoch이 꺼내 쓰게 한다.
+                slide_attn_entropies.append(_attn_entropy(out["attn_weights"]))
+
+        if branch_risk_out is not None and slide_attn_entropies:
+            branch_risk_out["attn_entropy"] = torch.stack(slide_attn_entropies).mean()
 
         patient_embed = torch.stack(slide_embeds).mean(dim=0)      # (D,) — 슬라이드 평균 풀링
         patient_spatial_feat = torch.stack(slide_spatial_feats).mean(dim=0) if slide_spatial_feats else None
@@ -414,6 +438,7 @@ def train_one_epoch(
     auto_balance_enabled: bool = False,
     ogm_ge_alpha: float | None = None,
     ogm_ge_epoch_progress: float = 0.0,
+    entropy_reg_weight: float = 0.0,
     desc: str = "train",
 ) -> float:
     model.train()
@@ -426,9 +451,10 @@ def train_one_epoch(
 
     risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
     ogm_risks_wsi, ogm_risks_clinical = [], []
+    entropy_losses = []
     is_sam = isinstance(optimizer, SAM)
 
-    def _compute_loss(risk_list, time_t, event_t, aux_list, stage_aux_list):
+    def _compute_loss(risk_list, time_t, event_t, aux_list, stage_aux_list, entropy_list):
         loss = cox_ph_loss(torch.cat(risk_list), time_t, event_t)
         if rna_aux_weight > 0 and aux_list:
             # --rna-aux-weight(models/rna_predictor.py): WSI 표현이 RNA 발현도 예측하도록
@@ -439,24 +465,37 @@ def train_one_epoch(
         if stage_aux_weight > 0 and stage_aux_list:
             # --stage-aux-weight(models/stage_predictor.py): 위와 동일 원리, 타깃만 T-stage/grade.
             loss = loss + stage_aux_weight * torch.stack(stage_aux_list).mean()
+        if entropy_reg_weight > 0 and entropy_list:
+            # --entropy-reg-weight: attn_pool의 patch attention entropy(0~1, 1=완전균등)를
+            # loss에 직접 벌점으로 더한다 — 낮출수록(더 뾰족해질수록) loss가 줄어드니, Cox loss와
+            # 함께 최소화하는 과정에서 attention이 균등분포로 붕괴하지 않도록 명시적으로 유도한다.
+            # 2026-08-31: 이미 학습된 체크포인트에 재학습 없이 temperature만 후처리로 낮추는
+            # sharpening은 오히려 성능을 떨어뜨렸다(T=1로 학습된 raw score를 T<1로 재해석하면
+            # 신호뿐 아니라 노이즈까지 같이 증폭됨) — 그래서 이번엔 처음부터 이 벌점을 알고
+            # 학습하게 한다.
+            loss = loss + entropy_reg_weight * torch.stack(entropy_list).mean()
         return loss
 
     def _refresh_batch(patients):
         """SAM 2nd pass용 — perturb된 가중치로 같은 배치(환자 리스트)를 다시 forward한다."""
-        risks2, aux2, stage_aux2 = [], [], []
+        risks2, aux2, stage_aux2, entropy2 = [], [], [], []
         for ps in patients:
-            r2, a2, s2 = _patient_risk(
+            branch_risk_out2 = {} if (ogm_ge_alpha is not None or entropy_reg_weight > 0) else None
+            r2, a2_, s2_ = _patient_risk(
                 model, ps, device, amp_ctx, transform, chunk_size, patch_keep_frac,
                 shuffle_patches=shuffle_patches, tile_cache=tile_cache,
                 patch_subsample_generator=patch_subsample_generator,
                 modality_dropout_p=modality_dropout_p,
+                branch_risk_out=branch_risk_out2,
             )
             risks2.append(r2)
-            if a2 is not None:
-                aux2.append(a2)
-            if s2 is not None:
-                stage_aux2.append(s2)
-        return risks2, aux2, stage_aux2
+            if a2_ is not None:
+                aux2.append(a2_)
+            if s2_ is not None:
+                stage_aux2.append(s2_)
+            if branch_risk_out2 and "attn_entropy" in branch_risk_out2:
+                entropy2.append(branch_risk_out2["attn_entropy"])
+        return risks2, aux2, stage_aux2, entropy2
 
     def _rescale_branch_grads():
         """--auto-branch-balance: clinical/rna 브랜치의 gradient norm을 나머지(WSI 등) 파라미터의
@@ -528,13 +567,13 @@ def train_one_epoch(
 
     def _flush():
         nonlocal risks, times, events, aux_losses, stage_aux_losses, patient_batch, total_loss, total_batches
-        nonlocal ogm_risks_wsi, ogm_risks_clinical
+        nonlocal ogm_risks_wsi, ogm_risks_clinical, entropy_losses
         if not risks:
             return
         time_t  = torch.cat(times).to(device)
         event_t = torch.cat(events).to(device)
 
-        loss = _compute_loss(risks, time_t, event_t, aux_losses, stage_aux_losses)
+        loss = _compute_loss(risks, time_t, event_t, aux_losses, stage_aux_losses, entropy_losses)
         optimizer.zero_grad()
         loss.backward()
         _rescale_branch_grads()
@@ -550,8 +589,8 @@ def train_one_epoch(
             # 재평가(2nd pass)한 gradient로 실제 업데이트한다(utils/sam.py).
             optimizer.first_step()
             optimizer.zero_grad()
-            risks2, aux2, stage_aux2 = _refresh_batch(patient_batch)
-            loss2 = _compute_loss(risks2, time_t, event_t, aux2, stage_aux2)
+            risks2, aux2, stage_aux2, entropy2 = _refresh_batch(patient_batch)
+            loss2 = _compute_loss(risks2, time_t, event_t, aux2, stage_aux2, entropy2)
             loss2.backward()
             _rescale_branch_grads()
             _ogm_ge_modulate()
@@ -574,12 +613,13 @@ def train_one_epoch(
                 total_batches += 1
         risks, times, events, aux_losses, stage_aux_losses, patient_batch = [], [], [], [], [], []
         ogm_risks_wsi, ogm_risks_clinical = [], []
+        entropy_losses = []
 
     # mininterval=30: data/patch_utils.py::build_tile_cache와 동일한 이유(비-TTY 로그 폭주 방지).
     for patient_slides in tqdm(loader, desc=desc, unit="patient", mininterval=30):  # 환자 1명 분량의 슬라이드 리스트
         if len(patient_slides) == 0:
             continue
-        branch_risk_out = {} if ogm_ge_alpha is not None else None
+        branch_risk_out = {} if (ogm_ge_alpha is not None or entropy_reg_weight > 0) else None
         risk, aux_loss, stage_aux_loss = _patient_risk(
             model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
             shuffle_patches=shuffle_patches, tile_cache=tile_cache,
@@ -598,6 +638,8 @@ def train_one_epoch(
         if branch_risk_out and "wsi" in branch_risk_out and "clinical" in branch_risk_out:
             ogm_risks_wsi.append(branch_risk_out["wsi"].detach())
             ogm_risks_clinical.append(branch_risk_out["clinical"].detach())
+        if branch_risk_out and "attn_entropy" in branch_risk_out:
+            entropy_losses.append(branch_risk_out["attn_entropy"])
         if is_sam:
             patient_batch.append(patient_slides)
 
@@ -830,6 +872,17 @@ def _parse_args() -> argparse.Namespace:
              "tanh(alpha*|score차|) 계수로 억제하고 억제한 만큼 노이즈를 더한다(GE, epoch가 "
              "진행될수록 anneal). None(기본)이면 꺼짐. alpha가 클수록 억제가 강함 — 처음엔 "
              "1.0 근처로 시도.",
+    )
+    parser.add_argument(
+        "--entropy-reg-weight", type=float, default=0.0,
+        help="2026-08-31: attn_pool의 patch attention entropy(0~1, 1=완전균등)를 Cox loss에 "
+             "직접 벌점으로 더해, 학습 중에 균등분포 붕괴를 억제해본다(train.py::train_one_epoch "
+             "_compute_loss 참조). 배경 — findings_backlog.md: entropy 0.999+ 붕괴가 PAAD/BRCA, "
+             "나이스트롬 유무와 무관하게 재현됨. 이미 학습된 체크포인트에 재학습 없이 temperature만 "
+             "낮추는 후처리 sharpening은 오히려 성능을 떨어뜨렸다(2026-08-31 diagnose 결과 — T=1로 "
+             "학습된 raw score를 T<1로 재해석하면 신호뿐 아니라 노이즈까지 같이 증폭됨) — 그래서 "
+             "이번엔 처음부터 이 벌점을 알고 학습하게 한다. 0(기본)이면 꺼짐. attn_weights를 "
+             "반환하는 모든 WSI 모델(M1/M2/M4/M4A/PMA/MCAT/PORPOISE 등)에서 공통 동작.",
     )
     parser.add_argument(
         "--swa", action="store_true",
@@ -1405,6 +1458,16 @@ def _parse_args() -> argparse.Namespace:
              "co-attention + Kronecker fusion' 조합이 된다.",
     )
     parser.add_argument(
+        "--porpoise-attn-temperature", type=float, default=1.0,
+        help="2026-08-31: --PORPOISE 전용(--porpoise-meanpool/--porpoise-coattn과는 무관, plain "
+             "gated-ABMIL에만 적용) — attn_pool의 softmax 이전 score를 이 값으로 나눈다(1보다 "
+             "작으면 attention이 더 뾰족해짐, models/vit_m1.py::AttentionPooling 참조). 배경 — "
+             "이미 학습된(T=1) 체크포인트에 재학습 없이 낮은 T로 후처리 sharpening을 해보니 "
+             "entropy는 낮아졌지만 C-index는 오히려 계속 떨어졌다(diagnose 결과, T=1 전제로 만든"
+             "raw score를 재해석하면 신호뿐 아니라 노이즈까지 같이 증폭됨) — 그래서 이번엔 "
+             "학습 자체를 낮은 T로 처음부터 하게 만드는 ablation. 1.0(기본)이면 기존과 동일.",
+    )
+    parser.add_argument(
         "--no-coattn", action="store_true",
         help="2026-08-31: --PMA 전용 — WSI가 성능에 안 먹히는 원인이 Nystrom self-attention/"
              "ABMIL(MultiComponentPooling attn view)/co-attention 중 무엇인지 분리하는 3종 "
@@ -1732,6 +1795,13 @@ def main():
         raise ValueError("--porpoise-coattn은 --PORPOISE에서만 사용 가능합니다.")
     if args.porpoise_meanpool and args.porpoise_coattn:
         raise ValueError("--porpoise-meanpool과 --porpoise-coattn은 동시에 사용할 수 없습니다.")
+    if args.porpoise_attn_temperature != 1.0 and not args.PORPOISE:
+        raise ValueError("--porpoise-attn-temperature는 --PORPOISE에서만 사용 가능합니다.")
+    if args.porpoise_attn_temperature != 1.0 and (args.porpoise_meanpool or args.porpoise_coattn):
+        raise ValueError(
+            "--porpoise-attn-temperature는 plain gated-ABMIL(--porpoise-meanpool/--porpoise-coattn "
+            "둘 다 꺼진 상태)에서만 의미가 있습니다."
+        )
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -1997,6 +2067,8 @@ def main():
         model_prefix += "_MEANPOOL"
     if args.porpoise_coattn:
         model_prefix += "_RNACOATTN"
+    if args.porpoise_attn_temperature != 1.0:
+        model_prefix += f"_T{args.porpoise_attn_temperature:g}"
     if args.no_clinical:
         model_prefix += "_NOCLINICAL"
     if args.shuffle_patches:
@@ -2063,6 +2135,8 @@ def main():
         model_prefix += f"_OGM{args.ogm_ge_alpha:g}"
     if args.modality_dropout_p > 0:
         model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
+    if args.entropy_reg_weight > 0:
+        model_prefix += f"_ENTREG{args.entropy_reg_weight:g}"
     if args.lr is not None:
         model_prefix += f"_LR{args.lr:.0e}"
     if args.weight_decay is not None:
@@ -2361,6 +2435,7 @@ def main():
                               use_attn_dispersion=args.attn_dispersion,
                               skip_patch_vit=args.skip_patch_vit,
                               use_meanpool=args.porpoise_meanpool, use_coattn=args.porpoise_coattn,
+                              attn_temperature=args.porpoise_attn_temperature,
                               **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -2896,6 +2971,7 @@ def main():
                                          auto_balance_enabled=args.auto_branch_balance,
                                          ogm_ge_alpha=args.ogm_ge_alpha,
                                          ogm_ge_epoch_progress=epoch / max(cfg.train.epochs - 1, 1),
+                                         entropy_reg_weight=args.entropy_reg_weight,
                                          desc=f"epoch {epoch+1} train")
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
         # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment

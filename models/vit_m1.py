@@ -76,11 +76,18 @@ class AttentionPooling(nn.Module):
     (M1/M2는 항상 context=None).
     """
 
-    def __init__(self, embed_dim: int, hidden_dim: int = 128, context_dim: int | None = None):
+    def __init__(self, embed_dim: int, hidden_dim: int = 128, context_dim: int | None = None,
+                 temperature: float = 1.0):
         super().__init__()
         self.attn_v = nn.Linear(embed_dim, hidden_dim)   # tanh 게이트
         self.attn_u = nn.Linear(embed_dim, hidden_dim)   # sigmoid 게이트
         self.attn_w = nn.Linear(hidden_dim, 1)           # 스칼라 점수
+        # 2026-08-31: attention entropy 붕괴(0.999+, findings_backlog.md) 대응 — softmax
+        # 이전에 score를 이 값으로 나눈다(1보다 작으면 분포가 뾰족해짐). 이미 학습된
+        # 체크포인트에 재학습 없이 후처리로만 낮추면 오히려 성능이 떨어졌다(T=1 학습 전제로
+        # 만들어진 raw score를 재해석하면 신호뿐 아니라 노이즈까지 같이 증폭됨, diagnose 결과) —
+        # 그래서 학습 자체를 이 temperature를 알고 하게 만드는 용도(train.py --porpoise-attn-temperature).
+        self.temperature = temperature
 
         self.context_v: nn.Linear | None = None
         self.context_u: nn.Linear | None = None
@@ -112,7 +119,7 @@ class AttentionPooling(nn.Module):
 
         # 각 패치의 중요도 점수 → softmax로 확률 분포화 (합=1 보장)
         scores = self.attn_w(gate).squeeze(-1)        # (N,)
-        attn_weights = torch.softmax(scores, dim=0)   # (N,)
+        attn_weights = torch.softmax(scores / self.temperature, dim=0)   # (N,)
 
         # 중요도 가중합으로 N개 패치 토큰을 단일 WSI 임베딩으로 집계
         wsi_embed = (attn_weights.unsqueeze(-1) * tokens).sum(dim=0)  # (D,)

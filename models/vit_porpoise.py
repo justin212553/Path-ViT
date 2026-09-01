@@ -87,6 +87,7 @@ class ViT_PORPOISE(ViT_M4):
         use_meanpool: bool = False,
         use_coattn: bool = False,
         num_heads: int = 4,
+        attn_temperature: float = 1.0,
     ):
         if use_meanpool and use_coattn:
             raise ValueError("use_meanpool과 use_coattn은 동시에 켤 수 없습니다(attn_pool 자리가 하나뿐).")
@@ -112,7 +113,10 @@ class ViT_PORPOISE(ViT_M4):
         elif use_coattn:
             self.attn_pool = CoAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
         else:
-            self.attn_pool = AttentionPooling(cfg.embed_dim)
+            # attn_temperature: score/T로 softmax 이전에 나눈다(models/vit_m1.py::AttentionPooling
+            # 참조) — 2026-08-31 재학습-없는 post-hoc sharpening은 역효과였어서(diagnose 결과),
+            # 학습 자체를 이 값을 알고 하게 만드는 ablation(train.py --porpoise-attn-temperature).
+            self.attn_pool = AttentionPooling(cfg.embed_dim, temperature=attn_temperature)
 
         self.fusion = BilinearFusion(cfg.embed_dim, cfg.embed_dim, mmhid=cfg.embed_dim,
                                       gate=fusion_gate, dropout=fusion_dropout)
