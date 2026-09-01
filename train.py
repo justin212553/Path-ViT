@@ -2692,7 +2692,15 @@ def main():
               f"Clinical age/sex MLP + GeneGroupEncoder, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.PORPOISE:
-        print(f"Model: ViT_PORPOISE (ViT+gated-ABMIL(RNA 무관) + BilinearFusion(Kronecker product, "
+        # 2026-08-31: --porpoise-meanpool/--porpoise-coattn과 무관하게 항상 "gated-ABMIL"로
+        # 고정 출력되던 버그 수정 — 실제 모델 구성(models/vit_porpoise.py)은 세 옵션 다 맞게
+        # 갈라졌지만, 로그의 자기 설명이 실제 attn_pool 종류와 달라 혼란을 줄 수 있었다.
+        pooling_desc = (
+            "MeanPooling(무파라미터)" if args.porpoise_meanpool
+            else "CoAttentionPooling(RNA query, M4A와 동일 클래스)" if args.porpoise_coattn
+            else "gated-ABMIL(RNA 무관)"
+        )
+        print(f"Model: ViT_PORPOISE (ViT+{pooling_desc} + BilinearFusion(Kronecker product, "
               f"WSI×RNA) + Clinical cox_add, "
               f"age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.M4B:
