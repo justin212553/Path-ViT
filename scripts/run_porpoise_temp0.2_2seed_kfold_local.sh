@@ -37,7 +37,12 @@ done
 echo "=== [2/2] external(cptac) eval-only: 10개 checkpoint 재사용 ==="
 for SEED in "${SEEDS[@]}"; do
   for ((FOLD=0; FOLD<N_FOLDS; FOLD++)); do
-    MATCHES=(models/checkpoint/survival_tcga_uni2_seed${SEED}_*STG_R_T0.2_DISP_FOLD${FOLD}OF${N_FOLDS}_best_porpoise.pt)
+    # 2026-09-01: 예전엔 *STG_R_T0.2_DISP...로 느슨하게 찾다가, 어젯밤 aux=1.0 sharpening
+    # 스윕이 남긴 "..._SS_AUX_STG_R_..._T0.2_DISP..." 체크포인트와 이번 aux=0 런의
+    # "..._SS_STG_R_..._T0.2_DISP..."가 둘 다 매칭돼(seed84 fold0), 알파벳순으로 AUX 버전이
+    # 먼저 골라져 rna_aux_head state_dict 불일치로 크래시했다 — "SS_STG_R"을 정확히 붙여서
+    # AUX가 중간에 낀 버전을 구조적으로 배제한다.
+    MATCHES=(models/checkpoint/survival_tcga_uni2_seed${SEED}_INT1500_SS_STG_R_PORPOISE_uni2_INT1500_SS_STG_R_T0.2_DISP_FOLD${FOLD}OF${N_FOLDS}_best_porpoise.pt)
     if [ ! -e "${MATCHES[0]}" ]; then
       echo "[SKIP] seed=${SEED} fold=${FOLD}: checkpoint를 못 찾음"
       continue
