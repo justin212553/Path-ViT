@@ -211,6 +211,14 @@ def main():
     parser.add_argument("--backbone", type=str, default="uni2")
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=84,
+                         help="train.py --seed와 반드시 동일해야 한다 — cfg.data.seed가 이걸로 "
+                              "설정돼야 kfold split(WSISurvivalDataset의 fold/n_folds)이 학습 때와 "
+                              "똑같이 재현된다. train.py는 cfg.data.seed=args.seed를 먼저 하고 "
+                              "데이터셋을 만드는데(train.py:1628), 여기서 빠뜨리면 DataConfig 기본값"
+                              "(42)으로 완전히 다른 split이 만들어져 baseline C-index가 (train 환자가 "
+                              "'test'에 섞여 들어가) 부풀려진다 — 2026-08-31 HPC 결과에서 실제로 "
+                              "겪은 버그(baseline 0.81 vs train.py 자체 평가 0.71).")
     parser.add_argument("--perm-seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -225,6 +233,7 @@ def main():
     rng = np.random.default_rng(args.perm_seed)
 
     cfg = Config()
+    cfg.data.seed = args.seed  # train.py:1628과 동일 — 이게 빠지면 fold split이 학습 때와 어긋난다
     rna_gene_ids = literature_guided_gene_ids_intersection(args.rna_n_genes)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATHS[args.dataset])
     stage_stats = stage_stats_from_df(__import__("pandas").read_csv(CLINICAL_PATHS[args.dataset]))
