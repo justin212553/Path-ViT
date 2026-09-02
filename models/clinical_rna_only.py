@@ -214,7 +214,8 @@ class ClinicalRNAOnly(nn.Module):
 
     def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor,
                 margin_ord: torch.Tensor | None = None,
-                stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+                stage_ord: dict[str, torch.Tensor] | None = None,
+                return_components: bool = False):
         """
         Args:
             age_years:  () — 환자 나이(연 단위) 스칼라 텐서
@@ -224,10 +225,18 @@ class ClinicalRNAOnly(nn.Module):
                         encode_margin_value() 규약. combine_mode 무관하게 지원.
             stage_ord:  self.use_staging=True(--clinical-staging)일 때만 필요. {field: () 스칼라
                         long} — encode_stage_value() 규약. combine_mode 무관하게 지원.
+            return_components: cox_add 전용. True면 risk 대신 {"rna":.., "clin":..} 항별 dict
+                                반환(2026-09-02, scripts/diagnose_m7_branch_contrib.py용 —
+                                gene-selection leakage 유무에 따라 clinical/RNA 기여도가 어떻게
+                                바뀌는지 비교하기 위해 추가). concat/film에서 True로 주면
+                                NotImplementedError.
         Returns:
-            risk: (1,)
+            risk: (1,) (return_components=False) 또는 cox_add 항별 dict(각 (1,))
         """
         z_r = self.rna_encoder(rna.unsqueeze(0)).squeeze(0)  # (D,)
+
+        if return_components and self.combine_mode != "cox_add":
+            raise NotImplementedError("return_components는 combine_mode='cox_add'에서만 지원합니다.")
 
         if self.combine_mode == "concat":
             clinical_kwargs = {}
@@ -251,4 +260,6 @@ class ClinicalRNAOnly(nn.Module):
         # cox_add
         risk_rna = self.risk_head(z_r.unsqueeze(0)).view(1)
         risk_clin = self.clinical_linear(clin_embed).view(1)
+        if return_components:
+            return {"rna": risk_rna, "clin": risk_clin}
         return risk_rna + risk_clin

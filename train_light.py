@@ -40,7 +40,7 @@ from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
-    literature_guided_gene_ids_intersection,
+    literature_guided_gene_ids_intersection, pathway_category_gene_ids,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
@@ -330,7 +330,7 @@ def _parse_args() -> argparse.Namespace:
             "literature_500_tcga_only", "literature_1000_tcga_only",
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
             "literature_fdr0.1_cptac_only", "purist", "purist_top20_tcga_only",
-            "literature_1500_intersection",
+            "literature_1500_intersection", "pathway8",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -591,7 +591,21 @@ def main():
         stage_stats = None
 
     rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
-    if with_rna and args.rna_genes == "purist_top20_tcga_only":
+    rna_pathway_categories = None
+    if with_rna and args.rna_genes == "pathway8":
+        # 2026-09-02: literature_guided_gene_ids_intersection(Cox test 기반)이 라벨을 보고
+        # 유전자를 고르는 방식이라, paper-spec 5-fold CV의 fold-test 환자 중 약 60%가 그
+        # 선정 과정의 "train"에 이미 들어가 있었다는 leakage가 확인됨(사용자 지적으로 발견,
+        # 정량화는 scripts/diagnose_hdp_checkpoint_weights.py 결과 및 이 세션의 대화 참조).
+        # pathway8은 OS 라벨을 전혀 참조하지 않는 순수 문헌 큐레이션(8개 생물학적 카테고리
+        # 평균 z-score, train.py --rna-genes pathway8과 동일 — data/dataset.py::
+        # pathway_category_gene_ids/WSISurvivalDataset의 rna_pathway_categories 파라미터가
+        # 이미 dataset 레벨에서 지원, train.py에서만 배선돼 있었고 이 스크립트(M5/M6/M6X/M7/
+        # HDP 공용)엔 없어서 추가함 — leakage 없는 RNA 대안으로 M7부터 비교.
+        rna_gene_ids = None
+        rna_pathway_categories = pathway_category_gene_ids()
+        rna_input_dim = len(rna_pathway_categories)
+    elif with_rna and args.rna_genes == "purist_top20_tcga_only":
         # 하이브리드: PurIST 확률(1차원, chance 수준이었음) + TCGA train split Cox-score 상위
         # 20개 개별 유전자(leakage-free) concat. data/dataset.py가 rna_purist=True와
         # rna_gene_ids가 동시에 주어지면 두 feature를 이어붙이도록 처리한다.
@@ -619,7 +633,11 @@ def main():
 
     model_prefix = ("M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7
                      else "HDP_PRETRAIN" if args.HDP_PRETRAIN else "HDP")
-    if args.rna_genes == "purist_top20_tcga_only":
+    if args.rna_genes == "pathway8":
+        # _PW8 = 문헌 큐레이션 8개 카테고리 평균(leakage 없음) — _INT{n}(Cox test 기반,
+        # leakage 있음)과 절대 안 섞이게 별도 접미사.
+        model_prefix += "_PW8"
+    elif args.rna_genes == "purist_top20_tcga_only":
         # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
         # 파일명이 겹치면 안 되므로 별도 접미사.
         model_prefix += "_D20"
@@ -745,6 +763,7 @@ def main():
 
     ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
+                      rna_pathway_categories=rna_pathway_categories,
                       restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),
