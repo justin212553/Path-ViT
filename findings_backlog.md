@@ -1,5 +1,127 @@
 # PATH-ViT 발견 사항 및 우선순위 백로그
 
+## 🔴 최상위 발견(2026-09-02) — RNA gene selection에 실제 leakage 확인(internal +0.10 부풀림), clinical branch starvation은 leak과 무관, pooled c-index 계산방식 자체도 재검토 필요
+
+**상태: 2seed×5fold 전체 검증으로 확인됨. 다음 결정 대기 중(어떤 gene panel/계산방식을 논문 기준으로 쓸지) — 사용자 판단 보류.**
+
+발단은 HDP_Pretrain_Cluster 체크포인트 진단(`scripts/diagnose_hdp_checkpoint_weights.py`)에서
+`clinical_linear`(margin+staging, 실제 신호가 있다고 이미 검증된 항)의 설명분산비율이 **0.00%**로
+나온 것 — RNA branch(`risk_head`)가 99%+를 차지했다. 사용자 질문: "RNA가 너무 강한 신호여서
+그런 걸까... 1500개 크로스 리스트를 만든 것이 어쩌면 data leakage가 있어서 당연히 그럴 수 있지만."
+
+### 1) Gene selection leakage — 실재하며, 정량화됨
+
+`literature_guided_gene_ids_intersection`(`data/dataset.py:202-215`, M4/M4A/PM4/PMA/M6/M6X/M7/HDP
+전부가 공유하는 1500유전자 패널)은 TCGA-only/CPTAC-only Cox 순위를 각자 코호트 자기 라벨로
+독립 계산해 교집합을 쓴다 — "반대 코호트 라벨은 안 본다"는 점만 leakage-free라고 문서화돼 있었다.
+그런데 이 순위 계산에 쓰는 "train"이 paper-spec의 실제 5-fold CV가 아니라 **완전히 별개의 고정
+단일 6:2:2 split**(`data/select_rnaseq_genes.py:150`, `cfg.data.seed` 기본값=42, fold 인자 자체가
+없음)이었다. 실측 overlap(`data/dataset.py::_kfold_case_split`/`_stratified_case_split` 직접
+호출로 계산):
+
+| | overlap |
+|---|---|
+| TCGA internal, seed84 pooled 5fold test | 91/152 = **59.9%** |
+| TCGA internal, seed126 pooled 5fold test | 91/152 = **59.9%** |
+| TCGA internal, seed42(gene selection과 같은 시드로 k-fold 해도) | 91/152 = **59.9%** |
+| CPTAC external(전체 144명) | 87/144 = **60.4%** |
+
+즉 "held-out"이라 부르는 환자의 약 60%가 gene selection 시점에 이미 자기 생존 라벨을 한 번
+썼다 — univariate selection bias의 전형적 형태. 세 시드(42/84/126) 전부 겹침 비율이 거의 동일해
+"seed42가 WSI에 불리해서 제외했다"는 기존 결정과는 무관하다는 것도 확인.
+
+### 2) 대안: `pathway8`(문헌 큐레이션, OS 라벨 미사용) — dataset 레벨엔 이미 있었는데 M5/M6/M6X/M7/HDP
+### 계열(`train_light.py`)엔 배선이 안 돼 있었다
+
+`data/dataset.py::pathway_category_gene_ids()`/`WSISurvivalDataset(rna_pathway_categories=...)`는
+이미 `train.py`(M4 계열)에만 연결돼 있었다(`--rna-genes pathway8`, 8개 생물학적 카테고리 평균
+z-score, Cox test 전혀 안 씀 → 구조적으로 leakage 불가능). `train_light.py`에 동일 옵션을 이식
+(`--rna-genes pathway8`, 2026-09-02 커밋).
+
+**주의**: 기존 M4계열(WSI 포함)에서의 pathway8은 이미 실패 기록이 있다(위 2026-08-31 항목 21-22행
+참조, external C 0.49~0.52) — 이번 결과는 **M7(WSI 없음, Clinical+RNA만)**에서의 pathway8이라
+직접 비교 대상이 아니다. WSI가 있는 구조에서 8차원으로 압축한 RNA가 co-attention query로 쓰였을 때
+실패한 것과, WSI 없이 cox_add로 단순히 더해질 때의 결과는 별개다.
+
+### 3) M7으로 leak(`literature_1500_intersection`) vs no-leak(`pathway8`) 전체 2seed×5fold 비교
+(`--combine-mode cox_add --clinical-margin --clinical-staging`, `clinical-lr-mult` 기본값=1,
+로컬에서 전부 실행 — M7은 WSI 없어 uni2native 불필요, 10 combo 전부 40초 내외/run)
+
+| | Internal(pooled ensemble) | External(10-run ensemble) |
+|---|---|---|
+| **literature_1500(leak 있음)** | 0.6552 [0.582, 0.720] | 0.6221 [0.566, 0.678] |
+| **pathway8(leak 없음)** | 0.5566 [0.479, 0.633] | 0.6039 [0.550, 0.657] |
+| 차이(leak − no-leak) | **+0.0986** | **+0.0182** |
+
+**leak이 전혀 닿지 않는 external에서는 두 버전 차이가 CI 안에 완전히 묻힌다(0.018).** internal에서
+보이는 leak 버전의 "강함"(+0.099) 중 대부분이 실제 예측력이 아니라 gene selection이 자기가 나중에
+평가할 환자의 라벨을 미리 본 데서 온 착시라는 뜻 — leak-free 버전의 진짜 external 실력(0.6039)은
+leak 버전의 external(0.6221)과 사실상 같다.
+
+### 4) Clinical branch starvation은 leak과 무관 — 별개의, 진짜인 문제
+
+`scripts/diagnose_m7_branch_contrib.py`(HDP 체크포인트 진단의 WSI-불필요 경량판)로 leak/no-leak
+양쪽에서 `clinical_linear` 설명분산비율을 봤더니 **둘 다 0.00~0.01%**로 동일했다 — clinical이
+죽는 건 gene panel의 leak 때문이 아니라, RNA branch(자체 nonlinear encoder 보유)가 zero-init
+linear뿐인 clinical과 gradient 경쟁에서 원래 유리한 구조적 문제(`train.py`의 다른 모델들에서 이미
+`--clinical-lr-mult`로 대응했던 것과 같은 종류)다. `train_light.py`엔 이 옵션이 없었어서
+`--clinical-lr-mult`/`--rna-lr-mult`(`_branch_param_groups`)를 이식(2026-09-02 커밋).
+
+**mult sweep(seed84/fold0, pathway8 기준) — clinical을 강제로 살리는 건 성공하지만 성능은 안 좋아진다**:
+
+| mult | clinical 설명분산 | internal test(fold0) | external |
+|---|---|---|---|
+| 1(기본) | 0.01% | 0.6097 | 0.6450 |
+| 2 | 0.04% | 0.6059 | 0.6458 |
+| 5 | 0.25% | 0.5948 | 0.6474 |
+| 10 | 0.97% | 0.5948 | 0.6492 |
+| 20 | 3.56% | 0.5836 | 0.6531 |
+| 50 | 16.37% | 0.5874 | 0.6557 |
+| 100 | 37.82% | 0.5725 | 0.6521 |
+
+fold0 하나만 보면 "mult 올릴수록 external이 단조증가"하는 것처럼 보였다 — **그런데 mult=50을
+2seed×5fold 전체로 검증하니 이 추세가 사라졌다**: internal pooled=**0.5544**(더 나빠짐),
+external 10-run ensemble=**0.6362**(fold0의 0.6557보다 낮고, mult=1 fold0의 0.6450 대비도 개선
+없음, 10개 run 자체가 0.584~0.656로 크게 흩어짐 std=0.027). **결론: branch-competition은 진짜
+문제이고 고칠 수도 있지만, 고쳐도 이 코호트 규모에서 순증분은 안 보인다** — clinical-lr-mult는
+기본값(1)이 가장 안전.
+
+### 5) Pooled c-index 계산방식 자체에 대한 의문 — 아직 결론 안 남
+
+pathway8 internal fold별 c-index(seed×fold 10개): 0.4660~0.6834로 폭이 0.22 — fold당
+N=29~31/event=16~17뿐이라 통계적 검정력 한계로 자연스러운 변동. **그런데 fold별 단순 평균
+(0.580)이 pool_multiseed_kfold_preds.py가 계산하는 "pooled"(out-of-fold 예측을 전부 이어붙여
+한 번에 concordance 계산, 0.5566)보다 뚜렷이 높다.** 같은 효과가 leak 버전에도 있다
+(fold평균 0.6709 vs pooled 0.6446~0.6552) — **pooling 자체가 fold마다 독립적으로 초기화·
+학습된 모델들의 risk score를 서로 다른 잣대인 채로 이어붙여 비교하는 구조**라, cross-fold
+환자쌍 비교가 신호를 갉아먹는 것으로 보인다(두 버전에 공통, leak과 무관한 별도 아티팩트).
+
+fold평균 기준으로 다시 보면: pathway8 internal(0.580) vs external(0.604) — 차이 0.024(노이즈
+안). literature_1500 internal(0.671) vs external(0.622) — 차이 +0.049(반대 방향, leak 지문
+그대로 유지). **즉 "pooled 숫자가 낮아 보인다"는 인상의 상당 부분은 계산 방식 아티팩트이지만,
+leak 버전만 internal>external로 뒤집힌다는 핵심 신호는 이 아티팩트를 걷어내고도 남는다.**
+
+**미해결(사용자 보류, 2026-09-02)**: `pool_multiseed_kfold_preds.py`의 pooled/ensemble
+c-index(이 프로젝트 전체의 표준 "internal" 보고 지표)가 "이 모델의 진짜 성능"을 나타내는
+지표로 타당한지 자체가 불확실해졌다 — fold 간 모델 보정(calibration) 불일치를 명시적으로
+다루지 않는 한, 특히 신호가 약한(pathway8류) 모델에서 실제보다 비관적인 숫자를 낼 수 있다.
+대안(예: fold별 c-index 평균+표준오차로 보고, 또는 fold 간 risk score를 재보정한 뒤 pooling)을
+검토할지는 다음 세션 결정 사항.
+
+### 다음 결정 필요 사항
+- 논문/이후 실험에서 gene panel을 `pathway8`(leak 없음, RNA 8차원)로 완전히 바꿀지, fold-aware
+  nested Cox selection(폴드마다 독립적으로 1500개 재계산, 작업량 큼)을 새로 만들지.
+- pooled c-index 계산방식을 그대로 쓸지, fold평균 기반 등 대안으로 바꿀지.
+- 이미 보고된 이 프로젝트의 모든 internal 헤드라인 숫자(M4/M4A/PM4/PMA/M6/M6X/M7, HDP 계열 전부
+  `literature_1500_intersection` 사용)가 이번 발견의 영향권 안에 있다는 점 — 논문에 실린 숫자
+  재검토 필요.
+
+관련 코드: `scripts/diagnose_hdp_checkpoint_weights.py`, `scripts/diagnose_m7_branch_contrib.py`,
+`scripts/diagnose_hdp_feature_signal.py`(선행 진단, raw feature 자체의 생존 상관 없음 확인),
+`train_light.py --rna-genes pathway8`/`--clinical-lr-mult`/`--rna-lr-mult`(전부 2026-09-02 신규).
+
+---
+
 ## 🔴 최상위 발견(2026-08-31) — MCAT 스타일 multi-pathway co-attention(Phase 1)도 실패, gradient는 정상 도달 확인 → "query 개수 부족"이 원인이 아니었다
 
 **상태: 확인됨(seed84 단일 파일럿 + 체크포인트 진단 + 30epoch gradient/loss 추적, 3가지 독립 증거) — PORPOISE(Phase 3)로 진행 결정.**
