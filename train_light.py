@@ -52,14 +52,19 @@ from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
 
 
 CLUSTER_HIST_PATHS = {
-    "tcga": Path("data/cluster_hist_uni2native_tcga.csv"),
-    "cptac": Path("data/cluster_hist_uni2native_cptac.csv"),
+    "tcga": Path("data/cluster_features_uni2native_tcga.csv"),
+    "cptac": Path("data/cluster_features_uni2native_cptac.csv"),
 }
+# data/compute_cluster_features_uni2native.py가 찍는 4가지 라벨-프리 통계 접두어(각 K차원).
+# prop=비율, disp=공간 dispersion, intravar=군집 내부 임베딩 분산(분화도 heterogeneity 대체
+# 통계, "분화도"라 부르지 않음), centdist=전역 군집 중심까지 거리(성숙도 대체 통계, "성숙도"라
+# 부르지 않음) — 2026-09-01 사용자 결정(라벨 없는 진짜 분화도/성숙도 classifier는 배제).
+CLUSTER_FEATURE_PREFIXES = ("prop_", "disp_", "intravar_", "centdist_")
 
 
 class ClusterHistLookup:
-    """case_id -> (K,) 군집 히스토그램 텐서. 커버 안 되는 case_id는 전체 평균으로 fallback하고
-    처음 조회될 때 1번만 경고를 찍는다(반복 로그 방지)."""
+    """case_id -> (4*K,) 군집 feature 텐서(z-score 정규화 완료). 커버 안 되는 case_id는 전체
+    평균(정규화 후 0벡터와 동일)으로 fallback하고 처음 조회될 때 1번만 경고를 찍는다."""
 
     def __init__(self, lookup: dict, fallback: torch.Tensor):
         self.lookup = lookup
@@ -70,33 +75,45 @@ class ClusterHistLookup:
         if case_id in self.lookup:
             return self.lookup[case_id]
         if case_id not in self._warned:
-            print(f"  [경고] case_id={case_id}: uni2native cluster histogram 없음 -> 전체 평균으로 대체")
+            print(f"  [경고] case_id={case_id}: uni2native cluster feature 없음 -> 전체 평균(0벡터)으로 대체")
             self._warned.add(case_id)
         return self.fallback
 
 
 def _load_cluster_histograms(datasets: list[str]) -> tuple["ClusterHistLookup", int]:
-    """data/compute_cluster_histograms_uni2native.py 산출 CSV(case_id, hist_0..hist_{K-1},
-    n_patches)를 로드해 {case_id: (K,) tensor} 딕셔너리로 합친다. --HDP 전용.
+    """data/compute_cluster_features_uni2native.py 산출 CSV(case_id, {prop,disp,intravar,
+    centdist}_0..{K-1}, n_patches)를 로드해 {case_id: (4*K,) z-score 정규화 tensor} 딕셔너리로
+    합친다. --HDP 전용.
+
+    비율/공간 스케일(px)/임베딩 분산/임베딩 거리는 단위가 전부 달라 정규화 없이 하나의 선형층
+    (models/hdp.py::HDP.hist_linear)에 넣으면 스케일 큰 항이 사실상 gradient를 독점한다 —
+    clinical cox_add(age/margin/stage)와 동일 관례로 각 열을 전체 코호트 기준 z-score한다
+    (cluster centroid 자체도 fold 구분 없이 전체 코호트로 fit했으므로 이 정도의 "전체 통계
+    사용"은 새로운 leakage가 아니라 기존 파이프라인과 일관된 선택).
 
     공식 UNI2-h feature(data/uni2h_official_features/)가 생존 코호트의 일부 환자를 못 커버한다
     (2026-09-01 확인: TCGA 152명 중 2명, CPTAC 159명 중 15명 누락 — MahmoodLab 공식 배포 자체가
     이 환자들 슬라이드를 포함 안 함). 코호트 크기를 그대로 유지해야 M1~M7 결과표와 비교 가능하므로
-    (환자를 빼면 fold/코호트가 달라짐), 이런 환자는 버리지 않고 전체 평균 히스토그램으로
+    (환자를 빼면 fold/코호트가 달라짐), 이런 환자는 버리지 않고 전체 평균(정규화 후 0벡터)으로
     대체한다 — "이 환자에 대해선 군집 정보를 모른다"는 뜻의 중립적 fallback.
 
-    Returns: (case_id -> (K,) float tensor 딕셔너리, 전체 평균 (K,) fallback 텐서, K)
+    Returns: (case_id -> (4*K,) float tensor 딕셔너리, K)
     """
     import pandas as pd
     frames = [pd.read_csv(CLUSTER_HIST_PATHS[d]) for d in datasets]
     df = pd.concat(frames, ignore_index=True)
-    hist_cols = sorted([c for c in df.columns if c.startswith("hist_")],
-                        key=lambda c: int(c.split("_")[1]))
-    k = len(hist_cols)
-    lookup = {row["case_id"]: torch.tensor(row[hist_cols].values.astype("float32"))
-              for _, row in df.iterrows()}
-    fallback = torch.tensor(df[hist_cols].mean().values.astype("float32"))
-    return ClusterHistLookup(lookup, fallback), k
+    feat_cols = sorted(
+        [c for c in df.columns if any(c.startswith(p) for p in CLUSTER_FEATURE_PREFIXES)],
+        key=lambda c: (c.rsplit("_", 1)[0], int(c.rsplit("_", 1)[1])),
+    )
+    k = len(feat_cols) // len(CLUSTER_FEATURE_PREFIXES)
+    mean = df[feat_cols].mean()
+    std = df[feat_cols].std(ddof=0).replace(0.0, 1.0)
+    df_z = (df[feat_cols] - mean) / std
+    lookup = {cid: torch.tensor(row.astype("float32"))
+              for cid, row in zip(df["case_id"], df_z.to_numpy())}
+    fallback = torch.zeros(len(feat_cols), dtype=torch.float32)  # 정규화 후 코호트 평균 = 0벡터
+    return ClusterHistLookup(lookup, fallback), 4 * k
 
 
 def set_seed(seed: int):
