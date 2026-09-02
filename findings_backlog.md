@@ -162,6 +162,45 @@ literature_1500 양쪽에 맞춘 대조군), clinical-lr-mult=10을 표준값으
 
 관련 코드(신규): `scripts/pool_fulltrain_external_preds.py`, `scripts/run_fulltrain_leak_sweep_local.sh`.
 
+### 후속2(2026-09-02) — PMA(WSI+RNA+Clinical)로 확장, paired bootstrap으로 WSI 추가 유의성 정식 검정
+
+M7(RNA+Clinical만) 대비 "WSI를 추가하면 external에서 통계적으로 유의한 순증분이 있는가"를
+같은 full-train+external+5시드 프로토콜로 PMA(M4, `train.py --PMA --backbone uni2`)까지 확장.
+`train.py --full-train`도 동일한 문제(checkpoint 미저장, external CSV 미저장)가 있어 같은 방식
+으로 수정. `scripts/paired_bootstrap_delta_fulltrain.py`(fold 없는 버전, 기존
+`paired_bootstrap_delta.py`의 핵심 함수 재사용)로 M7 vs PMA paired bootstrap 수행.
+
+| 설정 | 시드 평균±std | 앙상블 | bootstrap CI |
+|---|---|---|---|
+| PMA lit1500 baseline | 0.6148±0.0203 | 0.6283 | [0.572, 0.684] |
+| PMA lit1500+CLR10 | 0.5288±0.0522 | 0.5730 | [0.515, 0.627] |
+| PMA pathway8 baseline | 0.5545±0.0499 | 0.5939 | [0.540, 0.649] |
+| PMA pathway8+CLR10 | 0.5015±0.0693 | 0.4924 | [0.432, 0.552] |
+
+**Paired bootstrap(M7=A, PMA=B, delta=B−A)**:
+
+| 비교 | C(A) | C(B) | delta | 95% CI | p | 결과 |
+|---|---|---|---|---|---|---|
+| lit1500, mult=1 | 0.6154 | 0.6283 | +0.0129 | [-0.019, +0.043] | 0.419 | 비유의 |
+| pathway8, mult=1 | 0.5729 | 0.5939 | +0.0209 | [-0.044, +0.084] | 0.521 | 비유의 |
+| pathway8, mult=10 | 0.5912 | 0.4924 | **-0.0988** | [-0.188, -0.008] | 0.031 | **유의(음수)** |
+
+**정상 조건(mult=1) 둘 다 WSI 추가가 점추정치로는 +0.01~0.02지만 유의하지 않다** — 이 프로젝트
+전체의 반복된 "이 코호트 규모에서 WSI가 순증분을 못 준다"는 결론이 paired bootstrap 정식 검정
+으로 재확인됨. **mult=10 조합의 유의한 음수는 WSI의 해로움이 아니라 별개 문제** —
+clinical-lr-mult=10이 M7에서는 도움됐지만(어제 결과) PMA(WSI branch까지 3파전 경쟁)에서는
+학습 자체를 불안정하게 만든다(std 0.05~0.07, 일부 시드 chance 이하 0.40~0.46) — WSI가 없는
+M7은 이 불안정성에 안 걸려 멀쩡했을 뿐. **결론: clinical-lr-mult는 branch 개수가 많은 모델
+(WSI 포함)에는 그대로 이식하면 위험하다 — 안전하게 쓰려면 더 작은 값이나 WSI-aware 튜닝 필요.**
+
+HDP_Pretrain_Cluster(pathway8, WSI+cluster)는 uni2native가 로컬에 없어(`uni2`와
+`uni2native`는 서로 다른 파이프라인 산출물 — 전자만 로컬에 있음, 사용자 확인 요청으로 재확인)
+HPC 전용(`sbatch/hdp_pretrain_cluster_fulltrain_pw8_sweep_hpc.sh`), 아직 미완료.
+
+관련 코드(신규): `scripts/paired_bootstrap_delta_fulltrain.py`, `scripts/run_pma_leak_sweep_local.sh`,
+`train.py --full-train` external CSV 저장 버그 수정, `train_hdp_pretrain_cluster.py --rna-genes
+pathway8`/`--full-train`/`--clinical-lr-mult`/`--rna-lr-mult`(HPC 미검증).
+
 ---
 
 ## 🔴 최상위 발견(2026-08-31) — MCAT 스타일 multi-pathway co-attention(Phase 1)도 실패, gradient는 정상 도달 확인 → "query 개수 부족"이 원인이 아니었다
