@@ -194,7 +194,7 @@ def paired_bootstrap_delta(
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--split", type=str, required=True, choices=["internal", "external"])
-    parser.add_argument("--dataset", type=str, required=True, choices=["tcga", "cptac", "both"],
+    parser.add_argument("--dataset", type=str, required=True, choices=["tcga", "cptac", "both", "brca"],
                          help="internal이면 학습 코호트(예: tcga), external이면 평가 대상 코호트(예: cptac).")
     parser.add_argument("--model-a", type=str, required=True, help="model_prefix (baseline, delta의 기준)")
     parser.add_argument("--model-b", type=str, required=True, help="model_prefix (비교 대상, delta = B - A)")
