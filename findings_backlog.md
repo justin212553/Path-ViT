@@ -199,7 +199,45 @@ HPC 전용(`sbatch/hdp_pretrain_cluster_fulltrain_pw8_sweep_hpc.sh`), 아직 미
 
 관련 코드(신규): `scripts/paired_bootstrap_delta_fulltrain.py`, `scripts/run_pma_leak_sweep_local.sh`,
 `train.py --full-train` external CSV 저장 버그 수정, `train_hdp_pretrain_cluster.py --rna-genes
-pathway8`/`--full-train`/`--clinical-lr-mult`/`--rna-lr-mult`(HPC 미검증).
+pathway8`/`--full-train`/`--clinical-lr-mult`/`--rna-lr-mult`.
+
+### 후속3(2026-09-02) — HDP_Pretrain_Cluster(HPC) 완료, 이 세션 WSI 시도 중 가장 유의에 근접
+
+`sbatch/hdp_pretrain_cluster_fulltrain_pw8_sweep_hpc.sh`(pathway8 baseline + clinical-lr-mult=10,
+5시드) HPC 실행 완료(1개 시드는 free-gpu partition preemption으로 한 번 끊겼다가 재제출로 완료 —
+로그는 preemption 시점에서 멈춰 있지만 CSV는 144명 전부 정상 생성돼 있음을 직접 검증). M7/PMA는
+로컬, HDP는 HPC라 예측 CSV가 서로 다른 머신에 있었던 것도 확인 — `paper/hdp/`로 다운로드한 CSV를
+`.logs/external_preds/`에 합쳐서 로컬에서 paired bootstrap 수행.
+
+| | 시드 평균±std | 앙상블 | bootstrap CI |
+|---|---|---|---|
+| M7 baseline | 0.5737±0.0075 | 0.5729 | [0.513, 0.634] |
+| **HDP_Pretrain_Cluster baseline** | **0.6000±0.0078** | **0.6064** | [0.553, 0.661] |
+| M7 +CLR10 | 0.5864±0.0075 | 0.5912 | [0.533, 0.647] |
+| **HDP_Pretrain_Cluster +CLR10** | **0.6093±0.0059** | **0.6140** | [0.561, 0.667] |
+
+**Paired bootstrap(M7=A, HDP=B, delta=B−A)**: baseline delta=+0.0335, CI=[-0.011,+0.077], **p=0.132**
+(비유의) / CLR10 delta=+0.0227, CI=[-0.028,+0.068], p=0.362(비유의).
+
+**여전히 유의하지 않지만, 이 세션에서 시도한 모든 WSI 통합 방식(MCAT/PORPOISE/M4A/PMA 전부
+p>0.4) 중 p값이 가장 낮다(0.132).** 시드 간 표준편차도 0.006~0.008로 PMA(0.05~0.07)보다 한
+자릿수 더 안정적 — attention을 아예 안 쓰고 mean-pooling+cox_add 선형항만 쓴 설계 선택
+(`models/hdp_cluster.py`, "이 세션 내내 attention/MIL이 반복 실패한 패턴을 다시 밟지 않기
+위한 의도적 선택")이 실제로 학습 안정성 면에서 확실히 우위였다는 근거. clinical-lr-mult=10은
+점추정치는 살짝 올리지만(0.606→0.614) paired bootstrap p값은 오히려 baseline보다 나쁨(0.132→
+0.362) — 여기서는 득도 실도 없는 중립적 개입으로 보임.
+
+**PanNuke pretrain head 해상도 보정 발견(같은 날, 별도 시도)**: `scripts/train_hdp_pretrain_head.py`가
+PanNuke(40x/0.25um) 이미지를 그대로 UNI2-h에 먹였던 게 uni2native(20x/0.5um) 대비 배율
+불일치였다는 기존 한계를 실제로 고쳐봄 — 학습 이미지를 절반 크기로 다운샘플했다 다시 업샘플해
+겉보기 배율만 uni2native와 맞춘 뒤(`_simulate_uni2native_resolution`) 재학습한 결과
+**val_corr 0.60 → 0.78로 개선**(로컬, `--legacy-resolution` 플래그로 기존 동작도 재현 가능,
+결과는 별도 경로 `data/hdp_pretrain_tumor_content_head_resmatch.pt`에 저장해 기존 head와
+분리). 아직 이 새 head를 코호트 전체에 적용(`scripts/apply_hdp_pretrain_head.py`)해 실제
+HDP_Pretrain_Cluster 성능이 오르는지까지는 미검증 — 다음 세션 후보 작업.
+
+관련 코드(신규): `scripts/train_hdp_pretrain_head.py::_simulate_uni2native_resolution`
+(`--legacy-resolution` 플래그로 기존 동작 보존).
 
 ---
 

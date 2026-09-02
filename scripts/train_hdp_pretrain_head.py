@@ -54,10 +54,30 @@ PANCREAS_TISSUE_ID = 12
 NEOPLASTIC_CATEGORY = 0
 IMG_SIZE = 256
 
+# 2026-09-02: PanNuke는 40x/0.25um px인데 우리 uni2native patch는 20x/0.5um px다(약 2배 차이,
+# 원래 val_corr=0.60의 알려진 한계로 남겨뒀던 것 — findings_backlog.md/대화 참조). 실제
+# 적용 대상(uni2native patch)과 같은 물리 해상도로 보이게, 학습 이미지를 먼저 절반 크기로
+# 다운샘플했다가 다시 256으로 올려(의도적 블러) 겉보기 배율을 맞춘다 — 이후 UNI2_NATIVE_
+# PATCH_TRANSFORM의 Resize(256)+CenterCrop(256)은 이미 256이라 사실상 통과만 시킨다.
+# 이렇게 해도 PanNuke 원본 이미지가 물리적으로 담고 있는 시야(64um) 자체가 uni2native의
+# 128um보다 좁다는 한계는 못 없앤다(더 넓은 컨텍스트를 가진 원본 WSI가 없어서) — "핵/세포
+# 크기가 화면에서 차지하는 비율"만 맞추는 절충적 보정이다.
+UNI2NATIVE_DOWNSAMPLE_FACTOR = 2
+
 # models/checkpoint/는 git-ignore 대상이라 data/ 밑에 저장한다(2026-09-01, HPC에서 이 파일이
 # 안 보이는 문제로 확인 — git pull만으로 따라오게 하려면 tracked 경로에 둬야 함).
 OUT_DIR = _ROOT / "data"
-OUT_PATH = OUT_DIR / "hdp_pretrain_tumor_content_head.pt"
+OUT_PATH_LEGACY = OUT_DIR / "hdp_pretrain_tumor_content_head.pt"
+OUT_PATH_RESMATCH = OUT_DIR / "hdp_pretrain_tumor_content_head_resmatch.pt"
+
+
+def _simulate_uni2native_resolution(img: Image.Image, factor: int = UNI2NATIVE_DOWNSAMPLE_FACTOR) -> Image.Image:
+    """PanNuke 원본(40x/0.25um) 이미지를 우리 uni2native(20x/0.5um)와 같은 배율로 보이게,
+    절반 크기로 다운샘플했다가 원래 크기로 다시 업샘플한다(의도적 블러로 겉보기 nucleus/cell
+    크기를 맞춤 — 배율 도메인 적응에서 흔히 쓰는 근사법)."""
+    w, h = img.size
+    small = img.resize((w // factor, h // factor), Image.BILINEAR)
+    return small.resize((w, h), Image.BILINEAR)
 
 
 def _load_pancreas_rows() -> list[dict]:
@@ -90,13 +110,16 @@ from models.tumor_content_head import TumorContentHead as RegressionHead
 
 
 @torch.no_grad()
-def _extract_features(images: list[Image.Image], device) -> torch.Tensor:
+def _extract_features(images: list[Image.Image], device, match_resolution: bool) -> torch.Tensor:
     from data.patch_utils import UNI2_NATIVE_PATCH_TRANSFORM
     from models.uni2_encoder import UNI2hEncoder
 
     encoder = UNI2hEncoder(embed_dim=1, with_backbone=True).to(device)
     encoder.eval()
     encoder.requires_grad_(False)
+
+    if match_resolution:
+        images = [_simulate_uni2native_resolution(im) for im in images]
 
     chunks = []
     batch_size = 32
@@ -116,7 +139,14 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--val-frac", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--legacy-resolution", action="store_true",
+                         help="2026-09-02: 기본은 이제 uni2native와 배율을 맞춘 버전(아래 "
+                              "_simulate_uni2native_resolution). 원래(해상도 mismatch 있는 채로) "
+                              "동작을 재현하려면 이 플래그로 끈다 — 결과는 별도 경로(OUT_PATH_LEGACY)에 저장.")
     args = parser.parse_args()
+    match_resolution = not args.legacy_resolution
+    out_path = OUT_PATH_LEGACY if args.legacy_resolution else OUT_PATH_RESMATCH
+    print(f"[설정] uni2native 배율 맞춤: {match_resolution} | 저장 경로: {out_path}")
 
     load_env()
     import os
@@ -136,7 +166,7 @@ def main():
 
     print("[3/4] UNI2-h feature 추출")
     images = [Image.open(io.BytesIO(r["image"]["bytes"])).convert("RGB") for r in rows]
-    features = _extract_features(images, device)  # (N, 1536)
+    features = _extract_features(images, device, match_resolution)  # (N, 1536)
 
     print("[4/4] 회귀 head 학습")
     idx = np.arange(len(rows))
@@ -170,7 +200,11 @@ def main():
         if epoch % 10 == 0 or epoch == args.epochs - 1:
             print(f"  epoch {epoch:3d} | train_loss={loss.item():.4f} | val_loss={val_loss:.4f} | val_corr={val_corr:.4f}")
 
-    print(f"\n최종 best_val_loss={best_val_loss:.4f}")
+    head.load_state_dict(best_state)
+    head.eval()
+    with torch.no_grad():
+        best_val_corr = float(np.corrcoef(head(x_val).cpu().numpy(), y_val.cpu().numpy())[0, 1])
+    print(f"\n최종 best_val_loss={best_val_loss:.4f} | best-checkpoint val_corr={best_val_corr:.4f}")
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     torch.save({
         "state_dict": best_state,
@@ -178,8 +212,8 @@ def main():
         "in_dim": features.shape[1],
         "best_val_loss": best_val_loss,
         "n_train": len(train_idx), "n_val": len(val_idx),
-    }, OUT_PATH)
-    print(f"저장: {OUT_PATH}")
+    }, out_path)
+    print(f"저장: {out_path}")
 
 
 if __name__ == "__main__":
