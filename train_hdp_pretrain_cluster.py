@@ -235,6 +235,10 @@ def main():
     rna_gene_ids = literature_guided_gene_ids_intersection(1500)
 
     model_prefix = f"HDP_PRETRAIN_CLUSTER_INT1500_STG_R_GROWTH{args.growth_dim}"
+    if args.lr != 1e-3:
+        # train_light.py의 _LR{lr:.0e} 관례와 동일 — lr sweep(같은 seed/fold)에서 checkpoint/
+        # kfold_preds 파일명이 서로 덮어써지지 않게 한다(2026-09-01, sweep 설계 중 발견).
+        model_prefix += f"_LR{args.lr:.0e}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
