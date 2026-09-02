@@ -136,6 +136,27 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+# train.py::_BRANCH_ATTRS/_branch_param_groups와 동일 관례(2026-09-02, --clinical-lr-mult 이식) —
+# top-level 속성 이름으로 clinical/rna/other 3그룹으로 나눈다. models/clinical_rna_only.py::
+# ClinicalRNAOnly(cox_add)와 models/hdp.py::HDP 둘 다 이 속성명(clinical_linear/rna_encoder)을
+# 그대로 쓰므로 별도 매핑 없이 재사용 가능.
+_BRANCH_ATTRS = {
+    "clinical": ("clinical_encoder", "clinical_linear"),
+    "rna": ("rna_encoder", "rna_linear"),
+}
+
+
+def _branch_param_groups(model) -> dict[str, list]:
+    groups: dict[str, list] = {"clinical": [], "rna": [], "other": []}
+    attr_to_key = {attr: key for key, attrs in _BRANCH_ATTRS.items() for attr in attrs}
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        top = name.split(".")[0]
+        groups[attr_to_key.get(top, "other")].append(p)
+    return groups
+
+
 def _build_scheduler(optimizer, cfg):
     total  = cfg.light.epochs
     warmup = cfg.light.warmup_epochs
@@ -500,6 +521,18 @@ def _parse_args() -> argparse.Namespace:
              "선형 결합기에서 공동 학습시키는 구조 자체' 때문인지, 자유도를 극단적으로 줄이면 "
              "해결되는지 검증.",
     )
+    parser.add_argument(
+        "--clinical-lr-mult", type=float, default=1.0,
+        help="2026-09-02: train.py --clinical-lr-mult 이식. combine_mode='cox_add'(--HDP/--HDP-PRETRAIN "
+             "포함)에서 clinical_linear(zero-init 선형)가 rna_encoder+risk_head(비선형, 파라미터 훨씬 "
+             "많음)와 같은 lr로 경쟁하면 밀린다는 가설 검증용(scripts/diagnose_m7_branch_contrib.py로 "
+             "clinical 설명분산비율이 leak 유무와 무관하게 ~0%였던 것 확인, 2026-09-02) — clinical_linear "
+             "파라미터그룹의 lr만 base lr의 이 배수로 키운다. 기본 1.0=기존 동작(단일 옵티마이저).",
+    )
+    parser.add_argument(
+        "--rna-lr-mult", type=float, default=1.0,
+        help="--clinical-lr-mult와 동일 관례, rna_encoder에 적용(대칭 ablation용).",
+    )
     return parser.parse_args()
 
 
@@ -688,6 +721,10 @@ def main():
         model_prefix += "_SEXOH"
     if args.combine_mode != "concat":
         model_prefix += f"_{args.combine_mode.upper()}"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     if args.risk_hidden_dim is not None:
         model_prefix += f"_RISKDIM{args.risk_hidden_dim}"
     if args.risk_dropout != 0.0:
@@ -820,7 +857,20 @@ def main():
     print(f"lr={cfg.light.lr:.1e} | weight_decay={cfg.light.weight_decay:.1e} | "
           f"epochs={cfg.light.epochs} | cox_batch_size={cfg.light.cox_batch_size}")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.light.lr, weight_decay=cfg.light.weight_decay)
+    if args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0:
+        groups = _branch_param_groups(model)
+        param_groups = []
+        if groups["clinical"]:
+            param_groups.append({"params": groups["clinical"], "lr": cfg.light.lr * args.clinical_lr_mult})
+        if groups["rna"]:
+            param_groups.append({"params": groups["rna"], "lr": cfg.light.lr * args.rna_lr_mult})
+        if groups["other"]:
+            param_groups.append({"params": groups["other"], "lr": cfg.light.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.light.weight_decay)
+        print(f"branch-lr-mult 적용: clinical={args.clinical_lr_mult}x({len(groups['clinical'])}개 텐서), "
+              f"rna={args.rna_lr_mult}x({len(groups['rna'])}개 텐서), other=1x({len(groups['other'])}개 텐서)")
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.light.lr, weight_decay=cfg.light.weight_decay)
     scheduler = _build_scheduler(optimizer, cfg)
 
     ckpt_dir = Path(__file__).parent / "models" / "checkpoint"

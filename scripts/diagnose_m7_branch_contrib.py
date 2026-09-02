@@ -51,6 +51,8 @@ def main():
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--rna-genes", type=str, required=True,
                          choices=["literature_1500_intersection", "pathway8"])
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0)
+    parser.add_argument("--rna-lr-mult", type=float, default=1.0)
     parser.add_argument("--ckpt", type=str, default=None,
                          help="명시 안 하면 train_light.py의 기본 저장 경로를 재구성.")
     args = parser.parse_args()
@@ -69,6 +71,12 @@ def main():
         rna_input_dim = len(rna_gene_ids)
         model_prefix += "_INT1500"
     model_prefix += "_STG_R_COX_ADD"
+    # train_light.py의 정확한 태그 순서(COX_ADD -> CLR -> RLR -> FOLD)와 일치해야 checkpoint
+    # 파일명이 맞아떨어진다.
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
