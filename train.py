@@ -3276,6 +3276,23 @@ def main():
         ckpt_desc = "마지막 epoch 모델, full-train" if args.full_train else "best checkpoint"
         print(f"\n=== External Test 성능 ({external_dataset} 전체 코호트, {ckpt_desc}) ===")
         print(_log_line("external", external_metrics, external_td_auc))
+        if args.full_train:
+            # 2026-09-02: --full-train은 checkpoint를 저장하지 않아(val이 없어 "best" 선택이
+            # 불가능, torch.save가 위 3045행처럼 항상 val 분기 안에서만 호출됨) --eval-external-ckpt
+            # 로 나중에 CSV를 다시 뽑을 방법이 없다 — train_light.py --full-train에 적용한 것과
+            # 동일하게 이 실행 안에서 바로 저장한다(scripts/pool_fulltrain_external_preds.py 입력용,
+            # fold 개념 없이 seed로만 구분).
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_FULLTRAIN_seed{cfg.train.seed}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                            external_metrics["times"], external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> external predictions saved: {pred_path}")
         if WANDB_AVAILABLE:
             external_run_name = f"{args.dataset.upper()}_X{model_prefix}_seed{cfg.train.seed}_{run_ts}"
             wandb.init(
