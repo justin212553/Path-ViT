@@ -984,6 +984,23 @@ def main():
         )
         print(f"\n=== External Test ({external_dataset} 전체 코호트) ===")
         print(_log_line("external", external_metrics, external_td_auc))
+        if args.full_train:
+            # 2026-09-02: --full-train은 checkpoint 저장 자체가 없어(위 969행 주석 — val이 없어
+            # "best" 선택이 불가능) --eval-external-ckpt로 나중에 CSV를 다시 뽑을 방법이 없다.
+            # 이 실행 안에서 바로 저장한다 — fold 개념이 없으므로 파일명에 fold 표기 없이
+            # seed만으로 구분(여러 seed로 반복해 external 평균±CI를 보는 용도,
+            # scripts/pool_fulltrain_external_preds.py 입력용).
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_FULLTRAIN_seed{cfg.light.seed}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                            external_metrics["times"], external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> external predictions saved: {pred_path}")
         if WANDB_AVAILABLE:
             wandb.init(
                 project="Path-ViT",
@@ -1005,9 +1022,13 @@ def main():
         f"> External({external_dataset.upper()}) C-index: *{external_metrics['c_index']:.4f}*\n"
         if external_metrics is not None else ""
     )
+    internal_line = (
+        "> Internal: --full-train(split 없음, internal test 없음)\n" if args.full_train
+        else f"> Internal Test C-index: *{test_metrics['c_index']:.4f}*\n"
+    )
     send_slack(
         f":white_check_mark: *Path-ViT-light ({args.dataset.upper()} OS, {model_prefix}) 학습 완료*\n"
-        f"> Internal Test C-index: *{test_metrics['c_index']:.4f}*\n"
+        f"{internal_line}"
         f"{external_line}"
         f"> 소요 시간: {h}h {m}m {s}s"
     )
