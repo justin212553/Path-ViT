@@ -49,9 +49,11 @@ def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, f
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dataset", type=str, required=True, choices=["tcga", "cptac", "both"],
+        "--dataset", type=str, required=True, choices=["tcga", "cptac", "both", "brca"],
         help="external 코호트(학습에 쓰인 반대쪽) — 예: --dataset tcga --external로 학습했으면 "
-             "여기엔 cptac을 준다(train.py의 external_dataset 파일명 규약과 동일).",
+             "여기엔 cptac을 준다(train.py의 external_dataset 파일명 규약과 동일). "
+             "2026-09-01: 'brca'는 scripts/train_brca_m4.py/train_brca_m7.py --fold의 "
+             "institution(BH) holdout 결과용(파일명 접두사가 brca_라 이 값으로 고정).",
     )
     parser.add_argument("--model", type=str, required=True,
                          help="model_prefix (예: PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD)")

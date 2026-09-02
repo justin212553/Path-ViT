@@ -53,8 +53,8 @@ from train import (
 )
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
-    CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_rna_matrix,
-    MANIFEST_PATH, EXTERNAL_TSS,
+    CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_case_table_kfold,
+    load_rna_matrix, MANIFEST_PATH, EXTERNAL_TSS,
 )
 
 if WANDB_AVAILABLE:
@@ -105,6 +105,14 @@ def main():
                          help="train.py --wsi-extra-mlp 이식(models/vit_m1.py::ViT_M1, ViT_PMA가 상속) "
                               "— patch_tokens에 잔차 MLP 한 층 추가.")
     parser.add_argument("--group-ts", type=str, default=None)
+    parser.add_argument("--fold", type=int, default=None,
+                         help="2026-09-01: 주어지면(0-based) 기존 단일 6:2:2 대신 PAAD와 동일한 "
+                              "K-fold(data/dataset.py::_kfold_case_split 방법론, "
+                              "scripts/brca_common.py::load_case_table_kfold)를 쓴다 — fold 배정 "
+                              "자체는 --seed로 셔플되므로(모델 init seed와 동일 값), 진짜 다시드 "
+                              "검증(--seed 84/126 x --fold 0..4)을 하려면 fold 배정도 함께 "
+                              "바뀐다(PAAD paper-spec 프로토콜과 동일 관례).")
+    parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument(
         "--external-tss", type=str, default=EXTERNAL_TSS,
         help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
@@ -145,7 +153,10 @@ def main():
     gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
     rna_input_dim = len(gene_ids)
 
-    cases = load_case_table(args.seed, external_tss=external_tss)
+    if args.fold is not None:
+        cases = load_case_table_kfold(args.seed, args.fold, args.n_folds, external_tss=external_tss)
+    else:
+        cases = load_case_table(args.seed, external_tss=external_tss)
     rna_df = load_rna_matrix(gene_ids)
     manifest = pd.read_csv(MANIFEST_PATH)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
@@ -190,6 +201,12 @@ def main():
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     if args.rna_lr_mult != 1.0:
         model_prefix += f"_RLR{args.rna_lr_mult:g}"
+    # 2026-09-01: PAAD(train_light.py)와 달리 _FOLD{f}OF{n}을 model_prefix 자체엔 안 붙인다
+    # (BRCA는 ext_tag가 항상 model_prefix 뒤/_seed 앞에 끼어들어 pool_multiseed_kfold_preds.py의
+    # 기본 조회 패턴과 어긋나므로) — 대신 fold_suffix를 파일명 끝(ckpt/pred_path 전부)에
+    # 붙여 pool 스크립트의 폴백 패턴({dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv)과
+    # 정확히 맞춘다. model_prefix 자체는 fold와 무관하게 동일하게 유지.
+    fold_suffix = f"_fold{args.fold}of{args.n_folds}" if args.fold is not None else ""
     print(f"Model: ViT_PMA (uni backbone, use_nystrom={cfg.model.use_nystrom}, "
           f"use_spatial_embed={cfg.model.use_spatial_embed}) | "
           f"params={sum(p.numel() for p in model.parameters()):,}")
@@ -203,7 +220,7 @@ def main():
     if WANDB_AVAILABLE:
         wandb.init(
             project="Path-ViT",
-            name=f"BRCA_{model_prefix}_seed{cfg.train.seed}_{run_ts}",
+            name=f"BRCA_{model_prefix}_seed{cfg.train.seed}{fold_suffix}_{run_ts}",
             group=wandb_group,
             config={
                 "epochs": cfg.train.epochs, "lr": cfg.train.lr, "weight_decay": cfg.train.weight_decay,
@@ -215,6 +232,7 @@ def main():
                 "use_knn_bias_attn": cfg.model.use_knn_bias_attn,
                 "wsi_extra_mlp": args.wsi_extra_mlp,
                 "clinical_lr_mult": args.clinical_lr_mult, "rna_lr_mult": args.rna_lr_mult,
+                "fold": args.fold, "n_folds": args.n_folds,
                 "model": model_prefix, "dataset": "brca",
             },
         )
@@ -240,7 +258,7 @@ def main():
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}.pt"
+    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
     best_score, best_metrics = -1.0, {}
     for epoch in range(cfg.train.epochs):
@@ -292,7 +310,7 @@ def main():
     import csv
     pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
     with open(pred_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
@@ -321,7 +339,7 @@ def main():
         import csv
         pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
         pred_dir.mkdir(parents=True, exist_ok=True)
-        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
         with open(pred_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "risk", "OS_time", "OS_event"])

@@ -90,6 +90,73 @@ def stratified_case_split(case_ids: list[str], os_event_by_case: dict, seed: int
     return split_of_case
 
 
+def _stratified_kfold_assignment(case_ids: list[str], os_event_by_case: dict, seed: int, n_folds: int) -> dict:
+    """data/dataset.py::_stratified_kfold_assignment과 동일 알고리즘(OS_event 그룹별 라운드로빈
+    + 그룹마다 무작위 시작 offset)을 BRCA(단일 코호트, OS_event만으로 그룹핑)에 맞게 재현한다."""
+    rng = np.random.RandomState(seed)
+    events = np.array([os_event_by_case[c] for c in case_ids])
+    fold_of_case = {}
+    for event_value in sorted(set(events.tolist())):
+        group = np.array([c for c, e in zip(case_ids, events) if e == event_value])
+        rng.shuffle(group)
+        offset = rng.randint(0, n_folds)
+        for i, case_id in enumerate(group):
+            fold_of_case[case_id] = (i + offset) % n_folds
+    return fold_of_case
+
+
+def _stratified_binary_split(case_ids: list[str], os_event_by_case: dict, seed: int, frac: float) -> dict:
+    """data/dataset.py::_stratified_binary_split과 동일 — OS_event 그룹별로 frac:(1-frac)."""
+    rng = np.random.RandomState(seed)
+    events = np.array([os_event_by_case[c] for c in case_ids])
+    split_of_case = {}
+    for event_value in sorted(set(events.tolist())):
+        group = np.array([c for c, e in zip(case_ids, events) if e == event_value])
+        rng.shuffle(group)
+        n = len(group)
+        n_train = min(round(n * frac), n)
+        for i, case_id in enumerate(group):
+            split_of_case[case_id] = "train" if i < n_train else "val"
+    return split_of_case
+
+
+def kfold_case_split(case_ids: list[str], os_event_by_case: dict, seed: int, n_folds: int, fold_idx: int) -> dict:
+    """data/dataset.py::_kfold_case_split과 동일 방법론(PAAD paper-spec 프로토콜과 동일 재현성
+    보장) — fold_idx번째를 test로, 나머지 (n_folds-1)/n_folds 풀을 다시 TRAIN_FRAC:VAL_FRAC
+    비율로 train/val 배정. fold_idx=0..n_folds-1을 전부 돌리면 코호트 전체(internal 인구)가
+    정확히 한 번씩 test로 쓰인다(pooled out-of-fold).
+
+    2026-09-01: 기존 load_case_table()의 단일 6:2:2(seed가 fold 배정과 model init을 동시에
+    통제)만으로는 M4 vs M7 비교가 "이 데이터 분할 하나에서" 이상의 의미를 못 가진다는 사용자
+    지적(BRCA에서 다시드 검증을 split_seed로 착각했던 일) 이후, PAAD와 동일한 진짜 k-fold
+    프로토콜을 BRCA에도 적용하기 위해 추가."""
+    fold_of_case = _stratified_kfold_assignment(case_ids, os_event_by_case, seed, n_folds)
+    test_ids = [c for c in case_ids if fold_of_case[c] == fold_idx]
+    remaining_ids = [c for c in case_ids if fold_of_case[c] != fold_idx]
+    split_of_case = {c: "test" for c in test_ids}
+    train_val_frac = TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)
+    split_of_case.update(_stratified_binary_split(remaining_ids, os_event_by_case, seed, frac=train_val_frac))
+    return split_of_case
+
+
+def load_case_table_kfold(seed: int, fold: int, n_folds: int, external_tss: str | None = EXTERNAL_TSS) -> pd.DataFrame:
+    """load_case_table()의 k-fold 버전 — internal 인구(institution external holdout 제외)를
+    kfold_case_split()으로 train/val/test(fold) 배정, external_tss 기관은 그대로 "external".
+
+    columns: case_id, OS_time, OS_event, age_years, sex, split
+    """
+    case_ids = common_case_ids()
+    internal_ids, external_ids = split_by_institution(case_ids, external_tss)
+    clinical = pd.read_csv(CLINICAL_PATH).set_index("case_id")
+    table = clinical.loc[case_ids].reset_index()
+    os_event_by_case = dict(zip(table["case_id"], table["OS_event"]))
+    split_of_case = kfold_case_split(internal_ids, os_event_by_case, seed, n_folds, fold)
+    for cid in external_ids:
+        split_of_case[cid] = "external"
+    table["split"] = table["case_id"].map(split_of_case)
+    return table
+
+
 def load_rna_matrix(gene_ids: list[str]) -> pd.DataFrame:
     """data/rna_brca.csv(코호트 내부 z-score) 중 지정된 gene_id 컬럼만 골라 반환.
 

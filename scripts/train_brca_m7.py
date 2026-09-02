@@ -38,8 +38,8 @@ from train_light import (
 )
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
-    CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_rna_matrix,
-    EXTERNAL_TSS,
+    CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_case_table_kfold,
+    load_rna_matrix, EXTERNAL_TSS,
 )
 
 if WANDB_AVAILABLE:
@@ -57,6 +57,12 @@ def main():
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
     parser.add_argument("--group-ts", type=str, default=None)
+    parser.add_argument("--fold", type=int, default=None,
+                         help="2026-09-01: 주어지면(0-based) 기존 단일 6:2:2 대신 PAAD와 동일한 "
+                              "K-fold(scripts/brca_common.py::load_case_table_kfold)를 쓴다 — "
+                              "M4(scripts/train_brca_m4.py)와 반드시 동일 --seed/--fold/--n-folds로 "
+                              "비교해야 같은 데이터 분할이 된다.")
+    parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument(
         "--external-tss", type=str, default=EXTERNAL_TSS,
         help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
@@ -88,7 +94,10 @@ def main():
     gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
     rna_input_dim = len(gene_ids)
 
-    cases = load_case_table(args.seed, external_tss=external_tss)
+    if args.fold is not None:
+        cases = load_case_table_kfold(args.seed, args.fold, args.n_folds, external_tss=external_tss)
+    else:
+        cases = load_case_table(args.seed, external_tss=external_tss)
     rna_df = load_rna_matrix(gene_ids)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
@@ -99,6 +108,10 @@ def main():
 
     model = ClinicalRNAOnly(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim).to(device)
     model_prefix = f"BRCA_M7_TOP{args.n_genes}"
+    # M4(scripts/train_brca_m4.py)와 동일 관례 — model_prefix 자체는 fold와 무관하게 유지하고
+    # fold_suffix를 파일명 끝에 붙인다(ext_tag가 model_prefix 뒤/_seed 앞에 끼므로 train_light.py
+    # 식 "_FOLD{f}OF{n}을 model_prefix에 바로 붙이는" 관례는 못 씀).
+    fold_suffix = f"_fold{args.fold}of{args.n_folds}" if args.fold is not None else ""
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
     train_ds     = BRCACaseDataset(cases[cases["split"] == "train"],    rna_df)
@@ -121,11 +134,12 @@ def main():
     if WANDB_AVAILABLE:
         wandb.init(
             project="Path-ViT",
-            name=f"BRCA_{model_prefix}_seed{cfg.light.seed}_{run_ts}",
+            name=f"BRCA_{model_prefix}_seed{cfg.light.seed}{fold_suffix}_{run_ts}",
             group=wandb_group,
             config={
                 "epochs": cfg.light.epochs, "lr": cfg.light.lr, "weight_decay": cfg.light.weight_decay,
                 "seed": cfg.light.seed, "patience": args.patience, "n_genes": args.n_genes,
+                "fold": args.fold, "n_folds": args.n_folds,
                 "rna_input_dim": rna_input_dim, "model": model_prefix, "dataset": "brca",
             },
         )
@@ -135,7 +149,7 @@ def main():
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}.pt"
+    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
     best_score, best_metrics, epochs_since_improvement = -1.0, {}, 0
     for epoch in range(cfg.light.epochs):
@@ -190,7 +204,7 @@ def main():
     import csv
     pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
     with open(pred_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
@@ -217,7 +231,7 @@ def main():
         import csv
         pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
         pred_dir.mkdir(parents=True, exist_ok=True)
-        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
         with open(pred_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "risk", "OS_time", "OS_event"])

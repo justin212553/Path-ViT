@@ -48,7 +48,7 @@ def _load_seed_predictions(pred_dir: Path, dataset: str, model: str, seed: int, 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=str, required=True, choices=["tcga", "cptac", "both"])
+    parser.add_argument("--dataset", type=str, required=True, choices=["tcga", "cptac", "both", "brca"])
     parser.add_argument("--model", type=str, required=True,
                          help="model_prefix (예: PMA_uni2_INT1500_SS_AUX_STG_R_DISP_COX_ADD)")
     parser.add_argument("--seeds", type=str, default="42,84,126",
