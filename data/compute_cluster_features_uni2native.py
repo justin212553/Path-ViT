@@ -162,7 +162,15 @@ def main():
                 intra_var[ci] = max(var, 0.0) / feat_wsum[case_id].shape[1]
                 cent_dist[ci] = cent_dist_wsum[case_id][ci] / wt
 
-            row = {"case_id": case_id, "n_patches_soft": float(total)}
+            # prop_entropy: 군집 비율 분포 자체의 정규화 Shannon entropy(0=한 군집에 쏠림,
+            # 1=K개 군집에 완전 균등) — 2026-09-01, Takamatsu et al. 2026(Br J Cancer, PAAD
+            # 591+302명)이 17개 H&E 클러스터 비율 분포의 엔트로피를 재발 시점과 독립적으로
+            # 유의한 예후 인자로 보고(P<0.01)한 것과 동일한 통계. prop_0..K-1 자체(비율)와는
+            # 달리 "이 환자 조직이 몇 개 유형에 걸쳐 얼마나 고르게 섞여있나"라는 별도 축.
+            p = proportion[proportion > 0]
+            prop_entropy = float(-(p * np.log(p)).sum() / np.log(k)) if len(p) > 0 else 0.0
+
+            row = {"case_id": case_id, "n_patches_soft": float(total), "prop_entropy": prop_entropy}
             for ci in range(k):
                 row[f"prop_{ci}"] = proportion[ci]
                 row[f"disp_{ci}"] = disp[ci]
@@ -173,8 +181,8 @@ def main():
         df = pd.DataFrame(rows)
         out_path = OUT_PATHS[ds]
         df.to_csv(out_path, index=False)
-        n_feat_cols = 4 * k
-        print(f"  {len(df)}명 환자 -> {out_path} ({n_feat_cols}차원 feature: prop/disp/intravar/centdist x K={k}, soft weight)")
+        n_feat_cols = 4 * k + 1
+        print(f"  {len(df)}명 환자 -> {out_path} ({n_feat_cols}차원 feature: prop/disp/intravar/centdist x K={k} + prop_entropy, soft weight)")
 
 
 if __name__ == "__main__":

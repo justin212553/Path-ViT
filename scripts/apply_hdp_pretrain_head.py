@@ -4,8 +4,8 @@ HDP_Pretrain 2단계 — scripts/train_hdp_pretrain_head.py로 PanNuke에서 학
 uni2h_official_features/*.h5)에 그대로 적용한다. 원본 WSI 이미지를 다시 열 필요 없음 —
 h5에 이미 있는 1536차원 feature에 이 head(frozen)를 forward만 하면 된다.
 
-환자별로 4가지 스칼라를 계산한다(cluster 버전의 4*K차원과 대응되지만, 이번엔 "클래스"가
-비지도 군집 10개가 아니라 진짜 의미가 있는 단일 축(종양 함량)이라 4차원으로 끝난다):
+환자별로 5가지 스칼라를 계산한다(cluster 버전의 4*K차원과 대응되지만, 이번엔 "클래스"가
+비지도 군집 10개가 아니라 진짜 의미가 있는 단일 축(종양 함량)이라 훨씬 저차원으로 끝난다):
   1. mean_tumor_content:  환자의 전체 patch 평균 종양 함량 — 원래 "종양 비율"이 노리던 것
   2. tumor_heterogeneity: patch 간 종양 함량의 분산 — 원래 "분화도 heterogeneity"가 노리던 것
                           (이번엔 진짜 종양-관련 축의 분산이라 §2-1-2-1이 원래 의도했던 것에
@@ -18,6 +18,15 @@ h5에 이미 있는 1536차원 feature에 이 head(frozen)를 forward만 하면 
                           뜻일 수 있음, PanNuke pancreas subset 자체가 195장 중 133장 종양
                           면적 0이었던 것과 같은 현상이 우리 코호트에도 있을 수 있음 — 정상
                           관찰).
+  5. content_entropy:     종양 함량 값을 N_BINS(기본 10)개 구간으로 나눠, patch들이 그
+                          구간들에 얼마나 고르게/쏠려서 분포하는지의 정규화 Shannon entropy
+                          (0=한 구간에 다 몰림, 1=완전 균등분포). 2026-09-01, Takamatsu et al.
+                          2026(Br J Cancer, PAAD 591+302명, H&E CNN 클러스터 17개의 비율
+                          분포 엔트로피가 재발 시점과 독립적으로 유의했다는 보고, P<0.01)의
+                          "클러스터 구성 이질성" 통계를 참고 — 우리는 클러스터가 아니라 연속
+                          종양 함량 스칼라라 binning으로 근사한다. mean_tumor_content/
+                          tumor_heterogeneity(분산)와 달리, "종양이 있다/없다"가 아니라
+                          "종양 함량 자체가 patch마다 얼마나 들쭉날쭉한가"를 재는 별도 축.
 
 환자가 슬라이드를 여러 장 가지면 슬라이드 구분 없이 그 환자의 전체 patch를 풀링해 계산(단
 dispersion만 슬라이드 내부 좌표계가 필요해 슬라이드별로 계산 후 종양함량 가중 평균).
@@ -50,6 +59,7 @@ OUT_PATHS = {
     "cptac": _ROOT / "data" / "tumor_content_uni2native_cptac.csv",
 }
 CASE_ID_TOKENS = {"tcga": 3, "cptac": 2}
+N_BINS = 10  # content_entropy용 종양 함량(0~1) 구간 수 — 원래 군집 K=10과 맞춤(비교 편의)
 
 
 def _case_id_from_stem(stem: str, dataset: str) -> str:
@@ -105,6 +115,7 @@ def main():
         high_count: dict[str, int] = {}
         disp_weighted_sum: dict[str, float] = {}
         disp_weight_total: dict[str, float] = {}
+        bin_counts: dict[str, np.ndarray] = {}
 
         for h5_path in h5_paths:
             case_id = _case_id_from_stem(h5_path.stem, ds)
@@ -124,6 +135,7 @@ def main():
                 high_count[case_id] = 0
                 disp_weighted_sum[case_id] = 0.0
                 disp_weight_total[case_id] = 0.0
+                bin_counts[case_id] = np.zeros(N_BINS, dtype=np.int64)
 
             patch_sum[case_id] += float(scores.sum())
             patch_sqsum[case_id] += float((scores ** 2).sum())
@@ -135,6 +147,9 @@ def main():
             disp_weighted_sum[case_id] += slide_disp * slide_weight
             disp_weight_total[case_id] += slide_weight
 
+            bin_idx = np.clip((scores * N_BINS).astype(np.int64), 0, N_BINS - 1)
+            bin_counts[case_id] += np.bincount(bin_idx, minlength=N_BINS)
+
         rows = []
         for case_id in sorted(patch_sum.keys()):
             n = patch_count[case_id]
@@ -143,12 +158,18 @@ def main():
             frac_high = high_count[case_id] / n
             disp = (disp_weighted_sum[case_id] / disp_weight_total[case_id]
                     if disp_weight_total[case_id] > 1e-6 else 0.0)
+
+            p = bin_counts[case_id] / bin_counts[case_id].sum()
+            raw_entropy = -(p[p > 0] * np.log(p[p > 0])).sum()
+            content_entropy = float(raw_entropy / np.log(N_BINS))  # 0~1 정규화
+
             rows.append({
                 "case_id": case_id, "n_patches": n,
                 "mean_tumor_content": mean_tc,
                 "tumor_heterogeneity": var_tc,
                 "tumor_dispersion": disp,
                 "frac_high_tumor": frac_high,
+                "content_entropy": content_entropy,
             })
 
         df = pd.DataFrame(rows)

@@ -73,7 +73,7 @@ HDP_FEATURE_SOURCES = {
         # scripts/apply_hdp_pretrain_head.py 산출 — PanNuke(핵 단위 라벨) 기반으로 학습된
         # 회귀 head를 적용한, 진짜 의미가 있는 단일 축(종양 함량)의 4개 통계. "클래스"가
         # 군집 10개가 아니라 1개(종양)라 4차원으로 끝난다(K=1인 셈).
-        "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor"),
+        "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor", "content_entropy"),
     },
 }
 

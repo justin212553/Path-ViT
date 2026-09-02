@@ -208,7 +208,9 @@ def main():
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    # 2026-09-01: train_hdp_pretrain_cluster.py의 lr sweep(같은 GrowthPatternCNN+MaturityMLP
+    # 아키텍처, paper/hdp/*.log) 결과를 여기도 그대로 적용 — 1e-3에서 3e-5로 기본값 변경.
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--cox-batch-size", type=int, default=16)
     parser.add_argument("--growth-dim", type=int, default=8)
@@ -239,7 +241,7 @@ def main():
     rna_gene_ids = literature_guided_gene_ids_intersection(1500)
 
     model_prefix = f"HDP_CLUSTER_INT1500_STG_R_GROWTH{args.growth_dim}"
-    if args.lr != 1e-3:
+    if args.lr != 3e-5:
         # train_light.py의 _LR{lr:.0e} 관례와 동일 — lr sweep(같은 seed/fold)에서 checkpoint/
         # kfold_preds 파일명이 서로 덮어써지지 않게 한다.
         model_prefix += f"_LR{args.lr:.0e}"

@@ -204,7 +204,10 @@ def main():
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--patience", type=int, default=20)
-    parser.add_argument("--lr", type=float, default=1e-3)
+    # 2026-09-01: seed84/fold0 lr sweep(1e-3~1e-5, paper/hdp/*.log) 결과, 3e-5가 매끄러운
+    # 수렴 곡선과 가장 높은 internal test c-index(0.7063)를 같이 냈다(1e-5는 곡선은 더
+    # 매끄럽지만 external이 5개 중 최저) — 기본값을 1e-3에서 3e-5로 변경.
+    parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--cox-batch-size", type=int, default=16)
     parser.add_argument("--growth-dim", type=int, default=8)
@@ -235,7 +238,7 @@ def main():
     rna_gene_ids = literature_guided_gene_ids_intersection(1500)
 
     model_prefix = f"HDP_PRETRAIN_CLUSTER_INT1500_STG_R_GROWTH{args.growth_dim}"
-    if args.lr != 1e-3:
+    if args.lr != 3e-5:
         # train_light.py의 _LR{lr:.0e} 관례와 동일 — lr sweep(같은 seed/fold)에서 checkpoint/
         # kfold_preds 파일명이 서로 덮어써지지 않게 한다(2026-09-01, sweep 설계 중 발견).
         model_prefix += f"_LR{args.lr:.0e}"
