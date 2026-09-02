@@ -39,7 +39,9 @@ except ImportError:
     WANDB_AVAILABLE = False
 
 from config import Config
-from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, literature_guided_gene_ids_intersection
+from data.dataset import (
+    WSISurvivalDataset, CLINICAL_PATHS, literature_guided_gene_ids_intersection, pathway_category_gene_ids,
+)
 from models.hdp_cluster import HDPCluster
 from models.tumor_content_head import TumorContentHead
 from models.clinical_encoder import age_stats_from_csv, margin_stats_from_csv, stage_stats_from_df, STAGE_FIELDS
@@ -195,6 +197,27 @@ def _build_scheduler(optimizer, epochs, warmup):
     return LambdaLR(optimizer, lr_lambda)
 
 
+# train_light.py::_BRANCH_ATTRS/_branch_param_groups와 동일 관례(2026-09-02, --clinical-lr-mult
+# 이식) — HDPCluster는 HDP를 상속해 clinical_linear/rna_encoder 속성명이 그대로라 매핑 그대로
+# 재사용 가능. growth_cnn/maturity_mlp/hist_linear/growth_linear/maturity_linear는 전부 "other"로
+# 묶여 기본 lr을 쓴다(clinical-lr-mult는 clinical만, rna-lr-mult는 rna_encoder만 별도 배율).
+_BRANCH_ATTRS = {
+    "clinical": ("clinical_encoder", "clinical_linear"),
+    "rna": ("rna_encoder", "rna_linear"),
+}
+
+
+def _branch_param_groups(model) -> dict[str, list]:
+    groups: dict[str, list] = {"clinical": [], "rna": [], "other": []}
+    attr_to_key = {attr: key for key, attrs in _BRANCH_ATTRS.items() for attr in attrs}
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        top = name.split(".")[0]
+        groups[attr_to_key.get(top, "other")].append(p)
+    return groups
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--dataset", type=str, default="tcga", choices=["tcga", "cptac"])
@@ -213,6 +236,22 @@ def main():
     parser.add_argument("--growth-dim", type=int, default=8)
     parser.add_argument("--group-ts", type=str, default=None)
     parser.add_argument("--eval-external-ckpt", type=str, default=None)
+    parser.add_argument("--rna-genes", type=str, default="literature_1500_intersection",
+                         choices=["literature_1500_intersection", "pathway8"],
+                         help="2026-09-02: literature_1500_intersection(Cox test 기반, leakage "
+                              "확인됨 — findings_backlog.md) 대신 pathway8(문헌 큐레이션 8개 "
+                              "카테고리 평균, OS 라벨 미사용, leakage 불가능)을 쓸 수 있게.")
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="train_light.py --clinical-lr-mult와 동일 — clinical_linear 파라미터"
+                              "그룹 lr만 base lr의 이 배수로.")
+    parser.add_argument("--rna-lr-mult", type=float, default=1.0)
+    parser.add_argument("--full-train", action="store_true",
+                         help="2026-09-02: train.py/train_light.py --full-train과 동일 관례 — "
+                              "k-fold/6:2:2 split 없이 코호트 전체를 train으로 쓰고(val/internal "
+                              "test 없음) 고정 --epochs만큼 학습한 뒤 external만 평가·저장한다. "
+                              "internal pooled/ensembled k-fold c-index의 신뢰성 문제(findings_"
+                              "backlog.md 2026-09-02) 때문에 여러 시드 반복 후 external 평균으로 "
+                              "판단하는 프로토콜 — --fold/--patience와 함께 쓰지 않는다.")
     args = parser.parse_args()
 
     load_env()
@@ -235,18 +274,31 @@ def main():
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATHS[args.dataset])
     margin_stats = margin_stats_from_csv(CLINICAL_PATHS[args.dataset])
     stage_stats = stage_stats_from_df(pd.read_csv(CLINICAL_PATHS[args.dataset]))
-    rna_gene_ids = literature_guided_gene_ids_intersection(1500)
+    rna_pathway_categories = None
+    if args.rna_genes == "pathway8":
+        rna_pathway_categories = pathway_category_gene_ids()
+        rna_gene_ids = None
+        rna_input_dim = len(rna_pathway_categories)
+    else:
+        rna_gene_ids = literature_guided_gene_ids_intersection(1500)
+        rna_input_dim = len(rna_gene_ids)
 
-    model_prefix = f"HDP_PRETRAIN_CLUSTER_INT1500_STG_R_GROWTH{args.growth_dim}"
+    model_prefix = "HDP_PRETRAIN_CLUSTER"
+    model_prefix += "_PW8" if args.rna_genes == "pathway8" else "_INT1500"
+    model_prefix += f"_STG_R_GROWTH{args.growth_dim}"
     if args.lr != 3e-5:
         # train_light.py의 _LR{lr:.0e} 관례와 동일 — lr sweep(같은 seed/fold)에서 checkpoint/
         # kfold_preds 파일명이 서로 덮어써지지 않게 한다(2026-09-01, sweep 설계 중 발견).
         model_prefix += f"_LR{args.lr:.0e}"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
     model = HDPCluster(
-        cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(rna_gene_ids),
+        cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         hist_dim=hist_dim, k=1, feat_dim=feat_dim, growth_dim=args.growth_dim,
         use_margin=True, margin_stats=margin_stats, use_age_sex=True,
         use_staging=True, stage_stats=stage_stats,
@@ -254,7 +306,8 @@ def main():
     print(f"Model: {model_prefix} | params={sum(p.numel() for p in model.parameters()):,}")
 
     ds_kwargs = dict(with_clinical=True, with_margin=True, with_staging=True,
-                      with_rna=True, rna_gene_ids=rna_gene_ids, feature_backbone="uni2native")
+                      with_rna=True, rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
+                      feature_backbone="uni2native")
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
 
@@ -279,24 +332,78 @@ def main():
         print(f"  -> saved: {pred_path}")
         return
 
-    train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
-    val_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val", **ds_kwargs, **split_kwargs)
-    test_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test", **ds_kwargs, **split_kwargs)
-    train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
-    train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
-    val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
-    test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
-    print(f"Dataset: {args.dataset} fold{args.fold}/{args.n_folds} | "
-          f"Train:{len(train_ds)} Val:{len(val_ds)} Test:{len(test_ds)}")
+    if args.full_train:
+        train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="all", **ds_kwargs)
+        train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
+        print(f"Dataset: {args.dataset} (--full-train: split 없이 코호트 전체를 train으로 사용) | "
+              f"Train:{len(train_ds)} patients (val/internal test 없음)")
+    else:
+        train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="train", **ds_kwargs, **split_kwargs)
+        val_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val", **ds_kwargs, **split_kwargs)
+        test_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="test", **ds_kwargs, **split_kwargs)
+        train_loader = DataLoader(train_ds, shuffle=True, **dl_kwargs)
+        val_loader = DataLoader(val_ds, shuffle=False, **dl_kwargs)
+        test_loader = DataLoader(test_ds, shuffle=False, **dl_kwargs)
+        print(f"Dataset: {args.dataset} fold{args.fold}/{args.n_folds} | "
+              f"Train:{len(train_ds)} Val:{len(val_ds)} Test:{len(test_ds)}")
 
     run_ts = datetime.now().strftime("%m%d::%H%M")
     if WANDB_AVAILABLE:
         wandb.init(project="Path-ViT", name=f"{args.dataset.upper()}_{model_prefix}_seed{args.seed}_{run_ts}",
                     group=f"{model_prefix}_{args.group_ts or run_ts}",
-                    config={"epochs": args.epochs, "lr": args.lr, "seed": args.seed, "model": model_prefix})
+                    config={"epochs": args.epochs, "lr": args.lr, "seed": args.seed, "model": model_prefix,
+                            "clinical_lr_mult": args.clinical_lr_mult, "rna_lr_mult": args.rna_lr_mult,
+                            "full_train": args.full_train})
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0:
+        groups = _branch_param_groups(model)
+        param_groups = []
+        if groups["clinical"]:
+            param_groups.append({"params": groups["clinical"], "lr": args.lr * args.clinical_lr_mult})
+        if groups["rna"]:
+            param_groups.append({"params": groups["rna"], "lr": args.lr * args.rna_lr_mult})
+        if groups["other"]:
+            param_groups.append({"params": groups["other"], "lr": args.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
+        print(f"branch-lr-mult 적용: clinical={args.clinical_lr_mult}x({len(groups['clinical'])}개 텐서), "
+              f"rna={args.rna_lr_mult}x({len(groups['rna'])}개 텐서), other=1x({len(groups['other'])}개 텐서)")
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = _build_scheduler(optimizer, args.epochs, warmup=max(1, args.epochs // 10))
+
+    if args.full_train:
+        # --full-train: val이 없어 "best" checkpoint 선택이 불가능 — 고정 epoch만큼 돌리고
+        # 메모리 상의(=마지막 epoch) 모델을 그대로 external 평가에 쓴다(train.py/train_light.py
+        # --full-train과 동일 관례). checkpoint 저장/재로드 자체를 안 한다.
+        for epoch in range(args.epochs):
+            loss = train_one_epoch(model, train_loader, optimizer, device, args.cox_batch_size,
+                                    precompute, cluster_hist_lookup)
+            scheduler.step()
+            print(f"Epoch {epoch:3d} | loss={loss:.4f}")
+            if WANDB_AVAILABLE:
+                wandb.log({"train/loss": loss})
+
+        if external_dataset:
+            external_ds = WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
+            external_loader = DataLoader(external_ds, shuffle=False, **dl_kwargs)
+            ext_metrics = evaluate(model, external_loader, device, precompute, cluster_hist_lookup)
+            print(f"\n=== External Test ({external_dataset}, --full-train 마지막 epoch 모델) ===")
+            print(f"external_c_index={ext_metrics['c_index']:.4f} | HR={ext_metrics['hr']:.3f} | "
+                  f"log_rank_p={ext_metrics['log_rank_p']:.4f}")
+            pred_dir = _ROOT / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_FULLTRAIN_seed{args.seed}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, r, t, e in zip(ext_metrics["case_ids"], ext_metrics["risks"],
+                                          ext_metrics["times"], ext_metrics["events"]):
+                    writer.writerow([cid, r, t, e])
+            print(f"  -> external predictions saved: {pred_path}")
+        if WANDB_AVAILABLE:
+            wandb.finish()
+        return
+
     ckpt_dir = _ROOT / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"survival_{args.dataset}_best_{model_prefix.lower()}_seed{args.seed}_light.pt"
