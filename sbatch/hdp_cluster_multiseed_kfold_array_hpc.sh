@@ -21,6 +21,13 @@
 # WSILookup이 환자당 soft cluster weight를 in-memory 캐싱해 epoch 반복 비용을 줄인다(로컬
 # 스모크 테스트로 확인).
 #
+# ⚠️ 이 job은 --HDP/--HDP-PRETRAIN과 달리 작은 CSV만으로 안 된다 — WSILookup이 data/
+# uni2h_official_features/{tcga,cptac}/*.h5(45GB, raw feature+coords)를 직접 읽는다. M1~M7이
+# uni2native로 HPC에서 이미 학습됐다면 이 raw h5든 변환된 per-slide .pt 트리든 뭔가는 있겠지만,
+# 정확히 이 경로(data/uni2h_official_features/)에 h5 형태로 있는지는 로컬에서 확인 못 했다 —
+# 실행 전에 해당 경로 존재 여부를 먼저 확인할 것(없으면 scripts/download_uni2h_official_features.py
+# 또는 별도 동기화 필요).
+#
 # array 관례: SLURM_ARRAY_TASK_ID(0~9) -> seed_idx = id/5, fold = id%5 (2seed x 5fold, seed42 제외).
 #
 # 완료 후(.logs/kfold_preds/에 CSV 10개 확인):
