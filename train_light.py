@@ -51,15 +51,31 @@ from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
 
 
-CLUSTER_HIST_PATHS = {
-    "tcga": Path("data/cluster_features_uni2native_tcga.csv"),
-    "cptac": Path("data/cluster_features_uni2native_cptac.csv"),
+# --HDP(비지도 k-means 군집, 라벨 없음)와 --HDP-PRETRAIN(PanNuke 라벨로 학습된 진짜 종양
+# 함량 회귀 head, 2026-09-01 사용자 결정으로 추가) 두 소스를 같은 HDP 모델 클래스(hist_dim만
+# 다름)로 돌린다 — 어느 소스든 "환자 단위 저차원 WSI feature 벡터"라는 형태는 동일.
+HDP_FEATURE_SOURCES = {
+    "cluster": {
+        "paths": {
+            "tcga": Path("data/cluster_features_uni2native_tcga.csv"),
+            "cptac": Path("data/cluster_features_uni2native_cptac.csv"),
+        },
+        # data/compute_cluster_features_uni2native.py 산출 — prop=비율, disp=공간 dispersion,
+        # intravar=군집 내부 임베딩 분산(분화도 heterogeneity 대체 통계, "분화도"라 부르지 않음),
+        # centdist=전역 군집 중심까지 거리(성숙도 대체 통계, "성숙도"라 부르지 않음).
+        "prefixes": ("prop_", "disp_", "intravar_", "centdist_"),
+    },
+    "pretrain": {
+        "paths": {
+            "tcga": Path("data/tumor_content_uni2native_tcga.csv"),
+            "cptac": Path("data/tumor_content_uni2native_cptac.csv"),
+        },
+        # scripts/apply_hdp_pretrain_head.py 산출 — PanNuke(핵 단위 라벨) 기반으로 학습된
+        # 회귀 head를 적용한, 진짜 의미가 있는 단일 축(종양 함량)의 4개 통계. "클래스"가
+        # 군집 10개가 아니라 1개(종양)라 4차원으로 끝난다(K=1인 셈).
+        "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor"),
+    },
 }
-# data/compute_cluster_features_uni2native.py가 찍는 4가지 라벨-프리 통계 접두어(각 K차원).
-# prop=비율, disp=공간 dispersion, intravar=군집 내부 임베딩 분산(분화도 heterogeneity 대체
-# 통계, "분화도"라 부르지 않음), centdist=전역 군집 중심까지 거리(성숙도 대체 통계, "성숙도"라
-# 부르지 않음) — 2026-09-01 사용자 결정(라벨 없는 진짜 분화도/성숙도 classifier는 배제).
-CLUSTER_FEATURE_PREFIXES = ("prop_", "disp_", "intravar_", "centdist_")
 
 
 class ClusterHistLookup:
@@ -80,40 +96,37 @@ class ClusterHistLookup:
         return self.fallback
 
 
-def _load_cluster_histograms(datasets: list[str]) -> tuple["ClusterHistLookup", int]:
-    """data/compute_cluster_features_uni2native.py 산출 CSV(case_id, {prop,disp,intravar,
-    centdist}_0..{K-1}, n_patches)를 로드해 {case_id: (4*K,) z-score 정규화 tensor} 딕셔너리로
-    합친다. --HDP 전용.
+def _load_cluster_histograms(datasets: list[str], source: str = "cluster") -> tuple["ClusterHistLookup", int]:
+    """HDP_FEATURE_SOURCES[source] 산출 CSV를 로드해 {case_id: (D,) z-score 정규화 tensor}
+    딕셔너리로 합친다. --HDP(source="cluster")/--HDP-PRETRAIN(source="pretrain") 공용.
 
-    비율/공간 스케일(px)/임베딩 분산/임베딩 거리는 단위가 전부 달라 정규화 없이 하나의 선형층
-    (models/hdp.py::HDP.hist_linear)에 넣으면 스케일 큰 항이 사실상 gradient를 독점한다 —
-    clinical cox_add(age/margin/stage)와 동일 관례로 각 열을 전체 코호트 기준 z-score한다
-    (cluster centroid 자체도 fold 구분 없이 전체 코호트로 fit했으므로 이 정도의 "전체 통계
-    사용"은 새로운 leakage가 아니라 기존 파이프라인과 일관된 선택).
+    비율/공간 스케일(px)/임베딩 분산/임베딩 거리(또는 pretrain의 평균/분산/dispersion/비율)는
+    단위가 전부 달라 정규화 없이 하나의 선형층(models/hdp.py::HDP.hist_linear)에 넣으면 스케일
+    큰 항이 사실상 gradient를 독점한다 — clinical cox_add(age/margin/stage)와 동일 관례로 각
+    열을 전체 코호트 기준 z-score한다(cluster centroid/pretrain head 둘 다 fold 구분 없이
+    전체 코호트로 fit·적용했으므로 이 정도의 "전체 통계 사용"은 새로운 leakage가 아니라 기존
+    파이프라인과 일관된 선택).
 
     공식 UNI2-h feature(data/uni2h_official_features/)가 생존 코호트의 일부 환자를 못 커버한다
     (2026-09-01 확인: TCGA 152명 중 2명, CPTAC 159명 중 15명 누락 — MahmoodLab 공식 배포 자체가
     이 환자들 슬라이드를 포함 안 함). 코호트 크기를 그대로 유지해야 M1~M7 결과표와 비교 가능하므로
     (환자를 빼면 fold/코호트가 달라짐), 이런 환자는 버리지 않고 전체 평균(정규화 후 0벡터)으로
-    대체한다 — "이 환자에 대해선 군집 정보를 모른다"는 뜻의 중립적 fallback.
+    대체한다 — "이 환자에 대해선 군집/종양함량 정보를 모른다"는 뜻의 중립적 fallback.
 
-    Returns: (case_id -> (4*K,) float tensor 딕셔너리, K)
+    Returns: (case_id -> (D,) float tensor 딕셔너리, D)
     """
     import pandas as pd
-    frames = [pd.read_csv(CLUSTER_HIST_PATHS[d]) for d in datasets]
+    spec = HDP_FEATURE_SOURCES[source]
+    frames = [pd.read_csv(spec["paths"][d]) for d in datasets]
     df = pd.concat(frames, ignore_index=True)
-    feat_cols = sorted(
-        [c for c in df.columns if any(c.startswith(p) for p in CLUSTER_FEATURE_PREFIXES)],
-        key=lambda c: (c.rsplit("_", 1)[0], int(c.rsplit("_", 1)[1])),
-    )
-    k = len(feat_cols) // len(CLUSTER_FEATURE_PREFIXES)
+    feat_cols = sorted(c for c in df.columns if any(c.startswith(p) for p in spec["prefixes"]))
     mean = df[feat_cols].mean()
     std = df[feat_cols].std(ddof=0).replace(0.0, 1.0)
     df_z = (df[feat_cols] - mean) / std
     lookup = {cid: torch.tensor(row.astype("float32"))
               for cid, row in zip(df["case_id"], df_z.to_numpy())}
     fallback = torch.zeros(len(feat_cols), dtype=torch.float32)  # 정규화 후 코호트 평균 = 0벡터
-    return ClusterHistLookup(lookup, fallback), 4 * k
+    return ClusterHistLookup(lookup, fallback), len(feat_cols)
 
 
 def set_seed(seed: int):
@@ -387,6 +400,16 @@ def _parse_args() -> argparse.Namespace:
              "저차원 구조화 feature로 넣고 어느 군집이 hazard와 상관있는지는 생존 라벨이 직접 "
              "결정하게 한다.",
     )
+    model_group.add_argument(
+        "--HDP-PRETRAIN", action="store_true", dest="HDP_PRETRAIN",
+        help="HDP와 같은 모델 클래스(models/hdp.py)지만 WSI feature 소스가 다르다 — 군집이 "
+             "아니라, PanNuke(핵 단위 라벨, scripts/train_hdp_pretrain_head.py로 pancreas "
+             "subset 195장에서 학습, held-out val_corr=0.60) 기반으로 학습된 진짜 종양 함량 "
+             "회귀 head를 우리 코호트에 적용한(scripts/apply_hdp_pretrain_head.py) 4차원 통계 "
+             "(평균/heterogeneity/dispersion/고함량비율)를 cox_add로 추가한다. 2026-09-01 "
+             "사용자 결정 — --HDP(비지도 군집, 라벨 없음)가 M7 대비 개선을 못 보여서, 진짜 "
+             "라벨로 학습시킨 버전을 별도로 검증한다.",
+    )
     parser.add_argument(
         "--clinical-margin", action="store_true",
         help="--M5/--M7 공통(M5_R/M7_R, M7은 --combine-mode concat 전용). age/sex에 절제연 "
@@ -525,8 +548,8 @@ def main():
     if args.raw_linear and not args.M5:
         raise ValueError("--raw-linear는 --M5 전용입니다.")
 
-    with_clinical = args.M5 or args.M7 or args.HDP
-    with_rna = args.M6 or args.M6X or args.M7 or args.HDP
+    with_clinical = args.M5 or args.M7 or args.HDP or args.HDP_PRETRAIN
+    with_rna = args.M6 or args.M6X or args.M7 or args.HDP or args.HDP_PRETRAIN
 
     if with_clinical:
         if args.dataset == "both":
@@ -594,7 +617,8 @@ def main():
     else:
         rna_gene_ids, rna_input_dim = None, None
 
-    model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7 else "HDP"
+    model_prefix = ("M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7
+                     else "HDP_PRETRAIN" if args.HDP_PRETRAIN else "HDP")
     if args.rna_genes == "purist_top20_tcga_only":
         # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
         # 파일명이 겹치면 안 되므로 별도 접미사.
@@ -654,12 +678,14 @@ def main():
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
     cluster_hist_lookup = None
-    if args.HDP:
+    if args.HDP or args.HDP_PRETRAIN:
         hist_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
         if external_dataset:
             hist_datasets = list(set(hist_datasets) | {external_dataset})
-        cluster_hist_lookup, hist_k = _load_cluster_histograms(hist_datasets)
-        print(f"--HDP: cluster histogram {len(cluster_hist_lookup.lookup)}명 로드 완료 (K={hist_k}, {hist_datasets})")
+        hdp_source = "pretrain" if args.HDP_PRETRAIN else "cluster"
+        cluster_hist_lookup, hist_k = _load_cluster_histograms(hist_datasets, source=hdp_source)
+        print(f"--{model_prefix}: {hdp_source} feature {len(cluster_hist_lookup.lookup)}명 로드 완료 "
+              f"(D={hist_k}, {hist_datasets})")
 
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
@@ -673,7 +699,7 @@ def main():
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
-    elif args.HDP:
+    elif args.HDP or args.HDP_PRETRAIN:
         model = HDP(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                     hist_dim=hist_k, use_margin=args.clinical_margin, margin_stats=margin_stats,
                     use_age_sex=not args.no_age_sex,
