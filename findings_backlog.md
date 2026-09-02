@@ -120,6 +120,48 @@ c-index(이 프로젝트 전체의 표준 "internal" 보고 지표)가 "이 모�
 `scripts/diagnose_hdp_feature_signal.py`(선행 진단, raw feature 자체의 생존 상관 없음 확인),
 `train_light.py --rna-genes pathway8`/`--clinical-lr-mult`/`--rna-lr-mult`(전부 2026-09-02 신규).
 
+### 후속(2026-09-02 밤) — "TCGA 전체 train + 고정epoch + external만" 프로토콜로 재검증
+
+Pooled/ensembled internal k-fold c-index의 신뢰성 자체가 의심스러워진 것(위 5번 항목)에 대한
+사용자 대안 제안: "차라리 TCGA를 통째로 train set으로 쓴 다음 눈 가리고 30에폭 쓰고 external만
+보고하는 게 검정력이 높지 않을까" — `train_light.py --full-train`(k-fold/6:2:2 split 없이 코호트
+전체를 train, 고정 epoch, val 없어 early-stop 불가)로 구현, 시드 5개(42/84/126/168/210) 반복해
+external 평균±bootstrap CI로 비교. 버그 2개 수정(`scripts/run_fulltrain_leak_sweep_local.sh`
+커밋 참조 — `--full-train`이 `test_metrics` 미정의로 Slack 알림 단계에서 매번 크래시하던 문제,
+checkpoint 자체가 저장 안 돼 `--eval-external-ckpt` 후속 조회가 불가능하던 문제).
+
+**결과(M7, `--epochs 30`, external=CPTAC 전체 144명, 5시드 앙상블)**:
+
+| 설정 | 시드 평균±std | 앙상블 c_index | bootstrap 95% CI |
+|---|---|---|---|
+| literature_1500(leak) | 0.6142±0.0066 | **0.6154** | [0.555, 0.671] |
+| pathway8(no-leak), mult=1 | 0.5737±0.0075 | 0.5729 | [0.513, 0.634] |
+| pathway8 + mult=5 | 0.5863±0.0069 | 0.5867 | [0.528, 0.643] |
+| pathway8 + mult=10 | 0.5864±0.0075 | **0.5912** | [0.533, 0.647] |
+| pathway8 + mult=20 | 0.5839±0.0082 | 0.5882 | [0.530, 0.644] |
+| pathway8 + mult=50 | 0.5789±0.0106 | 0.5825 | [0.525, 0.639] |
+
+**leak 효과가 이 프로토콜에서는 external에도 더 뚜렷이 남는다** — leak/no-leak external 격차가
++0.0425(0.6154−0.5729)로, 어제 k-fold 기반 비교(2seed×5fold pooled, +0.018)의 2배 이상. CI는
+여전히 크게 겹치지만(점추정치 격차는 뚜렷) 어제 "leak은 internal에만 있고 external엔 거의
+안 닿는다"는 결론을 다소 후퇴시킨다. **가능한 원인(미분리)**: full-train은 fold당(~90~122명)
+보다 훨씬 큰 train set(152명 전체)을 쓰므로, RNA encoder(1500차원 입력, 파라미터 많음)가
+데이터量 자체의 이득을 leak과 무관하게 더 크게 볼 수 있다 — "leak이 진짜 신호를 일부 담고
+있어서"인지 "더 큰 encoder가 더 큰 train set에서 원래 유리해서"인지 이 실험만으론 분리 안 됨
+(encoder 크기를 맞춘 대조군이 있어야 분리 가능, 다음 세션 후보 작업).
+
+**clinical-lr-mult는 이 프로토콜에서 훨씬 깨끗한 신호를 보인다** — mult=1(0.5729)→5(0.5867)→
+**10(0.5912, 최고점)**→20(0.5882)→50(0.5825)로 매끈한 산 모양(어제 k-fold 기반의 "fold0에서만
+보이던 가짜 추세"와 달리 시드별 std 0.007~0.011로 작고 방향이 일관됨). mult=10 근방이
+branch-competition 해소에 실제로 도움이 된다는 쪽에 무게가 실리나, mult=1의 bootstrap CI 안에
+mult=10의 점추정치가 들어가 통계적으로 확정은 아님.
+
+**다음 결정 필요(추가)**: leak vs "단순 train set 크기 효과" 분리 실험(encoder 폭을 pathway8/
+literature_1500 양쪽에 맞춘 대조군), clinical-lr-mult=10을 표준값으로 채택할지, 이 full-train
+프로토콜을 앞으로의 모든 아키텍처 비교의 표준으로 삼을지.
+
+관련 코드(신규): `scripts/pool_fulltrain_external_preds.py`, `scripts/run_fulltrain_leak_sweep_local.sh`.
+
 ---
 
 ## 🔴 최상위 발견(2026-08-31) — MCAT 스타일 multi-pathway co-attention(Phase 1)도 실패, gradient는 정상 도달 확인 → "query 개수 부족"이 원인이 아니었다
