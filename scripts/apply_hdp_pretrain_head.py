@@ -42,7 +42,9 @@ if str(_ROOT) not in sys.path:
 from models.tumor_content_head import TumorContentHead
 
 FEATURES_ROOT = _ROOT / "data" / "uni2h_official_features"
-HEAD_PATH = _ROOT / "models" / "checkpoint" / "hdp_pretrain_tumor_content_head.pt"
+# models/checkpoint/는 git-ignore 대상이라 data/ 밑에 별도로 둔다(2026-09-01, HPC에서
+# train_hdp_pretrain_cluster.py가 이 파일을 못 찾는 문제로 확인 — git pull만으로 따라오게).
+HEAD_PATH = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
 OUT_PATHS = {
     "tcga": _ROOT / "data" / "tumor_content_uni2native_tcga.csv",
     "cptac": _ROOT / "data" / "tumor_content_uni2native_cptac.csv",

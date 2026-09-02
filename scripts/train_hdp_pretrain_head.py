@@ -54,7 +54,9 @@ PANCREAS_TISSUE_ID = 12
 NEOPLASTIC_CATEGORY = 0
 IMG_SIZE = 256
 
-OUT_DIR = _ROOT / "models" / "checkpoint"
+# models/checkpoint/는 git-ignore 대상이라 data/ 밑에 저장한다(2026-09-01, HPC에서 이 파일이
+# 안 보이는 문제로 확인 — git pull만으로 따라오게 하려면 tracked 경로에 둬야 함).
+OUT_DIR = _ROOT / "data"
 OUT_PATH = OUT_DIR / "hdp_pretrain_tumor_content_head.pt"
 
 

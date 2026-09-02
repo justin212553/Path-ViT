@@ -50,7 +50,9 @@ from utils.metrics import compute_survival_metrics
 from train_light import _load_cluster_histograms, ClusterHistLookup  # HDP_Pretrain 4차원 통계 재사용
 
 _ROOT = Path(__file__).resolve().parent
-HEAD_PATH = _ROOT / "models" / "checkpoint" / "hdp_pretrain_tumor_content_head.pt"
+# models/checkpoint/는 git-ignore 대상이라(2026-09-01 HPC에서 FileNotFoundError로 확인) data/
+# 밑에 별도로 복사해둔 걸 쓴다 — git pull만으로 HPC에도 따라오게.
+HEAD_PATH = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
 GRID_STRIDE = 512  # data/fit_clusters_uni2native.py 확인 시 coords 간격(level-0 px)과 동일
 
 
