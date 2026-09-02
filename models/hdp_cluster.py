@@ -79,7 +79,13 @@ class HDPCluster(HDP):
         return risk_growth + risk_maturity
 
     def forward(self, age_years, sex_idx, rna, cluster_hist, growth_vec, maturity_scalar,
-                margin_ord=None, stage_ord=None):
+                margin_ord=None, stage_ord=None, return_components: bool = False):
+        if return_components:
+            base = super().forward(age_years, sex_idx, rna, cluster_hist,
+                                    margin_ord=margin_ord, stage_ord=stage_ord, return_components=True)
+            risk_growth = self.growth_linear(growth_vec.unsqueeze(0)).view(1)
+            risk_maturity = self.maturity_linear(maturity_scalar.view(1, 1)).view(1)
+            return {**base, "growth": risk_growth, "maturity": risk_maturity}
         base_risk = super().forward(age_years, sex_idx, rna, cluster_hist,
                                      margin_ord=margin_ord, stage_ord=stage_ord)
         extra_risk = self.forward_wsi_extra(growth_vec, maturity_scalar)

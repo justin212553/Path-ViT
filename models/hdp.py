@@ -98,7 +98,8 @@ class HDP(nn.Module):
     def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor,
                 cluster_hist: torch.Tensor,
                 margin_ord: torch.Tensor | None = None,
-                stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+                stage_ord: dict[str, torch.Tensor] | None = None,
+                return_components: bool = False):
         """
         Args:
             age_years:    () 스칼라
@@ -106,8 +107,11 @@ class HDP(nn.Module):
             rna:          (G,) 코호트 내부 z-score
             cluster_hist: (K,) 환자의 군집 비율(합=1) — data/compute_cluster_histograms_uni2native.py 산출
             margin_ord/stage_ord: ClinicalRNAOnly와 동일 규약
+            return_components: True면 risk 대신 {"rna":.., "clin":.., "hist":..} 항별 dict 반환
+                                (2026-09-01, scripts/diagnose_hdp_checkpoint_weights.py용 — branch별
+                                실제 기여도를 뜯어보기 위해 추가. 기본 False로 기존 동작 그대로.)
         Returns:
-            risk: (1,)
+            risk: (1,) (return_components=False) 또는 항별 dict(각 (1,))
         """
         z_r = self.rna_encoder(rna.unsqueeze(0)).squeeze(0)
         risk_rna = self.risk_head(z_r.unsqueeze(0)).view(1)
@@ -117,4 +121,6 @@ class HDP(nn.Module):
 
         risk_hist = self.hist_linear(cluster_hist.float().unsqueeze(0)).view(1)
 
+        if return_components:
+            return {"rna": risk_rna, "clin": risk_clin, "hist": risk_hist}
         return risk_rna + risk_clin + risk_hist
