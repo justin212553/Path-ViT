@@ -42,13 +42,61 @@ from data.dataset import (
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
     literature_guided_gene_ids_intersection,
 )
-from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly
+from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
     age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df, stage_stats_from_df, STAGE_FIELDS,
 )
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
+
+
+CLUSTER_HIST_PATHS = {
+    "tcga": Path("data/cluster_hist_uni2native_tcga.csv"),
+    "cptac": Path("data/cluster_hist_uni2native_cptac.csv"),
+}
+
+
+class ClusterHistLookup:
+    """case_id -> (K,) 군집 히스토그램 텐서. 커버 안 되는 case_id는 전체 평균으로 fallback하고
+    처음 조회될 때 1번만 경고를 찍는다(반복 로그 방지)."""
+
+    def __init__(self, lookup: dict, fallback: torch.Tensor):
+        self.lookup = lookup
+        self.fallback = fallback
+        self._warned: set[str] = set()
+
+    def __getitem__(self, case_id: str) -> torch.Tensor:
+        if case_id in self.lookup:
+            return self.lookup[case_id]
+        if case_id not in self._warned:
+            print(f"  [경고] case_id={case_id}: uni2native cluster histogram 없음 -> 전체 평균으로 대체")
+            self._warned.add(case_id)
+        return self.fallback
+
+
+def _load_cluster_histograms(datasets: list[str]) -> tuple["ClusterHistLookup", int]:
+    """data/compute_cluster_histograms_uni2native.py 산출 CSV(case_id, hist_0..hist_{K-1},
+    n_patches)를 로드해 {case_id: (K,) tensor} 딕셔너리로 합친다. --HDP 전용.
+
+    공식 UNI2-h feature(data/uni2h_official_features/)가 생존 코호트의 일부 환자를 못 커버한다
+    (2026-09-01 확인: TCGA 152명 중 2명, CPTAC 159명 중 15명 누락 — MahmoodLab 공식 배포 자체가
+    이 환자들 슬라이드를 포함 안 함). 코호트 크기를 그대로 유지해야 M1~M7 결과표와 비교 가능하므로
+    (환자를 빼면 fold/코호트가 달라짐), 이런 환자는 버리지 않고 전체 평균 히스토그램으로
+    대체한다 — "이 환자에 대해선 군집 정보를 모른다"는 뜻의 중립적 fallback.
+
+    Returns: (case_id -> (K,) float tensor 딕셔너리, 전체 평균 (K,) fallback 텐서, K)
+    """
+    import pandas as pd
+    frames = [pd.read_csv(CLUSTER_HIST_PATHS[d]) for d in datasets]
+    df = pd.concat(frames, ignore_index=True)
+    hist_cols = sorted([c for c in df.columns if c.startswith("hist_")],
+                        key=lambda c: int(c.split("_")[1]))
+    k = len(hist_cols)
+    lookup = {row["case_id"]: torch.tensor(row[hist_cols].values.astype("float32"))
+              for _, row in df.iterrows()}
+    fallback = torch.tensor(df[hist_cols].mean().values.astype("float32"))
+    return ClusterHistLookup(lookup, fallback), k
 
 
 def set_seed(seed: int):
@@ -75,19 +123,36 @@ def _identity_collate(batch: list) -> list:
     return batch[0]
 
 
-def _patient_risk(model, patient_slides, device) -> torch.Tensor:
-    """WSI 없이 환자 단위 메타데이터(age/sex 및/또는 rna)만으로 risk score를 계산한다.
+def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | None = None) -> torch.Tensor:
+    """WSI 없이 환자 단위 메타데이터(age/sex 및/또는 rna, --HDP면 군집 히스토그램까지)만으로
+    risk score를 계산한다.
 
-    model이 ClinicalRNAOnly(M7)면 age/sex/rna 전부, rna_encoder만 있으면
-    RNAOnly/RNAOnlyExtend(M6/M6X), 그 외(clinical_encoder만)는 ClinicalOnly(M5) —
-    forward 시그니처가 모델마다 다르므로 분기한다. 2026-07-29: ClinicalRNAOnly의
-    combine_mode="film"/"cox_add"는 clinical_encoder 속성이 없어(그 대신 film_gamma/
-    clinical_linear) hasattr(model, "clinical_encoder")만으로는 M7을 못 잡는 버그가 있었다 —
-    isinstance로 명시적으로 잡는다.
+    model이 HDP(models/hdp.py)면 age/sex/rna/cluster_hist 전부, ClinicalRNAOnly(M7)면
+    age/sex/rna, rna_encoder만 있으면 RNAOnly/RNAOnlyExtend(M6/M6X), 그 외(clinical_encoder만)는
+    ClinicalOnly(M5) — forward 시그니처가 모델마다 다르므로 분기한다. 2026-07-29:
+    ClinicalRNAOnly의 combine_mode="film"/"cox_add"는 clinical_encoder 속성이 없어(그 대신
+    film_gamma/clinical_linear) hasattr(model, "clinical_encoder")만으로는 M7을 못 잡는 버그가
+    있었다 — isinstance로 명시적으로 잡는다.
     """
     p = patient_slides[0]
+    is_hdp = isinstance(model, HDP)
     is_m7 = isinstance(model, ClinicalRNAOnly)
     has_rna = hasattr(model, "rna_encoder")
+    if is_hdp:
+        hdp_clinical_kwargs = {}
+        if getattr(model, "use_margin", False):
+            hdp_clinical_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
+        if getattr(model, "use_staging", False):
+            hdp_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+        case_id = p["case_id"]
+        cluster_hist = cluster_hist_lookup[case_id].to(device, non_blocking=True)
+        return model(
+            p["age_years"].to(device, non_blocking=True),
+            p["sex_idx"].to(device, non_blocking=True),
+            p["rna"].to(device, non_blocking=True),
+            cluster_hist,
+            **hdp_clinical_kwargs,
+        )
     if is_m7:
         m7_clinical_kwargs = {}
         # 2026-08-05: use_margin은 이제 combine_mode 무관하게 model 자체에 있다(film/cox_add도
@@ -120,7 +185,8 @@ def _patient_risk(model, patient_slides, device) -> torch.Tensor:
     )
 
 
-def train_one_epoch(model, loader, optimizer, device, batch_size: int) -> float:
+def train_one_epoch(model, loader, optimizer, device, batch_size: int,
+                     cluster_hist_lookup: dict | None = None) -> float:
     model.train()
     total_loss, total_batches = 0.0, 0
     risks, times, events = [], [], []
@@ -141,7 +207,7 @@ def train_one_epoch(model, loader, optimizer, device, batch_size: int) -> float:
     for patient_slides in loader:
         if len(patient_slides) == 0:
             continue
-        risks.append(_patient_risk(model, patient_slides, device))
+        risks.append(_patient_risk(model, patient_slides, device, cluster_hist_lookup))
         times.append(patient_slides[0]["OS_time"])
         events.append(patient_slides[0]["OS_event"])
         if len(risks) >= batch_size:
@@ -151,13 +217,13 @@ def train_one_epoch(model, loader, optimizer, device, batch_size: int) -> float:
 
 
 @torch.no_grad()
-def evaluate(model, loader, device) -> dict:
+def evaluate(model, loader, device, cluster_hist_lookup: dict | None = None) -> dict:
     model.eval()
     all_risks, all_times, all_events, all_case_ids = [], [], [], []
     for patient_slides in loader:
         if len(patient_slides) == 0:
             continue
-        risk = _patient_risk(model, patient_slides, device)
+        risk = _patient_risk(model, patient_slides, device, cluster_hist_lookup)
         all_risks.append(risk.float().item())
         all_times.append(float(patient_slides[0]["OS_time"].item()))
         all_events.append(int(patient_slides[0]["OS_event"].item()))
@@ -292,6 +358,18 @@ def _parse_args() -> argparse.Namespace:
     model_group.add_argument("--M6", action="store_true", help="RNAOnly (RNA-seq만).")
     model_group.add_argument("--M6X", action="store_true", help="RNAOnlyExtend (RNA-seq, G->256->256 인코더).")
     model_group.add_argument("--M7", action="store_true", help="ClinicalRNAOnly (age/sex + RNA-seq).")
+    model_group.add_argument(
+        "--HDP", action="store_true",
+        help="Human Doctor Prognosis(models/hdp.py) — M7(age/sex+RNA-seq)에 WSI 유래 군집 "
+             "히스토그램(K차원, data/compute_cluster_histograms_uni2native.py 산출)을 cox_add로 "
+             "추가한다. 2026-09-01: attention/MIL로 patch 중요도를 152개 라벨만으로 처음부터 "
+             "발견시키는 접근이 이번 세션 내내 실패해(MCAT/PORPOISE/sharpening), '조직 유형에 "
+             "사람이 이름 붙이는' 대안도 시도했으나 TCGA/CPTAC 어디에도 PAAD용 PNI/TIL/종양비율 "
+             "라벨이 없어 불가능했다 — 그래서 이름 없이 UNI2-h(공식 스펙) frozen feature를 "
+             "라벨-프리 k-means로 군집화한 뒤, 환자별 군집 비율 자체를 clinical/RNA와 같은 방식의 "
+             "저차원 구조화 feature로 넣고 어느 군집이 hazard와 상관있는지는 생존 라벨이 직접 "
+             "결정하게 한다.",
+    )
     parser.add_argument(
         "--clinical-margin", action="store_true",
         help="--M5/--M7 공통(M5_R/M7_R, M7은 --combine-mode concat 전용). age/sex에 절제연 "
@@ -430,8 +508,8 @@ def main():
     if args.raw_linear and not args.M5:
         raise ValueError("--raw-linear는 --M5 전용입니다.")
 
-    with_clinical = args.M5 or args.M7
-    with_rna = args.M6 or args.M6X or args.M7
+    with_clinical = args.M5 or args.M7 or args.HDP
+    with_rna = args.M6 or args.M6X or args.M7 or args.HDP
 
     if with_clinical:
         if args.dataset == "both":
@@ -499,7 +577,7 @@ def main():
     else:
         rna_gene_ids, rna_input_dim = None, None
 
-    model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7"
+    model_prefix = "M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7 else "HDP"
     if args.rna_genes == "purist_top20_tcga_only":
         # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
         # 파일명이 겹치면 안 되므로 별도 접미사.
@@ -558,6 +636,14 @@ def main():
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
+    cluster_hist_lookup = None
+    if args.HDP:
+        hist_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+        if external_dataset:
+            hist_datasets = list(set(hist_datasets) | {external_dataset})
+        cluster_hist_lookup, hist_k = _load_cluster_histograms(hist_datasets)
+        print(f"--HDP: cluster histogram {len(cluster_hist_lookup.lookup)}명 로드 완료 (K={hist_k}, {hist_datasets})")
+
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
     if args.M5:
@@ -570,6 +656,11 @@ def main():
         model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
+    elif args.HDP:
+        model = HDP(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
+                    hist_dim=hist_k, use_margin=args.clinical_margin, margin_stats=margin_stats,
+                    use_age_sex=not args.no_age_sex,
+                    use_staging=args.clinical_staging, stage_stats=stage_stats).to(device)
     else:
         model = ClinicalRNAOnly(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                                  clinical_dim=args.clinical_dim, rna_dim=args.rna_dim,
@@ -639,7 +730,7 @@ def main():
         model.load_state_dict(ckpt["model_state_dict"])
         print(f"--eval-external-ckpt: {args.eval_external_ckpt} 로드 완료 "
               f"(epoch={ckpt.get('epoch')}, val_c_index={ckpt.get('val_c_index')})")
-        external_metrics = evaluate(model, external_loader, device)
+        external_metrics = evaluate(model, external_loader, device, cluster_hist_lookup)
         print(f"  external c_index={external_metrics['c_index']:.4f} | HR={external_metrics['hr']:.3f} "
               f"[{external_metrics['hr_ci_lower']:.3f}, {external_metrics['hr_ci_upper']:.3f}] | "
               f"log_rank_p={external_metrics['log_rank_p']:.4f}")
@@ -681,8 +772,8 @@ def main():
     epochs_since_improvement = 0
     for epoch in range(cfg.light.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
-        loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size)
-        train_metrics = evaluate(model, train_eval_loader, device)
+        loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size, cluster_hist_lookup)
+        train_metrics = evaluate(model, train_eval_loader, device, cluster_hist_lookup)
         scheduler.step()
 
         if val_ds is None:
@@ -695,7 +786,7 @@ def main():
                 }, step=epoch + 1)
             continue
 
-        metrics = evaluate(model, val_loader, device)
+        metrics = evaluate(model, val_loader, device, cluster_hist_lookup)
         val_td_auc = compute_time_dependent_auc(
             train_metrics["times"], train_metrics["events"], metrics["times"], metrics["events"], metrics["risks"],
             eval_days=auc_days,
@@ -733,8 +824,8 @@ def main():
     if not args.full_train:
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
-        train_metrics_final = evaluate(model, train_eval_loader, device)
-        test_metrics = evaluate(model, test_loader, device)
+        train_metrics_final = evaluate(model, train_eval_loader, device, cluster_hist_lookup)
+        test_metrics = evaluate(model, test_loader, device, cluster_hist_lookup)
         test_td_auc = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             test_metrics["times"], test_metrics["events"], test_metrics["risks"],
@@ -773,7 +864,7 @@ def main():
 
     external_metrics, external_td_auc = None, None
     if external_ds is not None:
-        external_metrics = evaluate(model, external_loader, device)
+        external_metrics = evaluate(model, external_loader, device, cluster_hist_lookup)
         external_td_auc = compute_time_dependent_auc(
             train_metrics_final["times"], train_metrics_final["events"],
             external_metrics["times"], external_metrics["events"], external_metrics["risks"],
