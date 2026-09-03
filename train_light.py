@@ -45,6 +45,7 @@ from data.dataset import (
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
     age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df, stage_stats_from_df, STAGE_FIELDS,
+    mutation_stats_from_csv, mutation_stats_from_df, MUTATION_FIELDS,
 )
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
@@ -216,6 +217,8 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
             hdp_clinical_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         if getattr(model, "use_staging", False):
             hdp_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+        if getattr(model, "use_mutation", False):
+            hdp_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         case_id = p["case_id"]
         cluster_hist = cluster_hist_lookup[case_id].to(device, non_blocking=True)
         return model(
@@ -235,6 +238,8 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
         # 2026-08-06: use_staging도 동일 관례(combine_mode 무관하게 model 자체에 있음).
         if getattr(model, "use_staging", False):
             m7_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+        if getattr(model, "use_mutation", False):
+            m7_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         return model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
@@ -250,6 +255,8 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
         margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
     if getattr(model, "use_staging", False):
         margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+    if getattr(model, "use_mutation", False):
+        margin_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
     return model(
         p["age_years"].to(device, non_blocking=True),
         p["sex_idx"].to(device, non_blocking=True),
@@ -479,6 +486,16 @@ def _parse_args() -> argparse.Namespace:
              "비교하려는 용도. 켜면 model_prefix에 _STG 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--clinical-mutation", action="store_true",
+        help="2026-09-02: PDAC 4대 driver gene(KRAS/TP53/SMAD4/CDKN2A) 체성 변이 유무를 추가한다"
+             "(data/extract_mutations.py, GDC MAF 기반). WSI 쪽(HDP/PMA 계열)이 branch를 늘려도 "
+             "구조적으로 RNA에 못 이기는 걸 반복 확인한 뒤(concat 아키텍처 실험까지), 새 branch "
+             "대신 margin/staging과 동일한 (z_score, known_flag) 관례로 clinical에 얹는다. "
+             "univariate로는 KRAS가 TCGA에서 c=0.60(이 세션 raw feature 중 최고)이었으나 CPTAC "
+             "에서 c=0.52로 재현 안 됨 — 코호트 간 KRAS 변이율 자체가 다름(58.8% vs 81.0%, "
+             "variant calling 파이프라인 차이 의심). 켜면 model_prefix에 _MUT 접미사가 붙는다.",
+    )
+    parser.add_argument(
         "--raw-linear", action="store_true",
         help="--M5 전용, 2026-08-21 — ClinicalEncoder(MLP) 없이 raw z-score feature를 바로 "
              "Linear(1)에 넣는 고전적 Cox 회귀로 M5를 만든다. M7의 clinical cox_add ablation에서 "
@@ -644,6 +661,19 @@ def main():
     else:
         stage_stats = None
 
+    if args.clinical_mutation:
+        import pandas as pd
+        if args.dataset == "both":
+            mutation_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"]),
+                pd.read_csv(CLINICAL_PATHS["cptac"]),
+            ])
+        else:
+            mutation_df = pd.read_csv(CLINICAL_PATHS[args.dataset])
+        mutation_stats = mutation_stats_from_df(mutation_df)
+    else:
+        mutation_stats = None
+
     rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
     rna_pathway_categories = None
     if with_rna and args.rna_genes == "pathway8":
@@ -723,6 +753,8 @@ def main():
         if args.no_age_sex:
             # M5_R_ONLY — margin 단독(age/sex 제외).
             model_prefix += "_ONLY"
+    if args.clinical_mutation:
+        model_prefix += "_MUT"
     if args.raw_linear:
         model_prefix += "_RAWLIN"
     if args.lr is not None and args.lr != 1e-3:
@@ -787,7 +819,8 @@ def main():
                                  combine_mode=args.combine_mode, risk_hidden_dim=args.risk_hidden_dim,
                                  risk_dropout=args.risk_dropout, use_margin=args.clinical_margin,
                                  margin_stats=margin_stats, use_age_sex=not args.no_age_sex,
-                                 use_staging=args.clinical_staging, stage_stats=stage_stats).to(device)
+                                 use_staging=args.clinical_staging, stage_stats=stage_stats,
+                                 use_mutation=args.clinical_mutation, mutation_stats=mutation_stats).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.light.seed)
 
@@ -820,6 +853,7 @@ def main():
         print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
 
     ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
+                      with_mutation=args.clinical_mutation,
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
                       rna_pathway_categories=rna_pathway_categories,
                       restrict_case_ids=restrict_case_ids)

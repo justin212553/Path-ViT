@@ -79,7 +79,10 @@ _PAIRED_COORDS_FILENAME_BY_BACKBONE = {
     "uni2official": COORDS_UNI2OFFICIAL_FILENAME,
     "uni2native":   COORDS_UNI2NATIVE_FILENAME,
 }
-from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value
+from models.clinical_encoder import (
+    SEX_TO_IDX, STAGE_FIELDS, encode_stage_value, encode_margin_value,
+    MUTATION_FIELDS, encode_mutation_value,
+)
 
 OS_LABEL_PATHS = {
     "tcga":  Path("data/os_labels_tcga.csv"),
@@ -684,6 +687,7 @@ class WSISurvivalDataset(Dataset):
         with_clinical: bool = False,
         with_staging: bool = False,
         with_margin: bool = False,
+        with_mutation: bool = False,
         with_rna: bool = False,
         feature_backbone: str = "resnet50",
         rna_gene_ids: list[str] | None = None,
@@ -712,12 +716,15 @@ class WSISurvivalDataset(Dataset):
             raise ValueError("with_staging=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
         if with_margin and not with_clinical:
             raise ValueError("with_margin=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
+        if with_mutation and not with_clinical:
+            raise ValueError("with_mutation=True는 with_clinical=True와 함께만 쓸 수 있습니다.")
 
         self.transform        = transform or PATCH_TRANSFORM
         self.precomputed      = cfg.precomputed
         self.with_clinical    = with_clinical
         self.with_staging     = with_staging
         self.with_margin      = with_margin
+        self.with_mutation    = with_mutation
         self.with_rna         = with_rna
         self.feature_backbone   = feature_backbone
         self.features_filename = FEATURES_FILENAME_BY_BACKBONE[feature_backbone]
@@ -754,6 +761,8 @@ class WSISurvivalDataset(Dataset):
                     clinical_cols += list(STAGE_FIELDS)
                 if with_margin:
                     clinical_cols += ["residual_disease"]
+                if with_mutation:
+                    clinical_cols += list(MUTATION_FIELDS)
                 clinical_df = pd.read_csv(CLINICAL_PATHS[name])[clinical_cols]
                 merged = merged.merge(clinical_df, on="case_id", how="inner")
 
@@ -935,6 +944,10 @@ class WSISurvivalDataset(Dataset):
             if self.with_margin:
                 ord_val = encode_margin_value(row["residual_disease"])
                 item["margin_ord"] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
+            if self.with_mutation:
+                for field in MUTATION_FIELDS:
+                    ord_val = encode_mutation_value(row[field])
+                    item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
 
         if self.with_rna:
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])

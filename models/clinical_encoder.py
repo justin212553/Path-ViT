@@ -51,6 +51,13 @@ _STAGE_BUFFER_NAMES = {"ajcc_t": "t", "ajcc_n": "n", "ajcc_m": "m", "tumor_grade
 # 반환) 처리.
 _MARGIN_ORDINAL_MAP = {"R0": 0, "R1": 1, "R2": 2}
 
+# 2026-09-02 추가 — PDAC 4대 driver gene(KRAS/TP53/SMAD4/CDKN2A) 체성 변이 유무
+# (data/extract_mutations.py 산출, GDC MAF 기반, 이미 0/1로 인코딩돼 clinical_{tcga,cptac}.csv에
+# 병합됨). STAGE_FIELDS와 동일한 (z_score, known_flag) 관례 — 새 branch를 만드는 대신 clinical에
+# 얹는다(사용자 결정, WSI 계열이 branch를 늘려도 RNA에 못 이기는 걸 이번 세션에서 반복 확인).
+MUTATION_FIELDS = ("KRAS_mut", "TP53_mut", "SMAD4_mut", "CDKN2A_mut")
+_MUTATION_BUFFER_NAMES = {"KRAS_mut": "kras", "TP53_mut": "tp53", "SMAD4_mut": "smad4", "CDKN2A_mut": "cdkn2a"}
+
 
 def encode_margin_value(raw) -> int | None:
     """residual_disease 원본 문자열(예: "R1")을 순서형 정수로 변환한다. encode_stage_value와
@@ -113,6 +120,28 @@ def stage_stats_from_csv(csv_path: str | Path) -> dict[str, tuple[float, float]]
     return stage_stats_from_df(pd.read_csv(csv_path))
 
 
+def encode_mutation_value(raw) -> int | None:
+    """data/extract_mutations.py가 이미 0/1로 인코딩해둔 변이 flag — NaN(그 환자의 MAF를
+    못 구한 경우, encode_stage_value와 동일한 "미상은 None" 관례)만 걸러낸다."""
+    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+        return None
+    return int(raw)
+
+
+def mutation_stats_from_df(df: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    """stage_stats_from_df와 동일한 역할의 MUTATION_FIELDS 전용 버전."""
+    stats = {}
+    for field in MUTATION_FIELDS:
+        vals = df[field].map(encode_mutation_value).dropna().astype(float)
+        stats[field] = (float(vals.mean()), float(vals.std(ddof=0)))
+    return stats
+
+
+def mutation_stats_from_csv(csv_path: str | Path) -> dict[str, tuple[float, float]]:
+    """clinical_{tcga,cptac}.csv 파일 하나에서 mutation_stats_from_df를 계산하는 편의 함수."""
+    return mutation_stats_from_df(pd.read_csv(csv_path))
+
+
 class ClinicalEncoder(nn.Module):
     """
     age/sex (2,) [+ 선택: T/N/M/grade (8,)] → 임베딩 (D,) 두 층 MLP.
@@ -134,6 +163,7 @@ class ClinicalEncoder(nn.Module):
         dropout: float = 0.0, sex_onehot: bool = False,
         use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
         use_age_sex: bool = True,
+        use_mutation: bool = False, mutation_stats: dict[str, tuple[float, float]] | None = None,
     ):
         super().__init__()
         self.register_buffer("age_mean", torch.tensor(age_mean, dtype=torch.float32))
@@ -171,7 +201,19 @@ class ClinicalEncoder(nn.Module):
             self.register_buffer("margin_std", torch.tensor(std, dtype=torch.float32))
             input_dim += 2  # (z_score, known_flag)
 
-        # 입력 (age_z, sex_bin[, T/N/M/grade z_score+known 8차원][, margin z_score+known 2차원])
+        self.use_mutation = use_mutation
+        if use_mutation:
+            if mutation_stats is None:
+                raise ValueError("use_mutation=True면 mutation_stats가 필요합니다 (mutation_stats_from_csv 참조).")
+            for field in MUTATION_FIELDS:
+                mean, std = mutation_stats[field]
+                short = _MUTATION_BUFFER_NAMES[field]
+                self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            input_dim += 2 * len(MUTATION_FIELDS)  # 필드당 (z_score, known_flag)
+
+        # 입력 (age_z, sex_bin[, T/N/M/grade z_score+known 8차원][, margin z_score+known 2차원]
+        #       [, KRAS/TP53/SMAD4/CDKN2A z_score+known 8차원])
         # → 임베딩 (D,): 두 층 MLP
         # 2026-07-29: dropout(기본 0.0=기존 동작 보존) — 레퍼런스(tabular_survival.py::
         # ClinicalEmbedding)는 clinical 브랜치 안에 Dropout(0.25)이 있는데 우리는 없었다는
@@ -188,6 +230,7 @@ class ClinicalEncoder(nn.Module):
         self, age_years: torch.Tensor, sex_idx: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
         margin_ord: torch.Tensor | None = None,
+        mutation_ord: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -197,6 +240,8 @@ class ClinicalEncoder(nn.Module):
                          만든 순서형 정수, "미상"은 -1(data/dataset.py가 이 규약으로 저장한다).
             margin_ord : use_margin=True일 때 필수. (N,) long — encode_margin_value()로 만든
                          순서형 정수(R0=0/R1=1/R2=2), "미상"은 -1(stage_ord와 동일 규약).
+            mutation_ord: use_mutation=True일 때 필수. {field: (N,) long} — encode_mutation_value()로
+                         만든 0/1, "미상"(MAF 못 구함)은 -1(stage_ord/margin_ord와 동일 규약).
         Returns:
             z_clinical: (N, D) — 임상 정보 임베딩
         """
@@ -223,5 +268,15 @@ class ClinicalEncoder(nn.Module):
             z = torch.where(ordv >= 0, (ordv - self.margin_mean) / self.margin_std, torch.zeros_like(ordv))
             feats.append(z)
             feats.append(known)
-        x = torch.stack(feats, dim=-1)  # (N, 2) / (N, 10) / (N, 4) / (N, 12)
+        if self.use_mutation:
+            for field in MUTATION_FIELDS:
+                short = _MUTATION_BUFFER_NAMES[field]
+                ordv  = mutation_ord[field].float()
+                known = (ordv >= 0).float()
+                mean  = getattr(self, f"{short}_mean")
+                std   = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats.append(z)
+                feats.append(known)
+        x = torch.stack(feats, dim=-1)  # (N, 2) / (N, 10) / (N, 4) / (N, 12) / (+8 with mutation)
         return self.mlp(x)

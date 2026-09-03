@@ -48,7 +48,7 @@ cox_add는 raw feature 직결 방식으로 원복(clinical 신호가 약해 MLP�
 import torch
 import torch.nn as nn
 
-from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
+from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, MUTATION_FIELDS, _MUTATION_BUFFER_NAMES
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
@@ -89,7 +89,8 @@ class ClinicalRNAOnly(nn.Module):
                  risk_hidden_dim: int | None = None, risk_dropout: float = 0.0,
                  use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
                  use_age_sex: bool = True,
-                 use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None):
+                 use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None,
+                 use_mutation: bool = False, mutation_stats: dict[str, tuple[float, float]] | None = None):
         super().__init__()
         if combine_mode not in ("concat", "film", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
@@ -97,10 +98,13 @@ class ClinicalRNAOnly(nn.Module):
             raise ValueError("use_margin=True면 margin_stats가 필요합니다.")
         if use_staging and stage_stats is None:
             raise ValueError("use_staging=True면 stage_stats가 필요합니다.")
+        if use_mutation and mutation_stats is None:
+            raise ValueError("use_mutation=True면 mutation_stats가 필요합니다.")
         self.combine_mode = combine_mode
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
         self.use_staging = use_staging
+        self.use_mutation = use_mutation
         # 2026-07-28: clinical_dim을 키워서(레퍼런스 비대칭 16 대신 RNA와 같은 폭) "정보를 더
         # 주면(표현력을 늘리면) 오히려 나빠지는지" 검증하기 위한 ablation(train_light.py
         # --clinical-dim/--rna-dim). 기본값(None)이면 기존 동작(모듈 상수 256/16) 그대로 보존.
@@ -120,7 +124,8 @@ class ClinicalRNAOnly(nn.Module):
             self.clinical_encoder = ClinicalEncoder(clinical_dim, age_mean, age_std, dropout=clinical_dropout,
                                                      sex_onehot=sex_onehot, use_margin=use_margin,
                                                      margin_stats=margin_stats, use_age_sex=use_age_sex,
-                                                     use_staging=use_staging, stage_stats=stage_stats)
+                                                     use_staging=use_staging, stage_stats=stage_stats,
+                                                     use_mutation=use_mutation, mutation_stats=mutation_stats)
             fused_dim = rna_dim + clinical_dim
             if risk_hidden_dim is None:
                 self.risk_head = nn.Sequential(
@@ -164,13 +169,22 @@ class ClinicalRNAOnly(nn.Module):
                         short = _STAGE_BUFFER_NAMES[field]
                         self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                         self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
-                raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+                if use_mutation:
+                    for field in MUTATION_FIELDS:
+                        mean, std = mutation_stats[field]
+                        short = _MUTATION_BUFFER_NAMES[field]
+                        self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                        self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+                raw_dim = ((2 if use_age_sex else 0) + (2 if use_margin else 0)
+                           + (2 * len(STAGE_FIELDS) if use_staging else 0)
+                           + (2 * len(MUTATION_FIELDS) if use_mutation else 0))
                 self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
                 nn.init.zeros_(self.clinical_linear.weight)
             else:  # film — cox_add ablation과 무관, ClinicalEncoder 경유 유지
                 self.clinical_encoder = ClinicalEncoder(
                     clinical_dim, age_mean, age_std, use_margin=use_margin, margin_stats=margin_stats,
                     use_staging=use_staging, stage_stats=stage_stats, use_age_sex=use_age_sex,
+                    use_mutation=use_mutation, mutation_stats=mutation_stats,
                 )
                 self.film_gamma = nn.Linear(clinical_dim, 1)
                 self.film_beta = nn.Linear(clinical_dim, 1)
@@ -181,7 +195,8 @@ class ClinicalRNAOnly(nn.Module):
 
     def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                          margin_ord: torch.Tensor | None = None,
-                         stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+                         stage_ord: dict[str, torch.Tensor] | None = None,
+                         mutation_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """film/cox_add 전용. cox_add는 raw z-score feature를 (1, raw_dim)으로 직접 반환하고
         (models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례), film은 ClinicalEncoder(MLP)
         임베딩 (1, D)을 반환한다."""
@@ -204,17 +219,29 @@ class ClinicalRNAOnly(nn.Module):
                     std = getattr(self, f"{short}_std")
                     z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
                     feats += [z, known]
+            if self.use_mutation:
+                for field in MUTATION_FIELDS:
+                    short = _MUTATION_BUFFER_NAMES[field]
+                    ordv = mutation_ord[field].float()
+                    known = (ordv >= 0).float()
+                    mean = getattr(self, f"{short}_mean")
+                    std = getattr(self, f"{short}_std")
+                    z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                    feats += [z, known]
             return torch.stack(feats, dim=-1).unsqueeze(0)  # (1, raw_dim)
         clinical_kwargs = {}
         if margin_ord is not None:
             clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
         if stage_ord is not None:
             clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+        if mutation_ord is not None:
+            clinical_kwargs["mutation_ord"] = {k: v.unsqueeze(0) for k, v in mutation_ord.items()}
         return self.clinical_encoder(age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs)  # (1, D)
 
     def forward(self, age_years: torch.Tensor, sex_idx: torch.Tensor, rna: torch.Tensor,
                 margin_ord: torch.Tensor | None = None,
                 stage_ord: dict[str, torch.Tensor] | None = None,
+                mutation_ord: dict[str, torch.Tensor] | None = None,
                 return_components: bool = False):
         """
         Args:
@@ -244,13 +271,16 @@ class ClinicalRNAOnly(nn.Module):
                 clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
             if stage_ord is not None:
                 clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
+            if mutation_ord is not None:
+                clinical_kwargs["mutation_ord"] = {k: v.unsqueeze(0) for k, v in mutation_ord.items()}
             z_c = self.clinical_encoder(
                 age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
             ).squeeze(0)  # (D,)
             fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
             return self.risk_head(fused.unsqueeze(0)).view(1)
 
-        clin_embed = self._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord)  # (1, D)
+        clin_embed = self._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord,
+                                           mutation_ord=mutation_ord)  # (1, D)
         if self.combine_mode == "film":
             gamma = self.film_gamma(clin_embed).view(1)  # (1,)
             beta = self.film_beta(clin_embed).view(1)    # (1,)
