@@ -54,16 +54,17 @@ from train_light import _load_cluster_histograms, ClusterHistLookup  # HDP_Pretr
 _ROOT = Path(__file__).resolve().parent
 # models/checkpoint/는 git-ignore 대상이라(2026-09-01 HPC에서 FileNotFoundError로 확인) data/
 # 밑에 별도로 복사해둔 걸 쓴다 — git pull만으로 HPC에도 따라오게.
-HEAD_PATH = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
+HEAD_PATH_DEFAULT = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
 GRID_STRIDE = 512  # data/fit_clusters_uni2native.py 확인 시 coords 간격(level-0 px)과 동일
 
 
-def _load_head(device) -> TumorContentHead:
-    ckpt = torch.load(HEAD_PATH, map_location=device, weights_only=False)
+def _load_head(device, head_path: Path) -> TumorContentHead:
+    ckpt = torch.load(head_path, map_location=device, weights_only=False)
     head = TumorContentHead(in_dim=ckpt["in_dim"], hidden_dim=ckpt["hidden_dim"]).to(device)
     head.load_state_dict(ckpt["state_dict"])
     head.eval()
     head.requires_grad_(False)
+    print(f"  head 로드: {head_path}")
     return head
 
 
@@ -252,6 +253,14 @@ def main():
                               "internal pooled/ensembled k-fold c-index의 신뢰성 문제(findings_"
                               "backlog.md 2026-09-02) 때문에 여러 시드 반복 후 external 평균으로 "
                               "판단하는 프로토콜 — --fold/--patience와 함께 쓰지 않는다.")
+    parser.add_argument("--head-path", type=str, default=str(HEAD_PATH_DEFAULT),
+                         help="2026-09-02: 해상도 보정판(data/hdp_pretrain_tumor_content_head_"
+                              "resmatch.pt, scripts/train_hdp_pretrain_head.py 참조) 등 다른 head로 "
+                              "돌릴 때 지정. --pretrain-source도 맞춰서 같이 바꿀 것.")
+    parser.add_argument("--pretrain-source", type=str, default="pretrain",
+                         choices=["pretrain", "pretrain_resmatch", "pretrain_resmatch_full"],
+                         help="train_light.py::HDP_FEATURE_SOURCES 키 — --head-path와 짝을 맞춰야 "
+                              "hist_linear 입력(5차원 요약통계)이 실제로 쓴 head와 일치한다.")
     args = parser.parse_args()
 
     load_env()
@@ -263,13 +272,13 @@ def main():
     cfg.data.seed = args.seed
     external_dataset = ("cptac" if args.dataset == "tcga" else "tcga") if args.external else None
 
-    print("[준비] pretrain head/pretrain 4차원 통계 로드")
-    head = _load_head(device)
+    print("[준비] pretrain head/pretrain 통계 로드")
+    head = _load_head(device, Path(args.head_path))
     feat_dim = head.net[1].in_features if hasattr(head.net[1], "in_features") else 1536
     precompute = PrecomputeCache(head)
     hist_datasets = [args.dataset] + ([external_dataset] if external_dataset else [])
-    cluster_hist_lookup, hist_dim = _load_cluster_histograms(hist_datasets, source="pretrain")
-    print(f"  pretrain feature 차원={hist_dim}, K=1(진짜 종양 함량 스칼라)")
+    cluster_hist_lookup, hist_dim = _load_cluster_histograms(hist_datasets, source=args.pretrain_source)
+    print(f"  pretrain feature 차원={hist_dim}, K=1(진짜 종양 함량 스칼라), source={args.pretrain_source}")
 
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATHS[args.dataset])
     margin_stats = margin_stats_from_csv(CLINICAL_PATHS[args.dataset])
@@ -286,6 +295,14 @@ def main():
     model_prefix = "HDP_PRETRAIN_CLUSTER"
     model_prefix += "_PW8" if args.rna_genes == "pathway8" else "_INT1500"
     model_prefix += f"_STG_R_GROWTH{args.growth_dim}"
+    if args.pretrain_source == "pretrain_resmatch":
+        # 2026-09-02: 해상도 보정 head(val_corr 0.60->0.78) 결과와 기존 head 결과가 파일명에서
+        # 절대 안 섞이게 — 기존 검증된(paired bootstrap p=0.132) 결과를 안 덮어씀.
+        model_prefix += "_RESMATCH"
+    elif args.pretrain_source == "pretrain_resmatch_full":
+        # 해상도 보정 head + tile 트리 전체(DX+TS+BS) 커버리지 조합 — 위 _RESMATCH(h5, DX만)와도
+        # 구분되는 별도 태그.
+        model_prefix += "_RESMATCHFULL"
     if args.lr != 3e-5:
         # train_light.py의 _LR{lr:.0e} 관례와 동일 — lr sweep(같은 seed/fold)에서 checkpoint/
         # kfold_preds 파일명이 서로 덮어써지지 않게 한다(2026-09-01, sweep 설계 중 발견).

@@ -75,6 +75,27 @@ HDP_FEATURE_SOURCES = {
         # 군집 10개가 아니라 1개(종양)라 4차원으로 끝난다(K=1인 셈).
         "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor", "content_entropy"),
     },
+    "pretrain_resmatch": {
+        "paths": {
+            "tcga": Path("data/tumor_content_uni2native_resmatch_tcga.csv"),
+            "cptac": Path("data/tumor_content_uni2native_resmatch_cptac.csv"),
+        },
+        # 2026-09-02: scripts/apply_hdp_pretrain_head.py --head-path ..._resmatch.pt --out-tag
+        # _resmatch 산출 — PanNuke 학습 이미지를 uni2native와 같은 배율로 보이게 보정한 head
+        # (val_corr 0.60->0.78, findings_backlog.md) 적용판. "pretrain"과 컬럼 구성은 동일.
+        # h5(DX 슬라이드만) 기준이라 TCGA 2명/CPTAC 15명은 여전히 fallback.
+        "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor", "content_entropy"),
+    },
+    "pretrain_resmatch_full": {
+        "paths": {
+            "tcga": Path("data/tumor_content_uni2native_resmatch_full_tcga.csv"),
+            "cptac": Path("data/tumor_content_uni2native_resmatch_full_cptac.csv"),
+        },
+        # 2026-09-02: apply_hdp_pretrain_head.py --source tiletree(HPC uni2native tile 트리 전체,
+        # DX+TS+BS 전 타입) + resmatch head 조합 — TCGA는 152/152 완전 커버(fallback 없음),
+        # CPTAC은 tile 자체가 없는 15명만 여전히 fallback(h5/tiletree 문제 아님, 더 근본적 공백).
+        "prefixes": ("mean_tumor_content", "tumor_heterogeneity", "tumor_dispersion", "frac_high_tumor", "content_entropy"),
+    },
 }
 
 

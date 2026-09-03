@@ -51,15 +51,24 @@ if str(_ROOT) not in sys.path:
 from models.tumor_content_head import TumorContentHead
 
 FEATURES_ROOT = _ROOT / "data" / "uni2h_official_features"
+# 2026-09-02: FEATURES_ROOT(h5)는 MahmoodLab 공식 배포가 DX(진단용) 슬라이드만 담고 있어
+# TCGA는 슬라이드 커버리지가 203/466(44%)뿐이었다 — TS/BS 슬라이드가 통째로 빠짐(환자 2명은
+# DX 자체가 없어 이전엔 그 환자 전체가 fallback 처리됐음). HPC에서 tile 트리 전체(featur es_
+# uni2native.pt/coords_uni2native.pt, 모든 슬라이드 타입)를 로컬로 옮겨온 뒤(scripts/
+# zip_uni2native_for_local.sh) --source tiletree로 전체 슬라이드를 쓸 수 있게 함.
+TILES_ROOT = {"tcga": _ROOT / "data" / "patches_tcga" / "tiles", "cptac": _ROOT / "data" / "patches_cptac" / "tiles"}
 # models/checkpoint/는 git-ignore 대상이라 data/ 밑에 별도로 둔다(2026-09-01, HPC에서
 # train_hdp_pretrain_cluster.py가 이 파일을 못 찾는 문제로 확인 — git pull만으로 따라오게).
-HEAD_PATH = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
-OUT_PATHS = {
-    "tcga": _ROOT / "data" / "tumor_content_uni2native_tcga.csv",
-    "cptac": _ROOT / "data" / "tumor_content_uni2native_cptac.csv",
-}
+HEAD_PATH_DEFAULT = _ROOT / "data" / "hdp_pretrain_tumor_content_head.pt"
 CASE_ID_TOKENS = {"tcga": 3, "cptac": 2}
 N_BINS = 10  # content_entropy용 종양 함량(0~1) 구간 수 — 원래 군집 K=10과 맞춤(비교 편의)
+
+
+def _out_paths(tag: str) -> dict:
+    return {
+        "tcga": _ROOT / "data" / f"tumor_content_uni2native{tag}_tcga.csv",
+        "cptac": _ROOT / "data" / f"tumor_content_uni2native{tag}_cptac.csv",
+    }
 
 
 def _case_id_from_stem(stem: str, dataset: str) -> str:
@@ -68,15 +77,38 @@ def _case_id_from_stem(stem: str, dataset: str) -> str:
     return "-".join(parts[:n])
 
 
-def _load_head(device) -> TumorContentHead:
-    ckpt = torch.load(HEAD_PATH, map_location=device, weights_only=False)
+def _load_head(device, head_path: Path) -> TumorContentHead:
+    ckpt = torch.load(head_path, map_location=device, weights_only=False)
     head = TumorContentHead(in_dim=ckpt["in_dim"], hidden_dim=ckpt["hidden_dim"]).to(device)
     head.load_state_dict(ckpt["state_dict"])
     head.eval()
     head.requires_grad_(False)
-    print(f"head 로드: {HEAD_PATH} (best_val_loss={ckpt['best_val_loss']:.4f}, "
+    print(f"head 로드: {head_path} (best_val_loss={ckpt['best_val_loss']:.4f}, "
           f"n_train={ckpt['n_train']}, n_val={ckpt['n_val']})")
     return head
+
+
+def _iter_slides(ds: str, source: str):
+    """(case_id, feat(N,1536) np.ndarray, coords(N,2) np.ndarray)를 슬라이드 단위로 yield.
+    source="h5": 기존 MahmoodLab 공식 배포(DX만). source="tiletree": 로컬/HPC에 있는 uni2native
+    tile 트리 전체(모든 슬라이드 타입) — scripts/zip_uni2native_for_local.sh로 받은 것."""
+    if source == "h5":
+        import h5py
+        h5_paths = sorted((FEATURES_ROOT / ds).glob("*.h5"))
+        print(f"\n=== {ds}: {len(h5_paths)}개 슬라이드(h5, DX만) ===")
+        for h5_path in h5_paths:
+            case_id = _case_id_from_stem(h5_path.stem, ds)
+            with h5py.File(h5_path, "r") as f:
+                yield case_id, f["features"][0], f["coords"][0]
+    else:
+        slide_dirs = sorted(d for d in TILES_ROOT[ds].iterdir()
+                             if d.is_dir() and (d / "features_uni2native.pt").exists())
+        print(f"\n=== {ds}: {len(slide_dirs)}개 슬라이드(tile 트리, 전체 타입) ===")
+        for slide_dir in slide_dirs:
+            case_id = _case_id_from_stem(slide_dir.name, ds)
+            feat = torch.load(slide_dir / "features_uni2native.pt", weights_only=True).numpy()
+            coords = torch.load(slide_dir / "coords_uni2native.pt", weights_only=True).numpy()
+            yield case_id, feat, coords
 
 
 def _slide_dispersion(coords: np.ndarray, weights: np.ndarray) -> float:
@@ -99,16 +131,23 @@ def main():
     parser.add_argument("--datasets", type=str, default="tcga,cptac")
     parser.add_argument("--high-threshold", type=float, default=0.1)
     parser.add_argument("--batch-size", type=int, default=8192)
+    parser.add_argument("--head-path", type=str, default=str(HEAD_PATH_DEFAULT),
+                         help="2026-09-02: 다른 head(예: 해상도 보정판 hdp_pretrain_tumor_content_"
+                              "head_resmatch.pt)로 재생성할 때 지정. --out-tag와 함께 써야 기존 "
+                              "산출물을 안 덮어씀.")
+    parser.add_argument("--out-tag", type=str, default="",
+                         help="출력 파일명에 붙일 접미사(예: '_resmatch' -> "
+                              "tumor_content_uni2native_resmatch_tcga.csv). 기본 ''=기존 파일명 그대로.")
+    parser.add_argument("--source", type=str, default="h5", choices=["h5", "tiletree"],
+                         help="h5(기본, 기존 동작, DX만) | tiletree(2026-09-02 신규 — 전체 슬라이드 "
+                              "타입, zip_uni2native_for_local.sh로 로컬에 받아온 경우에만 가능).")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    head = _load_head(device)
+    head = _load_head(device, Path(args.head_path))
+    out_paths = _out_paths(args.out_tag)
 
     for ds in args.datasets.split(","):
-        ds_dir = FEATURES_ROOT / ds
-        h5_paths = sorted(ds_dir.glob("*.h5"))
-        print(f"\n=== {ds}: {len(h5_paths)}개 슬라이드 ===")
-
         patch_sum: dict[str, float] = {}
         patch_sqsum: dict[str, float] = {}
         patch_count: dict[str, int] = {}
@@ -117,11 +156,7 @@ def main():
         disp_weight_total: dict[str, float] = {}
         bin_counts: dict[str, np.ndarray] = {}
 
-        for h5_path in h5_paths:
-            case_id = _case_id_from_stem(h5_path.stem, ds)
-            with h5py.File(h5_path, "r") as f:
-                feat = f["features"][0]  # (N, 1536)
-                coords = f["coords"][0]  # (N, 2)
+        for case_id, feat, coords in _iter_slides(ds, args.source):
             n = feat.shape[0]
             scores = np.empty(n, dtype=np.float64)
             for i in range(0, n, args.batch_size):
@@ -173,7 +208,7 @@ def main():
             })
 
         df = pd.DataFrame(rows)
-        out_path = OUT_PATHS[ds]
+        out_path = out_paths[ds]
         df.to_csv(out_path, index=False)
         print(f"  {len(df)}명 환자 -> {out_path}")
         print(f"  mean_tumor_content 분포: mean={df['mean_tumor_content'].mean():.4f} "
