@@ -46,7 +46,7 @@ if str(_ROOT) not in sys.path:
 from config import Config
 from models.vit_pma import ViT_PMA
 from models.rna_predictor import RNAPredictionHead
-from models.clinical_encoder import age_stats_from_csv
+from models.clinical_encoder import age_stats_from_csv, stage_stats_from_csv
 from train import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
     _branch_param_groups,
@@ -73,6 +73,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-genes", type=int, default=1500)
+    parser.add_argument("--gene-selection", type=str, default="variance", choices=["variance", "cox"],
+                         help="2026-09-02: 'variance'(기본, data/brca_rna_gene_selection/) 또는 "
+                              "'cox'(생존 라벨 기반 univariate Cox score test, "
+                              "data/brca_rna_gene_selection_cox/, "
+                              "scripts/select_brca_rna_genes_cox.py) 중 선택 — train_brca_m7.py와 "
+                              "동일 관례, M4/M7 비교 시 반드시 동일 값을 써야 함.")
+    parser.add_argument("--clinical-staging", action="store_true",
+                         help="2026-09-02: ClinicalEncoder(ViT_PMA 내장) 입력에 AJCC 병기를 "
+                              "추가한다(train.py --clinical-staging과 동일 관례). "
+                              "train_brca_m7.py --clinical-staging과 동일 관례 — M4/M7 비교 시 "
+                              "반드시 동일 값을 써야 함.")
     parser.add_argument("--patch-keep-frac", type=float, default=0.8)
     parser.add_argument("--rna-aux-weight", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=None, help="cfg.train.epochs(기본 30) 덮어쓰기.")
@@ -144,14 +155,17 @@ def main():
     amp_ctx = _make_amp_ctx(device)
     start_time = datetime.now()
 
-    gene_path = OUT_DIR / f"selected_genes_top_{args.n_genes}.csv"
+    gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
+    gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
     if not gene_path.exists():
+        select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
         raise FileNotFoundError(
-            f"{gene_path} 없음 — 먼저 실행: python -m scripts.select_brca_rna_genes "
+            f"{gene_path} 없음 — 먼저 실행: python -m scripts.{select_module} "
             f"--seed {args.seed} --n-genes {args.n_genes}"
         )
     gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
     rna_input_dim = len(gene_ids)
+    stage_stats = stage_stats_from_csv(CLINICAL_PATH) if args.clinical_staging else None
 
     if args.fold is not None:
         cases = load_case_table_kfold(args.seed, args.fold, args.n_folds, external_tss=external_tss)
@@ -163,14 +177,15 @@ def main():
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
-    print(f"RNA 유전자 수: {rna_input_dim} (top{args.n_genes}, 고분산 기준, seed={args.seed})")
+    print(f"RNA 유전자 수: {rna_input_dim} (top{args.n_genes}, {args.gene_selection} 기준, seed={args.seed})")
     print(f"age_mean={age_mean:.2f} age_std={age_std:.2f} (전체 코호트 기준, train.py 관례와 동일)")
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
-    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest)
-    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest)
-    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest)
-    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest) if external_tss else None
+    stg = args.clinical_staging
+    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest, with_staging=stg)
+    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest, with_staging=stg)
+    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest, with_staging=stg)
+    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest, with_staging=stg) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
@@ -180,11 +195,16 @@ def main():
     model = ViT_PMA(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         precomputed=True, backbone="uni", use_wsi_extra_mlp=args.wsi_extra_mlp,
+        use_staging=args.clinical_staging, stage_stats=stage_stats,
     ).to(device)
     if args.rna_aux_weight > 0:
         model.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, rna_input_dim).to(device)
 
     model_prefix = f"BRCA_PMA_TOP{args.n_genes}"
+    if args.gene_selection == "cox":
+        model_prefix += "_COXGENE"
+    if args.clinical_staging:
+        model_prefix += "_STG"
     if args.patch_keep_frac < 1.0:
         model_prefix += "_SS"
     if args.rna_aux_weight > 0:

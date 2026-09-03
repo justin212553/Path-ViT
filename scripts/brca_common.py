@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from models.clinical_encoder import SEX_TO_IDX
+from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value
 
 CLINICAL_PATH = Path("data/brca_clinical.csv")
 MANIFEST_PATH = Path("data/brca_slide_manifest.csv")
@@ -198,9 +198,10 @@ class BRCACaseDataset(Dataset):
     age_years/sex_idx/rna/OS_time/OS_event)을 그대로 맞춘다.
     """
 
-    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame):
+    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, with_staging: bool = False):
         self.rows = case_table.reset_index(drop=True)
         self.rna_df = rna_df
+        self.with_staging = with_staging
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -216,6 +217,10 @@ class BRCACaseDataset(Dataset):
             "sex_idx": torch.tensor(SEX_TO_IDX[row["sex"]], dtype=torch.long),
             "rna": torch.from_numpy(self.rna_df.loc[row["case_id"]].to_numpy(dtype="float32")),
         }
+        if self.with_staging:
+            for field in STAGE_FIELDS:
+                ord_val = encode_stage_value(field, row[field])
+                item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
         return [item]
 
 
@@ -235,10 +240,12 @@ class BRCASlideDataset(Dataset):
     격자가 살짝 불균일해도 상대적 순서는 보존된다.
     """
 
-    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, manifest: pd.DataFrame):
+    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, manifest: pd.DataFrame,
+                 with_staging: bool = False):
         self.rows = case_table.reset_index(drop=True)
         self.rna_df = rna_df
         self.slides_by_case = manifest.groupby("case_id")
+        self.with_staging = with_staging
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -262,6 +269,10 @@ class BRCASlideDataset(Dataset):
             "sex_idx":   torch.tensor(SEX_TO_IDX[row["sex"]], dtype=torch.long),
             "rna":       torch.from_numpy(self.rna_df.loc[case_id].to_numpy(dtype="float32")),
         }
+        if self.with_staging:
+            for field in STAGE_FIELDS:
+                ord_val = encode_stage_value(field, row[field])
+                common[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
 
         slides = []
         for _, srow in slide_rows.iterrows():
