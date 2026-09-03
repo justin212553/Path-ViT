@@ -1,5 +1,74 @@
 # PATH-ViT 발견 사항 및 우선순위 백로그
 
+## 🔴 최상위 발견(2026-09-03) — BRCA에서 통한 Cox+FDR RNA panel이 PAAD에서는 leak을 못 고침 + PDAC 유전자 신호 자체가 코호트 간 재현이 거의 안 됨
+
+**배경**: BRCA M7에서 생존 라벨 기반 univariate Cox score test + BH-FDR(q<0.1) 필터링이 기존
+고분산(variance) RNA panel보다 5시드 평균 internal c-index를 크게 높였다(0.657 → 0.748,
+external은 손해 없음, `data/brca_rna_gene_selection_cox/`). "같은 방식을 PAAD의 gene-selection
+leak(위 2026-09-02 항목)에도 적용해보면 어떨까"에서 출발한 재검증.
+
+### 1) PAAD에 이미 만들어져 있었지만 한 번도 안 돌려본 leak-free Cox+FDR panel을 실제로 테스트함
+
+`data/select_rnaseq_genes.py --single-cohort tcga --fdr-threshold 0.1`
+(`data/dataset.py::literature_guided_gene_ids_fdr_threshold`, `--rna-genes
+literature_fdr0.1_tcga_only`)이 8월 4일에 이미 생성돼 있었으나 findings_backlog/memory 어디에도
+결과가 기록된 적이 없었음 — 기존 leak 정량화와 정확히 동일한 레시피(`--clinical-staging
+--clinical-margin --combine-mode cox_add`, 2seed(84/126)×5fold)로 처음 테스트:
+
+| RNA panel | internal (ensemble) | external (ensemble, cptac 전체) | gap |
+|---|---|---|---|
+| `pathway8`(문헌 큐레이션, OS 라벨 완전 미사용) | 0.5566 | **0.6039** | -0.047 |
+| `literature_1500_intersection`(기존에 leaky로 확인됨) | 0.6552 | 0.6221 | +0.033 |
+| `literature_fdr0.1_tcga_only`(신규, single-cohort라 CPTAC 라벨은 안 봄) | **0.6861** | 0.5948 | **+0.091** |
+
+**결론: 이 leak-free FDR panel은 internal은 셋 중 제일 높지만 external은 셋 중 제일 낮다 —
+pathway8보다도 못하다.** 이유: `--single-cohort`가 없애는 건 "반대 코호트(CPTAC) 라벨을
+직접 쓰는" leak뿐이다. 2026-09-02 항목에서 확인된 진짜 문제 — Cox 랭킹의 "train"이 실제
+5-fold CV와 무관한 **고정 단일 6:2:2 split**이라 internal test fold 환자의 ~60%가 이미
+그 랭킹의 train pool에 있었던 것 — 은 그대로 남아있다. 오히려 FDR로 소수 정예 유전자만
+남기니 그 소수가 원래 랭킹에 쓰인 특정 환자 집단에 더 날카롭게 맞춰져(overfit) internal
+인플레이션이 `literature_1500_intersection`보다도 커졌다(+0.091 > +0.033). BRCA에서 통했던
+이유는 애초에 그쪽은 이런 종류의 k-fold 경계 leak을 보는 비교가 아니라 "노이즈 유전자
+필터링 자체의 효과"만 봤기 때문 — 두 실험은 겉보기엔 같은 기법이지만 답하는 질문이 다르다.
+
+### 2) TCGA-only/CPTAC-only Cox+FDR panel의 "77% 겹침"은 착시였다 — 진짜 데이터 기반 선택은 거의 안 겹침
+
+같은 질병(PDAC)이니 두 독립 코호트의 Cox 랭킹이 어느 정도는 겹쳐야 하지 않겠냐는 질문에서
+확인. `data/rna_gene_selection_{tcga,cptac}only/selected_genes_fdr0.1.csv`를 비교하면 TCGA
+266개 vs CPTAC 213개 중 164개(77%)가 겹치는 것처럼 보이지만, 이건 `build_fdr_threshold_ranking`이
+**문헌 큐레이션 163개를 코호트와 무관하게 항상 강제 포함**시키기 때문(개별 유의성 무관).
+그 163개를 빼고 "각 코호트가 순수 통계로 추가 발견한" 유전자만 비교하면:
+
+- TCGA: 103개 추가 발견, CPTAC: 50개 추가 발견
+- **겹치는 것: 단 1개(DEFB116)** — 사실상 재현 없음
+
+### 3) 문헌 163개 유전자 중 pure Cox+FDR(강제 포함 없이)로도 통계적으로 유의한 건 극소수
+
+문헌 큐레이션 유전자 163개 각각의 진짜 genome-wide BH-FDR q-value(전체 ~2만 유전자 기준
+재계산, `literature_curated_genes.csv` + `gene_cox_ranking.csv`)를 확인:
+
+- TCGA: 163개 중 **2개**(1.2%)만 q<0.1 통과 — LDHA, MET
+- CPTAC: 163개 중 **1개**(0.6%)만 q<0.1 통과 — MSH6
+- 그 통과한 유전자끼리도 안 겹침(LDHA/MET ≠ MSH6)
+
+**해석**: PAAD 규모(TCGA N≈152, CPTAC N≈144)에서 univariate Cox score test는 검정력이 너무
+낮아, 문헌적으로 확립된 PDAC 생존 관련 유전자조차 개별적으로는 거의 유의하게 안 나온다.
+이는 (a) 생존 신호가 단일 유전자보다 pathway/조합 수준에서 작동하거나, (b) 표본 크기가
+genome-wide 다중검정 보정을 감당하기엔 근본적으로 부족하다는 뜻 — 둘 다 "univariate Cox
+랭킹으로 유전자를 늘리는" 접근 자체의 한계를 시사한다.
+
+### 결론 및 권고
+
+- **PAAD는 `pathway8`을 계속 기본으로 유지한다.** Cox+FDR(어떤 변형이든)은 이 프로젝트 규모의
+  PAAD 데이터에서 pathway8보다 나은 leak-free 대안이 되지 못한다.
+- fold-경계 leak을 진짜로 없애려면 fold별로 gene selection을 다시 하는(nested, fold-aware)
+  파이프라인이 필요하다 — 2026-09-02 항목에서 이미 "미정"으로 남아있던 결정이 이번 재검증으로
+  더 명확히 필요해짐.
+- BRCA와 PAAD는 "Cox+FDR이 도움되는지"에 대해 반대 결론이 났다 — 두 실험의 비교 대상이 근본적으로
+  다르다는 점(BRCA: 노이즈 필터링 자체의 효과 / PAAD: k-fold 경계 leak 유무)을 혼동하지 말 것.
+
+---
+
 ## 🔴 최상위 발견(2026-09-02) — RNA gene selection에 실제 leakage 확인(internal +0.10 부풀림), clinical branch starvation은 leak과 무관, pooled c-index 계산방식 자체도 재검토 필요
 
 **상태: 2seed×5fold 전체 검증으로 확인됨. 다음 결정 대기 중(어떤 gene panel/계산방식을 논문 기준으로 쓸지) — 사용자 판단 보류.**
