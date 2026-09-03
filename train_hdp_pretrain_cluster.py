@@ -253,6 +253,12 @@ def main():
                               "internal pooled/ensembled k-fold c-index의 신뢰성 문제(findings_"
                               "backlog.md 2026-09-02) 때문에 여러 시드 반복 후 external 평균으로 "
                               "판단하는 프로토콜 — --fold/--patience와 함께 쓰지 않는다.")
+    parser.add_argument("--combine-mode", type=str, default="cox_add", choices=["cox_add", "concat"],
+                         help="2026-09-02: cox_add(기본, 기존 동작) — clinical/hist/growth/maturity "
+                              "각각 zero-init Linear(D,1)로 바로 스칼라화한 뒤 합산. concat — 전부 "
+                              "nonlinear encoder를 거친 임베딩으로 유지한 채 concat 후 hidden layer "
+                              "있는 공유 risk_head 하나로 합침(M7 --combine-mode concat과 같은 원칙, "
+                              "models/hdp.py/hdp_cluster.py 참조).")
     parser.add_argument("--head-path", type=str, default=str(HEAD_PATH_DEFAULT),
                          help="2026-09-02: 해상도 보정판(data/hdp_pretrain_tumor_content_head_"
                               "resmatch.pt, scripts/train_hdp_pretrain_head.py 참조) 등 다른 head로 "
@@ -311,14 +317,23 @@ def main():
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     if args.rna_lr_mult != 1.0:
         model_prefix += f"_RLR{args.rna_lr_mult:g}"
+    if args.combine_mode == "concat":
+        # 2026-09-02: clinical/hist/growth/maturity에게도 RNA처럼 nonlinear encoder를 주고,
+        # 스칼라로 조기 압축하지 않은 채 concat 후 hidden layer 있는 공유 risk_head로 합친다
+        # (models/hdp.py::HDP/models/hdp_cluster.py::HDPCluster combine_mode="concat" 참조) —
+        # diagnose_hdp_checkpoint_weights.py로 확인한 "RNA가 99.7% 독식, WSI 전부 ~0%"가 RNA
+        # 정보량이 아니라 경로의 표현력 비대칭(RNA만 진짜 encoder+scalar collapse, 나머지는
+        # bare zero-init linear) 때문이라는 가설 검증용.
+        model_prefix += "_CONCAT"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
     model = HDPCluster(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         hist_dim=hist_dim, k=1, feat_dim=feat_dim, growth_dim=args.growth_dim,
+        maturity_embed_dim=args.growth_dim,
         use_margin=True, margin_stats=margin_stats, use_age_sex=True,
-        use_staging=True, stage_stats=stage_stats,
+        use_staging=True, stage_stats=stage_stats, combine_mode=args.combine_mode,
     ).to(device)
     print(f"Model: {model_prefix} | params={sum(p.numel() for p in model.parameters()):,}")
 

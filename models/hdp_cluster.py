@@ -40,38 +40,60 @@ class GrowthPatternCNN(nn.Module):
 
 
 class MaturityMLP(nn.Module):
-    def __init__(self, feat_dim: int, k: int, hidden_dim: int = 64):
+    def __init__(self, feat_dim: int, k: int, hidden_dim: int = 64, out_dim: int = 1):
+        """out_dim=1(기본, cox_add 관례) — 학습 후에도 스칼라 하나로 patch를 뭉갬.
+        2026-09-02: out_dim>1(concat 모드)이면 patch마다 벡터를 내고 그 벡터들을 mean-pool해
+        환자 단위 (out_dim,) "성숙도 임베딩"을 만든다 — RNA/growth처럼 조기 스칼라 압축 없이
+        마지막 공유 risk_head까지 표현력을 유지한다."""
         super().__init__()
+        self.out_dim = out_dim
         self.net = nn.Sequential(
             nn.LayerNorm(feat_dim + k),
             nn.Linear(feat_dim + k, hidden_dim), nn.GELU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Linear(hidden_dim, out_dim),
         )
 
     def forward(self, features: torch.Tensor, soft_weights: torch.Tensor) -> torch.Tensor:
-        """features: (N, feat_dim), soft_weights: (N, K). Returns: () 스칼라(mean pooling)."""
+        """features: (N, feat_dim), soft_weights: (N, K). Returns: (out_dim,)(mean pooling)."""
         x = torch.cat([features, soft_weights], dim=-1)  # (N, feat_dim+K)
-        per_patch = self.net(x).squeeze(-1)  # (N,)
-        return per_patch.mean()
+        per_patch = self.net(x)  # (N, out_dim)
+        return per_patch.mean(dim=0)  # (out_dim,)
 
 
 class HDPCluster(HDP):
-    def __init__(self, *args, k: int, feat_dim: int = 1536, growth_dim: int = 8, **kwargs):
+    def __init__(self, *args, k: int, feat_dim: int = 1536, growth_dim: int = 8,
+                 maturity_embed_dim: int = 8, **kwargs):
         super().__init__(*args, **kwargs)
         self.k = k
         self.growth_cnn = GrowthPatternCNN(k, out_dim=growth_dim)
-        self.maturity_mlp = MaturityMLP(feat_dim, k)
-        self.growth_linear = nn.Linear(growth_dim, 1, bias=False)
-        self.maturity_linear = nn.Linear(1, 1, bias=False)
-        nn.init.zeros_(self.growth_linear.weight)
-        nn.init.zeros_(self.maturity_linear.weight)
+
+        if self.combine_mode == "cox_add":
+            self.maturity_mlp = MaturityMLP(feat_dim, k, out_dim=1)
+            self.growth_linear = nn.Linear(growth_dim, 1, bias=False)
+            self.maturity_linear = nn.Linear(1, 1, bias=False)
+            nn.init.zeros_(self.growth_linear.weight)
+            nn.init.zeros_(self.maturity_linear.weight)
+        else:
+            # 2026-09-02: concat 모드 — growth_cnn은 이미 (growth_dim,) 임베딩을 내므로 그대로
+            # 쓰고, maturity_mlp도 스칼라 대신 (maturity_embed_dim,) 임베딩을 내게 바꾼다.
+            # HDP.__init__(combine_mode="concat")가 만들어둔 self.risk_head_concat(rna+clinical+
+            # hist용, base_fused_dim 기준)은 growth/maturity를 못 담으니 여기서 더 큰 걸로
+            # 새로 만들어 덮어쓴다 — HDP가 standalone으로 쓰일 때(HDPCluster 없이)와 파라미터가
+            # 안 섞이게, __init__ 순서상 이 시점 이후로는 self.risk_head_concat이 이 새 버전만
+            # 유효하다(부모가 만든 작은 버전은 옵티마이저 생성 전에 교체되므로 학습에 안 걸림).
+            self.maturity_mlp = MaturityMLP(feat_dim, k, out_dim=maturity_embed_dim)
+            fused_dim = self.base_fused_dim + growth_dim + maturity_embed_dim
+            self.risk_head_concat = nn.Sequential(
+                nn.LayerNorm(fused_dim), nn.Linear(fused_dim, self.risk_hidden_dim), nn.GELU(),
+                nn.Linear(self.risk_hidden_dim, 1),
+            )
 
     def forward_wsi_extra(self, growth_vec: torch.Tensor, maturity_scalar: torch.Tensor) -> torch.Tensor:
-        """HDP.forward()의 cox_add 합에 추가할 침윤전선+성숙도 risk 항.
+        """cox_add 전용 — HDP.forward()의 합에 추가할 침윤전선+성숙도 risk 항.
         Args:
             growth_vec:      (growth_dim,) — train_hdp_cluster.py가 슬라이드별 GrowthPatternCNN
                               출력을 환자 단위로 평균해 넘긴다(멀티 슬라이드 대응, mean pooling).
-            maturity_scalar: () — 환자의 전체 patch(슬라이드 무관 풀링)에 대한 MaturityMLP 출력.
+            maturity_scalar: (1,) — 환자의 전체 patch(슬라이드 무관 풀링)에 대한 MaturityMLP 출력.
         Returns: risk (1,)
         """
         risk_growth = self.growth_linear(growth_vec.unsqueeze(0)).view(1)
@@ -80,6 +102,13 @@ class HDPCluster(HDP):
 
     def forward(self, age_years, sex_idx, rna, cluster_hist, growth_vec, maturity_scalar,
                 margin_ord=None, stage_ord=None, return_components: bool = False):
+        if self.combine_mode == "concat":
+            if return_components:
+                raise NotImplementedError("return_components는 combine_mode='cox_add'에서만 지원합니다.")
+            base_fused = self._embed_base(age_years, sex_idx, rna, cluster_hist, margin_ord, stage_ord)
+            fused = torch.cat([base_fused, growth_vec, maturity_scalar.view(-1)], dim=-1)
+            return self.risk_head_concat(fused.unsqueeze(0)).view(1)
+
         if return_components:
             base = super().forward(age_years, sex_idx, rna, cluster_hist,
                                     margin_ord=margin_ord, stage_ord=stage_ord, return_components=True)
