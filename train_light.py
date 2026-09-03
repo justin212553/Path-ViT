@@ -40,7 +40,7 @@ from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
-    literature_guided_gene_ids_intersection, pathway_category_gene_ids,
+    literature_guided_gene_ids_intersection, pathway_category_gene_ids, pathway_flat_gene_ids,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
@@ -382,6 +382,7 @@ def _parse_args() -> argparse.Namespace:
             "literature_1500_intersection", "pathway8",
             "variance_100_tcga_only", "variance_250_tcga_only", "variance_500_tcga_only",
             "variance_1000_tcga_only", "variance_1500_tcga_only", "purist_pathway8",
+            "pathway8_flat",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -678,7 +679,14 @@ def main():
 
     rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only", "purist_pathway8")
     rna_pathway_categories = None
-    if with_rna and args.rna_genes == "purist_pathway8":
+    if with_rna and args.rna_genes == "pathway8_flat":
+        # 2026-09-03: pathway8과 정확히 같은 163개 문헌 큐레이션 유전자를 카테고리 평균(8차원)이
+        # 아니라 개별 유전자 z-score 그대로(163차원) 쓴다 — "차원을 줄이는 게 정말 필요한가"를
+        # 직접 검증하기 위한 대조군(사용자 지시). rna_pathway_categories=None이라 아래 일반
+        # rna_gene_ids 경로(평균 없이 개별 유전자 concat)를 그대로 탄다.
+        rna_gene_ids = pathway_flat_gene_ids()
+        rna_input_dim = len(rna_gene_ids)
+    elif with_rna and args.rna_genes == "purist_pathway8":
         # 2026-09-03: PurIST(1차원, 고정 계수) + pathway8(8차원 카테고리 평균) 하이브리드 —
         # 둘 다 생존 라벨을 전혀 안 봐서(purist_top20_tcga_only와 달리 Cox 선택 유전자가 전혀
         # 안 섞임) 완전히 leak-free인 채로 PDAC RNA 표현력을 pathway8 단독(8차원)보다 키운다
@@ -729,7 +737,11 @@ def main():
 
     model_prefix = ("M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7
                      else "HDP_PRETRAIN" if args.HDP_PRETRAIN else "HDP")
-    if args.rna_genes == "purist_pathway8":
+    if args.rna_genes == "pathway8_flat":
+        # _PW8FLAT = pathway8과 같은 163개 유전자를 평균 없이 개별 z-score로(2026-09-03 추가) —
+        # _PW8(8차원 평균)/_EX(leaky both-결합)와 절대 안 섞이게 별도 접미사.
+        model_prefix += "_PW8FLAT"
+    elif args.rna_genes == "purist_pathway8":
         # _DPW8 = PurIST(1차원) + pathway8(8차원) 하이브리드, 총 9차원 — 순수 _PW8(pathway8만)
         # 및 _D(purist만)와 파일명이 겹치면 안 되므로 별도 접미사(2026-09-03 추가).
         model_prefix += "_DPW8"

@@ -273,6 +273,23 @@ def pathway_category_gene_ids() -> dict[str, list[str]]:
     df = pd.read_csv(path)
     df = df[df["available"]]
     return {cat: sorted(g["gene_id"].tolist()) for cat, g in df.groupby("category")}
+
+
+def pathway_flat_gene_ids() -> list[str]:
+    """pathway_category_gene_ids()와 정확히 같은 163개 문헌 큐레이션 유전자를, 카테고리 평균
+    (8차원)이 아니라 개별 유전자 z-score 그대로(163차원) 반환한다 — --rna-genes pathway8_flat.
+
+    2026-09-03: "카테고리로 뭉뚱그리는 게 정말 필요한가, 아니면 그냥 개별 유전자를 그대로 써도
+    되는가"를 직접 검증하기 위해 추가(사용자 지시). pathway8의 평균 방식은 표본 대비 차원을
+    줄이려는 설계 선택(SurvPath의 pathway token 방식 참조)이었지만, 실제로 과적합을 줄이는
+    효과가 있는지는 이 비교 전까지 실측된 적이 없었다 — 라벨을 전혀 안 본다는 leak-free 성질은
+    이 함수도 pathway_category_gene_ids()와 동일하게 유지한다(평균을 내느냐 마느냐의 차이일 뿐).
+    """
+    path = Path("data/rna_gene_selection/literature_curated_genes.csv")
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes")
+    df = pd.read_csv(path)
+    return sorted(df.loc[df["available"], "gene_id"].tolist())
 PATCHES_ROOT_ATTRS = {
     "tcga":  "patches_root_tcga",
     "cptac": "patches_root_cptac",
