@@ -928,15 +928,16 @@ class WSISurvivalDataset(Dataset):
 
                 rna_case_ids = rna_df["case_id"]
                 if self.with_cnv:
-                    # 2026-09-03 추가 — pathway8 카테고리 평균(8차원)에 같은 8개 카테고리의 CNV
-                    # 평균(cnv_pathway_category_features, log2-ratio+z-score)을 이어붙여 16차원
-                    # "genomic" 벡터로 만든다. CNV 추출(data/extract_cnv.py)이 RNA 전체 코호트를
-                    # 커버하지 못하므로(TCGA 135/152, CPTAC 139/144) inner join으로 자연히
-                    # CNV 있는 case만 남는다 — 다른 modality(clinical/staging 등)와 동일한 관례.
-                    if self.rna_pathway_categories is None:
-                        raise ValueError("with_cnv=True는 rna_pathway_categories(즉 --rna-genes pathway8)와 함께만 지원합니다.")
+                    # 2026-09-03 추가 — RNA 표현(pathway8 카테고리 평균 8차원이든, variance/기타
+                    # 개별 유전자 flat 벡터든 상관없이) 뒤에 pathway8 8개 카테고리의 CNV 평균
+                    # (cnv_pathway_category_features, log2-ratio+z-score)을 이어붙인다. CNV 자체는
+                    # 항상 pathway8 163유전자 범위로 고정(추출을 그렇게 했음, 사용자 지시 "우선
+                    # pathway8에서 먼저") — 어떤 RNA 패널과 묶느냐와 무관하게 CNV 쪽 8차원은 동일.
+                    # CNV 추출(data/extract_cnv.py)이 RNA 전체 코호트를 커버하지 못하므로(TCGA
+                    # 135/152, CPTAC 139/144) inner join으로 자연히 CNV 있는 case만 남는다.
+                    rna_col_names = cat_names if self.rna_pathway_categories is not None else gene_cols
                     cnv_df = cnv_pathway_category_features(name)
-                    rna_indexed = pd.DataFrame(rna_matrix, index=rna_case_ids.values, columns=cat_names)
+                    rna_indexed = pd.DataFrame(rna_matrix, index=rna_case_ids.values, columns=rna_col_names)
                     combined = rna_indexed.join(cnv_df, how="inner")
                     rna_matrix = combined.to_numpy(dtype="float32")
                     rna_case_ids = pd.Series(combined.index, name="case_id")

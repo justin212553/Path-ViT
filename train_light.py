@@ -632,8 +632,12 @@ def main():
     if args.raw_linear and not args.M5:
         raise ValueError("--raw-linear는 --M5 전용입니다.")
 
-    if args.use_cnv and args.rna_genes != "pathway8":
-        raise ValueError("--use-cnv는 --rna-genes pathway8과 함께만 쓸 수 있습니다.")
+    if args.use_cnv and args.rna_genes in ("purist", "purist_top20_tcga_only", "purist_pathway8"):
+        raise ValueError(
+            "--use-cnv는 PurIST 계열(purist/purist_top20_tcga_only/purist_pathway8)과는 아직 "
+            "못 씁니다 — data/dataset.py의 CNV concat이 일반 RNA 분기(pathway8 카테고리 평균 "
+            "또는 flat 개별 유전자)에만 배선돼 있습니다."
+        )
 
     with_clinical = args.M5 or args.M7 or args.HDP or args.HDP_PRETRAIN
     with_rna = args.M6 or args.M6X or args.M7 or args.HDP or args.HDP_PRETRAIN
@@ -744,7 +748,7 @@ def main():
                 pdac_subtype_gene_ids() if args.rna_genes == "subtype"
                 else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
             )
-        rna_input_dim = len(rna_gene_ids)
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
     else:
         rna_gene_ids, rna_input_dim = None, None
 
@@ -762,8 +766,6 @@ def main():
         # _PW8 = 문헌 큐레이션 8개 카테고리 평균(leakage 없음) — _INT{n}(Cox test 기반,
         # leakage 있음)과 절대 안 섞이게 별도 접미사.
         model_prefix += "_PW8"
-        if args.use_cnv:
-            model_prefix += "_CNV"
     elif args.rna_genes == "purist_top20_tcga_only":
         # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
         # 파일명이 겹치면 안 되므로 별도 접미사.
@@ -792,6 +794,10 @@ def main():
         model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
     elif args.rna_genes != "subtype":
         model_prefix += "_EX"
+    if args.use_cnv:
+        # 2026-09-03: pathway8 전용이던 CNV concat을 flat 개별 유전자 RNA 패널(variance 등)까지
+        # 확장하면서, 태그도 rna_genes 종류와 무관하게 여기서 한 번만 붙이도록 통일.
+        model_prefix += "_CNV"
     if args.clinical_staging:
         # train.py --clinical-staging과 동일 관례 — _R보다 먼저 붙인다(PMA_..._STG_R_...와 태그 순서 통일).
         model_prefix += "_STG"
