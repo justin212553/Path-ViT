@@ -391,7 +391,9 @@ def main():
     if args.full_train:
         # --full-train: val이 없어 "best" checkpoint 선택이 불가능 — 고정 epoch만큼 돌리고
         # 메모리 상의(=마지막 epoch) 모델을 그대로 external 평가에 쓴다(train.py/train_light.py
-        # --full-train과 동일 관례). checkpoint 저장/재로드 자체를 안 한다.
+        # --full-train과 동일 관례). "best" 개념은 없지만, 2026-09-02부터는 마지막 epoch
+        # 모델을 그대로 저장은 해둔다 — scripts/diagnose_hdp_checkpoint_weights.py류로 나중에
+        # branch(rna/clin/hist/growth/maturity) 기여도를 뜯어보려면 체크포인트가 있어야 함.
         for epoch in range(args.epochs):
             loss = train_one_epoch(model, train_loader, optimizer, device, args.cox_batch_size,
                                     precompute, cluster_hist_lookup)
@@ -399,6 +401,12 @@ def main():
             print(f"Epoch {epoch:3d} | loss={loss:.4f}")
             if WANDB_AVAILABLE:
                 wandb.log({"train/loss": loss})
+
+        ckpt_dir = _ROOT / "models" / "checkpoint"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_path = ckpt_dir / f"survival_{args.dataset}_best_{model_prefix.lower()}_seed{args.seed}_light.pt"
+        torch.save({"model_state_dict": model.state_dict(), "epoch": args.epochs, "val_c_index": None}, ckpt_path)
+        print(f"  -> checkpoint saved(마지막 epoch, --full-train이라 'best' 아님): {ckpt_path}")
 
         if external_dataset:
             external_ds = WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)

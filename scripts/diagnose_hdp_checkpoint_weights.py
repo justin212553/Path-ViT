@@ -37,11 +37,13 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from config import Config
-from data.dataset import WSISurvivalDataset, CLINICAL_PATHS, literature_guided_gene_ids_intersection
+from data.dataset import (
+    WSISurvivalDataset, CLINICAL_PATHS, literature_guided_gene_ids_intersection, pathway_category_gene_ids,
+)
 from models.hdp_cluster import HDPCluster
 from models.clinical_encoder import age_stats_from_csv, margin_stats_from_csv, stage_stats_from_df, STAGE_FIELDS
 from train_light import _load_cluster_histograms
-from train_hdp_pretrain_cluster import _load_head, PrecomputeCache, _identity_collate
+from train_hdp_pretrain_cluster import _load_head, PrecomputeCache, _identity_collate, HEAD_PATH_DEFAULT
 
 
 def _patient_components(model, patient_slides, precompute, cluster_hist_lookup, device) -> dict:
@@ -71,13 +73,33 @@ def main():
     parser.add_argument("--fold", type=int, default=None)
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--growth-dim", type=int, default=8)
+    parser.add_argument("--rna-genes", type=str, default="pathway8",
+                         choices=["literature_1500_intersection", "pathway8"])
+    parser.add_argument("--head-path", type=str, default=str(HEAD_PATH_DEFAULT))
+    parser.add_argument("--pretrain-source", type=str, default="pretrain",
+                         choices=["pretrain", "pretrain_resmatch", "pretrain_resmatch_full"])
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="train_hdp_pretrain_cluster.py --clinical-lr-mult와 같은 값을 줘야 "
+                              "model_prefix/checkpoint 파일명이 맞아떨어진다(학습 자체엔 영향 없음, "
+                              "여긴 inference만 함).")
+    parser.add_argument("--rna-lr-mult", type=float, default=1.0)
     parser.add_argument("--ckpt", type=str, default=None,
                          help="명시 안 하면 train_hdp_pretrain_cluster.py의 기본 저장 경로를 재구성.")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model_prefix = f"HDP_PRETRAIN_CLUSTER_INT1500_STG_R_GROWTH{args.growth_dim}"
+    model_prefix = "HDP_PRETRAIN_CLUSTER"
+    model_prefix += "_PW8" if args.rna_genes == "pathway8" else "_INT1500"
+    model_prefix += f"_STG_R_GROWTH{args.growth_dim}"
+    if args.pretrain_source == "pretrain_resmatch":
+        model_prefix += "_RESMATCH"
+    elif args.pretrain_source == "pretrain_resmatch_full":
+        model_prefix += "_RESMATCHFULL"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.rna_lr_mult != 1.0:
+        model_prefix += f"_RLR{args.rna_lr_mult:g}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
     ckpt_path = Path(args.ckpt) if args.ckpt else (
@@ -87,18 +109,25 @@ def main():
         raise FileNotFoundError(f"{ckpt_path} 없음 — --ckpt로 직접 경로를 지정하세요.")
     print(f"checkpoint: {ckpt_path}")
 
-    head = _load_head(device)
+    head = _load_head(device, Path(args.head_path))
     precompute = PrecomputeCache(head)
     hist_datasets = [args.dataset]
-    cluster_hist_lookup, hist_dim = _load_cluster_histograms(hist_datasets, source="pretrain")
+    cluster_hist_lookup, hist_dim = _load_cluster_histograms(hist_datasets, source=args.pretrain_source)
 
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATHS[args.dataset])
     margin_stats = margin_stats_from_csv(CLINICAL_PATHS[args.dataset])
     stage_stats = stage_stats_from_df(pd.read_csv(CLINICAL_PATHS[args.dataset]))
-    rna_gene_ids = literature_guided_gene_ids_intersection(1500)
+    if args.rna_genes == "pathway8":
+        rna_pathway_categories = pathway_category_gene_ids()
+        rna_gene_ids = None
+        rna_input_dim = len(rna_pathway_categories)
+    else:
+        rna_pathway_categories = None
+        rna_gene_ids = literature_guided_gene_ids_intersection(1500)
+        rna_input_dim = len(rna_gene_ids)
 
     model = HDPCluster(
-        Config().model, age_mean=age_mean, age_std=age_std, rna_input_dim=len(rna_gene_ids),
+        Config().model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         hist_dim=hist_dim, k=1, feat_dim=1536, growth_dim=args.growth_dim,
         use_margin=True, margin_stats=margin_stats, use_age_sex=True,
         use_staging=True, stage_stats=stage_stats,
@@ -106,7 +135,9 @@ def main():
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
-    print(f"best epoch={ckpt.get('epoch')} val_c_index={ckpt.get('val_c_index'):.4f}\n")
+    val_c = ckpt.get("val_c_index")
+    val_c_str = f"{val_c:.4f}" if val_c is not None else "N/A(--full-train)"
+    print(f"epoch={ckpt.get('epoch')} val_c_index={val_c_str}\n")
 
     print("=== 1) zero-init 선형층 weight norm (학습 후) ===")
     named = {
@@ -121,9 +152,10 @@ def main():
         print(f"  {name:32s} shape={tuple(w.shape)} L2 norm={w.norm().item():.4f} "
               f"max|w|={w.abs().max().item():.4f}")
 
-    print("\n=== 2) internal 전체(train+val+test)에서 항별 실제 risk 기여도 ===")
+    print("\n=== 2) 전체 코호트에서 항별 실제 risk 기여도 ===")
     ds_kwargs = dict(with_clinical=True, with_margin=True, with_staging=True,
-                      with_rna=True, rna_gene_ids=rna_gene_ids, feature_backbone="uni2native")
+                      with_rna=True, rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
+                      feature_backbone="uni2native")
     cfg = Config()
     cfg.data.seed = args.seed
     all_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split="all", **ds_kwargs)
