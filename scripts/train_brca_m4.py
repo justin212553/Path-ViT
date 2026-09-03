@@ -194,7 +194,8 @@ def main():
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
     if args.gene_selection == "literature":
-        gene_tag = "LIT60"
+        # train_brca_m7.py와 동일 관례 — 실제 유전자 수를 태그에 반영(2026-09-03: 60->165).
+        gene_tag = f"LIT{rna_input_dim}"
     elif args.fdr_threshold is not None:
         gene_tag = f"FDR{args.fdr_threshold:g}"
     else:

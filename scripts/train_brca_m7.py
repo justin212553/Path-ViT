@@ -140,7 +140,10 @@ def main():
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
     if args.gene_selection == "literature":
-        gene_tag = "LIT60"
+        # 2026-09-03: PAM50+Oncotype DX(60개)에 pan-cancer 카테고리(DNA손상복구/증식/면역/
+        # 기질/basal-EMT/저산소증)를 보강해 165개로 늘어남 — 하드코딩 대신 실제 유전자 수를
+        # 태그에 그대로 반영해 이후 또 늘려도 파일명이 안 깨지게 한다.
+        gene_tag = f"LIT{rna_input_dim}"
     elif args.fdr_threshold is not None:
         gene_tag = f"FDR{args.fdr_threshold:g}"
     else:
