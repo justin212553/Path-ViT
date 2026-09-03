@@ -499,6 +499,16 @@ def _parse_args() -> argparse.Namespace:
              "variant calling 파이프라인 차이 의심). 켜면 model_prefix에 _MUT 접미사가 붙는다.",
     )
     parser.add_argument(
+        "--use-cnv", action="store_true",
+        help="2026-09-03: pathway8(--rna-genes pathway8 전용)의 8개 카테고리에 같은 카테고리의 "
+             "CNV(카피수 변이) 평균 8차원을 이어붙여 16차원 genomic 벡터로 만든다"
+             "(data/extract_cnv.py, GDC Gene Level Copy Number 기반, AscatNGS 파이프라인 통일). "
+             "공식 PORPOISE 저장소(sota/PORPOISE) 코드를 직접 열어보니 그쪽 PAAD 유의 결과가 "
+             "RNA-seq+CNV+mutation 조합이었고 저희는 CNV를 한 번도 안 써봤다는 게 이유 — "
+             "CNV 추출이 RNA 전체 코호트를 못 커버해서(TCGA 135/152, CPTAC 139/144) 켜면 표본이 "
+             "줄어든다. 켜면 model_prefix에 _CNV 접미사가 붙는다.",
+    )
+    parser.add_argument(
         "--raw-linear", action="store_true",
         help="--M5 전용, 2026-08-21 — ClinicalEncoder(MLP) 없이 raw z-score feature를 바로 "
              "Linear(1)에 넣는 고전적 Cox 회귀로 M5를 만든다. M7의 clinical cox_add ablation에서 "
@@ -622,6 +632,9 @@ def main():
     if args.raw_linear and not args.M5:
         raise ValueError("--raw-linear는 --M5 전용입니다.")
 
+    if args.use_cnv and args.rna_genes != "pathway8":
+        raise ValueError("--use-cnv는 --rna-genes pathway8과 함께만 쓸 수 있습니다.")
+
     with_clinical = args.M5 or args.M7 or args.HDP or args.HDP_PRETRAIN
     with_rna = args.M6 or args.M6X or args.M7 or args.HDP or args.HDP_PRETRAIN
 
@@ -708,7 +721,7 @@ def main():
         # HDP 공용)엔 없어서 추가함 — leakage 없는 RNA 대안으로 M7부터 비교.
         rna_gene_ids = None
         rna_pathway_categories = pathway_category_gene_ids()
-        rna_input_dim = len(rna_pathway_categories)
+        rna_input_dim = len(rna_pathway_categories) + (len(rna_pathway_categories) if args.use_cnv else 0)
     elif with_rna and args.rna_genes == "purist_top20_tcga_only":
         # 하이브리드: PurIST 확률(1차원, chance 수준이었음) + TCGA train split Cox-score 상위
         # 20개 개별 유전자(leakage-free) concat. data/dataset.py가 rna_purist=True와
@@ -749,6 +762,8 @@ def main():
         # _PW8 = 문헌 큐레이션 8개 카테고리 평균(leakage 없음) — _INT{n}(Cox test 기반,
         # leakage 있음)과 절대 안 섞이게 별도 접미사.
         model_prefix += "_PW8"
+        if args.use_cnv:
+            model_prefix += "_CNV"
     elif args.rna_genes == "purist_top20_tcga_only":
         # _D20 = PurIST(1차원) + TCGA-only top-20 유전자 하이브리드 — 순수 _D(PurIST만)와
         # 파일명이 겹치면 안 되므로 별도 접미사.
@@ -889,7 +904,7 @@ def main():
     ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
                       with_mutation=args.clinical_mutation,
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
-                      rna_pathway_categories=rna_pathway_categories,
+                      rna_pathway_categories=rna_pathway_categories, with_cnv=args.use_cnv,
                       restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),

@@ -96,6 +96,13 @@ RNA_PATHS = {
     "tcga":  Path("data/rna_tcga.csv"),
     "cptac": Path("data/rna_cptac.csv"),
 }
+# data/extract_cnv.py 산출물 — pathway8(163유전자) 범위 카피수 변이, raw 정수(정상=2). RNA와
+# 달리 미리 z-score된 버전을 따로 저장해두지 않아서(2026-09-03 신규 추가) 여기서 즉석으로
+# log2-ratio + z-score를 계산한다(cnv_pathway_category_features 참조).
+CNV_RAW_PATHS = {
+    "tcga":  Path("data/cnv_tcga.csv"),
+    "cptac": Path("data/cnv_cptac.csv"),
+}
 # data/compute_purist_subtype.py 산출물 — PurIST(Rashid et al. 2020) basal-like 확률 1차원.
 # 어떤 코호트에도 fit하지 않는 고정 계수 분류기라 --rna-genes purist에서만 사용.
 RNA_PURIST_PATHS = {
@@ -290,6 +297,32 @@ def pathway_flat_gene_ids() -> list[str]:
         raise FileNotFoundError(f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes")
     df = pd.read_csv(path)
     return sorted(df.loc[df["available"], "gene_id"].tolist())
+
+
+@lru_cache(maxsize=None)
+def cnv_pathway_category_features(name: str) -> pd.DataFrame:
+    """data/extract_cnv.py 산출물(raw 정수 copy_number, pathway8 163유전자 범위)을 RNA
+    pathway8과 정확히 같은 8개 카테고리(pathway_category_gene_ids() 재사용 — CNV 추출을
+    애초에 이 유전자 범위로 한정했으므로 카테고리/유전자가 100% 동일)로 평균 낸 (case_id x
+    8) DataFrame을 반환한다. 컬럼명은 RNA와 겹치지 않게 "cnv_" 접두어를 붙인다.
+
+    [정규화] raw copy_number(정수, 정상=2)는 그대로 평균 내면 안 된다 — 표준 CNV 분석 관례대로
+    log2(copy_number/2 + eps) 로그비(log-ratio)로 바꾼 뒤(0=정상, 음수=결실, 양수=증폭),
+    RNA와 동일한 관례(data/extract_rna_clinical.py::main())로 그 코호트 전체 기준
+    z-score한다. 2026-09-03 신규 — WSI+유전체 융합이 유의했던 원 PORPOISE 논문 결과를
+    재현하기 위해 이 프로젝트가 한 번도 안 써본 CNV 모달리티를 처음 추가.
+    """
+    raw = pd.read_csv(CNV_RAW_PATHS[name]).set_index("case_id")
+    log_ratio = np.log2(raw / 2.0 + 1e-3)
+    z = (log_ratio - log_ratio.mean()) / log_ratio.std(ddof=0).replace(0, 1.0)
+
+    categories = pathway_category_gene_ids()
+    cat_names = sorted(categories.keys())
+    out = pd.DataFrame(index=z.index)
+    for cat in cat_names:
+        cols = [g for g in categories[cat] if g in z.columns]
+        out[f"cnv_{cat}"] = z[cols].mean(axis=1)
+    return out
 PATCHES_ROOT_ATTRS = {
     "tcga":  "patches_root_tcga",
     "cptac": "patches_root_cptac",
@@ -732,6 +765,7 @@ class WSISurvivalDataset(Dataset):
         rna_gene_ids: list[str] | None = None,
         rna_pathway_categories: dict[str, list[str]] | None = None,
         rna_purist: bool = False,
+        with_cnv: bool = False,
         restrict_case_ids: set[str] | None = None,
         one_slide_per_case: bool = False,
         exclude_normal_slides: bool = False,
@@ -775,6 +809,7 @@ class WSISurvivalDataset(Dataset):
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
         self.rna_purist       = rna_purist
+        self.with_cnv         = with_cnv
         self.use_stage_stratify = use_stage_stratify
         self.use_leverage_stratify = use_leverage_stratify
 
@@ -891,10 +926,26 @@ class WSISurvivalDataset(Dataset):
                     rna_matrix = agg
                     self.rna_category_names = cat_names
 
+                rna_case_ids = rna_df["case_id"]
+                if self.with_cnv:
+                    # 2026-09-03 추가 — pathway8 카테고리 평균(8차원)에 같은 8개 카테고리의 CNV
+                    # 평균(cnv_pathway_category_features, log2-ratio+z-score)을 이어붙여 16차원
+                    # "genomic" 벡터로 만든다. CNV 추출(data/extract_cnv.py)이 RNA 전체 코호트를
+                    # 커버하지 못하므로(TCGA 135/152, CPTAC 139/144) inner join으로 자연히
+                    # CNV 있는 case만 남는다 — 다른 modality(clinical/staging 등)와 동일한 관례.
+                    if self.rna_pathway_categories is None:
+                        raise ValueError("with_cnv=True는 rna_pathway_categories(즉 --rna-genes pathway8)와 함께만 지원합니다.")
+                    cnv_df = cnv_pathway_category_features(name)
+                    rna_indexed = pd.DataFrame(rna_matrix, index=rna_case_ids.values, columns=cat_names)
+                    combined = rna_indexed.join(cnv_df, how="inner")
+                    rna_matrix = combined.to_numpy(dtype="float32")
+                    rna_case_ids = pd.Series(combined.index, name="case_id")
+                    self.rna_category_names = list(combined.columns)
+
                 # 유전자(또는 카테고리) 벡터는 case당 1번만 lookup에 저장하고(슬라이드 수만큼
                 # 중복 저장 방지), merged 테이블에는 필터링용 case_id만 inner-join한다.
-                self.rna_lookup.update(zip(rna_df["case_id"], rna_matrix))
-                merged = merged.merge(rna_df[["case_id"]], on="case_id", how="inner")
+                self.rna_lookup.update(zip(rna_case_ids, rna_matrix))
+                merged = merged.merge(rna_case_ids.to_frame(name="case_id"), on="case_id", how="inner")
 
             def _has_patches(slide_id: str, root=root) -> bool:
                 d = root / "tiles" / slide_id
