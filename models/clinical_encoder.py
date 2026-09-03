@@ -36,9 +36,20 @@ SEX_TO_IDX = {"male": 0, "female": 1}
 # NaN(실제 결측)은 전부 encode_stage_value()가 None을 반환해 "미상"으로 통일 처리된다.
 STAGE_FIELDS = ("ajcc_t", "ajcc_n", "ajcc_m", "tumor_grade")
 _STAGE_ORDINAL_MAPS = {
-    "ajcc_t": {"Tis": 0, "T1": 1, "T1a": 1, "T1b": 1, "T1c": 1, "T2": 2, "T3": 3, "T4": 4},
-    "ajcc_n": {"N0": 0, "N1": 1, "N1a": 1, "N1b": 1, "N2": 2},
-    "ajcc_m": {"M0": 0, "M1": 1, "M1a": 1, "M1b": 1},
+    # 2026-09-02: BRCA(TCGA-BRCA) T/N/M 세부분류 추가 — PAAD엔 없던 하위 카테고리들
+    # (T2a/T2b/T3a/T4b/T4d/Tis 변형, N0 변형/N1c/N1mi/N2a/N3 계열, cM0 (i+)). 기존 PAAD 키는
+    # 그대로 유지, BRCA 실측(GDC diagnoses.ajcc_pathologic_{t,n,m}, 2026-09-02 조회)에서 나온
+    # 값만 새로 추가 — 순서형 등급(숫자)이 같은 대분류(T2/N1/...)에 속하면 동일값으로 매핑.
+    "ajcc_t": {"Tis": 0, "Tis (DCIS)": 0, "Tis (LCIS)": 0,
+               "T1": 1, "T1a": 1, "T1b": 1, "T1c": 1,
+               "T2": 2, "T2a": 2, "T2b": 2,
+               "T3": 3, "T3a": 3,
+               "T4": 4, "T4a": 4, "T4b": 4, "T4c": 4, "T4d": 4},
+    "ajcc_n": {"N0": 0, "N0 (i+)": 0, "N0 (i-)": 0, "N0 (mol+)": 0,
+               "N1": 1, "N1a": 1, "N1b": 1, "N1c": 1, "N1mi": 1,
+               "N2": 2, "N2a": 2, "N2b": 2,
+               "N3": 3, "N3a": 3, "N3b": 3, "N3c": 3},
+    "ajcc_m": {"M0": 0, "cM0 (i+)": 0, "M1": 1, "M1a": 1, "M1b": 1},
     "tumor_grade": {"G1": 1, "G2": 2, "G3": 3, "G4": 4},
 }
 # ClinicalEncoder 버퍼 이름(짧게)과 StagePredictionHead가 참조하는 stage_stats 키를 연결.

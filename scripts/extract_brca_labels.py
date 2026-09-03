@@ -4,7 +4,8 @@ TCGA-BRCA case-level OS(overall survival) + clinical(age/sex) 레이블을 GDC R
 그대로 재현하되, BRCA는 로컬에 미리 받아둔 clinical.tsv가 없어 GDC 케이스 API로 직접 조회한다.
 
     OS_time  = vital_status Dead  -> demographic.days_to_death
-               vital_status Alive -> diagnoses.days_to_last_follow_up
+               vital_status Alive -> max(follow_ups[].days_to_follow_up)  (BRCA는 diagnoses.
+                                      days_to_last_follow_up이 항상 결측 — follow_ups 엔티티 사용)
     OS_event = Dead -> 1, Alive -> 0
     vital_status가 Alive/Dead가 아니거나 위 time이 결측인 case는 제외.
 
@@ -35,13 +36,24 @@ OUT_PATH = Path("data/brca_clinical.csv")
 
 
 def _fetch_cases() -> list[dict]:
+    """2026-09-02: 처음엔 diagnoses.days_to_last_follow_up과 T/N/M을 한 쿼리에 같이 넣으면
+    GDC가 버그를 낸다고 오판했었다(별도 쿼리로 나눠도 동일하게 깨짐 — 재확인 결과 원인이 아니었음).
+    실제 원인은 TCGA-BRCA는 diagnoses.days_to_last_follow_up 필드 자체가 애초에 거의 항상
+    null이라는 것(직접 GDC _mapping 조회+실측으로 확인: Alive 945명 중 1명만 채워짐). BRCA는
+    follow-up 기록이 diagnoses가 아니라 별도 follow_ups 엔티티(1:N)에 들어있고, 거기 있는
+    follow_ups.days_to_follow_up은 Alive 945명 중 944명이 채워져 있다. 그래서 한 쿼리로
+    합쳐도 문제없이 다 받아오고, case당 follow_ups는 여러 번의 방문 기록이라 가장 최근(=최댓값)을
+    OS_time으로 쓴다."""
     filters = {"op": "=", "content": {"field": "project.project_id", "value": "TCGA-BRCA"}}
     fields = ",".join([
         "submitter_id",
         "demographic.vital_status",
         "demographic.days_to_death",
         "demographic.age_at_index",
-        "diagnoses.days_to_last_follow_up",
+        "follow_ups.days_to_follow_up",
+        "diagnoses.ajcc_pathologic_t",
+        "diagnoses.ajcc_pathologic_n",
+        "diagnoses.ajcc_pathologic_m",
     ])
     params = {"filters": json.dumps(filters), "fields": fields, "size": "2000", "format": "json"}
     url = GDC_CASES_API + "?" + urllib.parse.urlencode(params)
@@ -61,9 +73,11 @@ def main():
     for h in hits:
         demo = h.get("demographic", {}) or {}
         diagnoses = h.get("diagnoses", [{}]) or [{}]
+        follow_ups = h.get("follow_ups", []) or []
         vital_status = demo.get("vital_status")
         days_to_death = demo.get("days_to_death")
-        days_to_last_follow_up = diagnoses[0].get("days_to_last_follow_up")
+        followup_vals = [f.get("days_to_follow_up") for f in follow_ups if f.get("days_to_follow_up") is not None]
+        days_to_last_follow_up = max(followup_vals) if followup_vals else None
         age = demo.get("age_at_index")
 
         if vital_status == "Dead":
@@ -78,6 +92,15 @@ def main():
             "dataset": "tcga_brca",
             "age_years": age,
             "sex": "female",  # 근거: 모듈 docstring 참조
+            # 2026-09-02: T/N/M 추가 — GDC 필드 채움율 실측 T=1097/1098, N=1095/1098, M=1095/1098로
+            # 매우 양호. tumor_grade는 유방암에서 이 표준 필드에 항상 None(다른 채점 체계라
+            # GDC diagnoses.tumor_grade로 안 들어옴) — STAGE_FIELDS(models/clinical_encoder.py)가
+            # 4필드를 기대하므로 자리만 채워둔다(항상 known_flag=0으로 안전하게 무시됨).
+            # residual_disease(margin)는 실측 결과 BRCA 전체 0/1098 채워짐 — 아예 뺀다(못 씀).
+            "ajcc_t": diagnoses[0].get("ajcc_pathologic_t"),
+            "ajcc_n": diagnoses[0].get("ajcc_pathologic_n"),
+            "ajcc_m": diagnoses[0].get("ajcc_pathologic_m"),
+            "tumor_grade": None,
             "OS_time": os_time,
             "OS_event": os_event,
         })
