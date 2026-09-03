@@ -58,6 +58,12 @@ def main():
                               "'cox'(scripts/select_brca_rna_genes_cox.py의 생존 라벨 기반 "
                               "univariate Cox score test 상위 N개, "
                               "data/brca_rna_gene_selection_cox/) 중 선택.")
+    parser.add_argument("--fdr-threshold", type=float, default=None,
+                         help="2026-09-02: --gene-selection cox와 함께 주어지면 top-N(--n-genes) "
+                              "대신 scripts/select_brca_rna_genes_cox.py --fdr-threshold가 만든 "
+                              "BH-FDR q<threshold 패널(selected_genes_fdr{threshold}.csv)을 쓴다 — "
+                              "top-1500이 Y염색체 유전자/후각수용체 같은 잡음으로 채워지는 문제를 "
+                              "우회하는 대안.")
     parser.add_argument("--clinical-staging", action="store_true",
                          help="2026-09-02: ClinicalEncoder 입력에 AJCC 병기(ajcc_t/n/m, "
                               "tumor_grade)를 추가한다(train.py --clinical-staging과 동일 관례). "
@@ -97,13 +103,17 @@ def main():
     start_time = datetime.now()
 
     gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
-    gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
-    if not gene_path.exists():
+    if args.fdr_threshold is not None:
+        if args.gene_selection != "cox":
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_path = gene_dir / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
+        select_hint = f"python -m scripts.select_brca_rna_genes_cox --seed {args.seed} --fdr-threshold {args.fdr_threshold:g}"
+    else:
+        gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
         select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
-        raise FileNotFoundError(
-            f"{gene_path} 없음 — 먼저 실행: python -m scripts.{select_module} "
-            f"--seed {args.seed} --n-genes {args.n_genes}"
-        )
+        select_hint = f"python -m scripts.{select_module} --seed {args.seed} --n-genes {args.n_genes}"
+    if not gene_path.exists():
+        raise FileNotFoundError(f"{gene_path} 없음 — 먼저 실행: {select_hint}")
     import pandas as pd
     gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
     rna_input_dim = len(gene_ids)
@@ -118,14 +128,15 @@ def main():
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
-    print(f"RNA 유전자 수: {rna_input_dim} (top{args.n_genes}, {args.gene_selection} 기준, seed={args.seed})")
+    gene_tag = f"FDR{args.fdr_threshold:g}" if args.fdr_threshold is not None else f"TOP{args.n_genes}"
+    print(f"RNA 유전자 수: {rna_input_dim} ({gene_tag}, {args.gene_selection} 기준, seed={args.seed})")
     print(f"age_mean={age_mean:.2f} age_std={age_std:.2f} (전체 코호트 기준, train.py 관례와 동일)")
 
     model = ClinicalRNAOnly(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         use_staging=args.clinical_staging, stage_stats=stage_stats,
     ).to(device)
-    model_prefix = f"BRCA_M7_TOP{args.n_genes}"
+    model_prefix = f"BRCA_M7_{gene_tag}"
     if args.gene_selection == "cox":
         model_prefix += "_COXGENE"
     if args.clinical_staging:

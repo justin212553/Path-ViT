@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data.select_rnaseq_genes import cox_score_test_matrix
+from data.select_rnaseq_genes import cox_score_test_matrix, benjamini_hochberg_qvalues
 from scripts.brca_common import RNA_RAW_LOG2_PATH, load_case_table
 
 OUT_DIR = Path("data/brca_rna_gene_selection_cox")
@@ -49,6 +49,16 @@ def main():
                          help="scripts.select_brca_rna_genes와 동일 관례 — brca_common.load_case_table과 "
                               "동일 seed를 써야 train split이 학습 스크립트와 어긋나지 않는다.")
     parser.add_argument("--n-genes", nargs="+", type=int, default=[1500])
+    parser.add_argument(
+        "--fdr-threshold", type=float, default=None,
+        help="2026-09-02: 주어지면 --n-genes(고정 개수) 대신 BH-FDR q < 이 값을 만족하는 유전자만 "
+             "고른다(data/select_rnaseq_genes.py::build_fdr_threshold_ranking과 동일 원리). "
+             "top-N 방식은 549 train case/event 61개로 ~2만 유전자를 score test하면 다중검정 "
+             "보정 없이 우연만으로도 상위권이 Y염색체 유전자(RBMY1E 등)/후각수용체(OR4K2 등) 같은 "
+             "생물학적으로 말이 안 되는 잡음으로 채워지는 게 실측 확인됨 — FDR 보정은 그 잡음을 "
+             "걸러내고 실제 신호 강도에 따라 유전자 수가 결정되게 한다(문헌 curated 세트가 없어 "
+             "PDAC 버전과 달리 '항상 포함' 로직은 없음). 출력 파일명 selected_genes_fdr{threshold}.csv.",
+    )
     args = parser.parse_args()
 
     cases = load_case_table(args.seed)
@@ -74,16 +84,23 @@ def main():
     ranking["_abs_z"] = ranking["cox_z"].abs()
     ranking = ranking.sort_values(["cox_p", "_abs_z"], ascending=[True, False]).drop(columns="_abs_z").reset_index(drop=True)
     ranking.insert(0, "rank", range(1, len(ranking) + 1))
+    ranking["fdr_q"] = benjamini_hochberg_qvalues(ranking["cox_p"].to_numpy())
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     ranking.to_csv(OUT_DIR / "gene_cox_ranking.csv", index=False)
     print(f"저장: {OUT_DIR / 'gene_cox_ranking.csv'}  ({len(ranking)} genes)")
 
-    for n in args.n_genes:
-        selected = ranking.head(n)[["rank", "gene_id"]]
-        out_path = OUT_DIR / f"selected_genes_top_{n}.csv"
+    if args.fdr_threshold is not None:
+        selected = ranking[ranking["fdr_q"] < args.fdr_threshold][["rank", "gene_id", "fdr_q"]]
+        out_path = OUT_DIR / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
         selected.to_csv(out_path, index=False)
-        print(f"저장: {out_path}  (top {n})")
+        print(f"저장: {out_path}  (q<{args.fdr_threshold:g}: {len(selected)} genes)")
+    else:
+        for n in args.n_genes:
+            selected = ranking.head(n)[["rank", "gene_id"]]
+            out_path = OUT_DIR / f"selected_genes_top_{n}.csv"
+            selected.to_csv(out_path, index=False)
+            print(f"저장: {out_path}  (top {n})")
 
 
 if __name__ == "__main__":
