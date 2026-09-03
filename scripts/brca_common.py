@@ -167,6 +167,43 @@ def load_rna_matrix(gene_ids: list[str]) -> pd.DataFrame:
     return rna[gene_ids]
 
 
+def load_rna_matrix_categorized(categories: dict[str, list[str]]) -> pd.DataFrame:
+    """PAAD pathway8과 동일한 방식(data/dataset.py::WSISurvivalDataset의 rna_pathway_categories
+    처리)을 BRCA에 재현 — 카테고리별 유전자 z-score의 평균을 카테고리당 1개 컬럼으로 반환한다
+    (개별 유전자 그대로 쓰는 load_rna_matrix()의 대안, 2026-09-03 추가).
+
+    [왜 필요한가] PAAD에서 "카테고리 평균(8차원)이 개별 유전자 그대로(163차원, pathway8_flat)보다
+    작은 코호트(TCGA train~91명)에서 더 안정적"이라는 게 실측 확인됨(findings_backlog.md
+    2026-09-03) — 같은 원칙을 BRCA(문헌 패널 165개)에도 적용해 pathway8과 구조적으로 동일한
+    비교를 만든다. BRCA는 코호트가 훨씬 커서(train~635명) 이 압축이 실제로 필요한지는 별개
+    문제지만, "PDAC은 표본이 작아서 신호가 안 났다"는 가설을 검증하려면 같은 방식으로 맞춰야
+    공정한 비교가 된다(사용자 지시).
+    """
+    rna = pd.read_csv(RNA_ZSCORED_PATH).set_index("case_id")
+    cat_names = sorted(categories.keys())
+    out = pd.DataFrame(index=rna.index)
+    for cat in cat_names:
+        cols = [g for g in categories[cat] if g in rna.columns]
+        out[cat] = rna[cols].mean(axis=1)
+    return out
+
+
+def load_literature_categories(merge_oncotype: bool = True) -> dict[str, list[str]]:
+    """scripts/select_brca_rna_genes_literature.py 산출물(선택된 유전자 + category 라벨)을
+    카테고리 -> gene_id 목록 dict로 되돌린다 — load_rna_matrix_categorized() 입력용.
+
+    merge_oncotype=True(기본)면 oncotype_* 6개 서브카테고리(중복 제거 후 일부는 유전자 1~2개
+    뿐이라 평균의 의미가 약함)를 "oncotype_dx" 하나로 합친다 — 그 결과 PAM50(1) + Oncotype
+    DX(1) + pan-cancer 6개 = 총 8개 카테고리로, PAAD pathway8과 카테고리 개수가 정확히 일치한다
+    (2026-09-03, 사용자 지시 — "PADC에서 뭉치기로 했으면 BRCA에서도 뭉치자").
+    """
+    df = pd.read_csv(Path("data/brca_rna_gene_selection_literature/selected_genes.csv"))
+    if merge_oncotype:
+        df = df.copy()
+        df["category"] = df["category"].where(~df["category"].str.startswith("oncotype_"), "oncotype_dx")
+    return {cat: g["gene_id"].tolist() for cat, g in df.groupby("category")}
+
+
 def load_case_table(seed: int, external_tss: str | None = EXTERNAL_TSS) -> pd.DataFrame:
     """공통 case에 대해 clinical + split 정보를 합친 테이블.
 

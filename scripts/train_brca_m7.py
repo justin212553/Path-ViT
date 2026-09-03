@@ -39,7 +39,7 @@ from train_light import (
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_case_table_kfold,
-    load_rna_matrix, EXTERNAL_TSS,
+    load_rna_matrix, load_rna_matrix_categorized, load_literature_categories, EXTERNAL_TSS,
 )
 
 if WANDB_AVAILABLE:
@@ -53,7 +53,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-genes", type=int, default=1500)
     parser.add_argument("--gene-selection", type=str, default="variance",
-                         choices=["variance", "cox", "literature"],
+                         choices=["variance", "cox", "literature", "literature_categorized"],
                          help="2026-09-02: 'variance'(기본, scripts/select_brca_rna_genes.py의 "
                               "고분산 상위 N개, data/brca_rna_gene_selection/) 또는 "
                               "'cox'(scripts/select_brca_rna_genes_cox.py의 생존 라벨 기반 "
@@ -107,7 +107,12 @@ def main():
     device = torch.device(cfg.light.device if torch.cuda.is_available() else "cpu")
     start_time = datetime.now()
 
-    if args.gene_selection == "literature":
+    import pandas as pd
+    if args.gene_selection == "literature_categorized":
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_ids = None  # 카테고리 평균 경로는 gene_path/gene_ids를 안 씀 — 아래서 별도 처리.
+    elif args.gene_selection == "literature":
         if args.fdr_threshold is not None:
             raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
         gene_path = Path("data/brca_rna_gene_selection_literature/selected_genes.csv")
@@ -123,23 +128,38 @@ def main():
             gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
             select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
             select_hint = f"python -m scripts.{select_module} --seed {args.seed} --n-genes {args.n_genes}"
-    if not gene_path.exists():
-        raise FileNotFoundError(f"{gene_path} 없음 — 먼저 실행: {select_hint}")
-    import pandas as pd
-    gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
-    rna_input_dim = len(gene_ids)
+
+    if args.gene_selection == "literature_categorized":
+        literature_categories = load_literature_categories()
+        rna_input_dim = len(literature_categories)
+    else:
+        if not gene_path.exists():
+            raise FileNotFoundError(f"{gene_path} 없음 — 먼저 실행: {select_hint}")
+        gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
+        rna_input_dim = len(gene_ids)
     stage_stats = stage_stats_from_csv(CLINICAL_PATH) if args.clinical_staging else None
 
     if args.fold is not None:
         cases = load_case_table_kfold(args.seed, args.fold, args.n_folds, external_tss=external_tss)
     else:
         cases = load_case_table(args.seed, external_tss=external_tss)
-    rna_df = load_rna_matrix(gene_ids)
+    if args.gene_selection == "literature_categorized":
+        # 2026-09-03: PAAD pathway8과 정확히 같은 원칙 — PAM50(1)+Oncotype DX(1, 서브카테고리
+        # 병합)+pan-cancer 6개 = 8개 카테고리 평균. "PDAC에서 뭉치기로 했으면 BRCA에서도
+        # 뭉치자"(사용자 지시) — PDAC은 코호트가 작아 카테고리 압축이 실제 이득이었는데
+        # (findings_backlog.md), BRCA(코호트가 훨씬 큼)에서도 같은 압축을 적용했을 때 M4 유의성이
+        # 나오는지가 이번 실험의 핵심 — 나온다면 "PDAC은 코호트가 작아서 신호가 안 난 거지 모델
+        # 자체는 건재하다"는 해석의 근거가 된다.
+        rna_df = load_rna_matrix_categorized(literature_categories)
+    else:
+        rna_df = load_rna_matrix(gene_ids)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
-    if args.gene_selection == "literature":
+    if args.gene_selection == "literature_categorized":
+        gene_tag = f"LITCAT{rna_input_dim}"
+    elif args.gene_selection == "literature":
         # 2026-09-03: PAM50+Oncotype DX(60개)에 pan-cancer 카테고리(DNA손상복구/증식/면역/
         # 기질/basal-EMT/저산소증)를 보강해 165개로 늘어남 — 하드코딩 대신 실제 유전자 수를
         # 태그에 그대로 반영해 이후 또 늘려도 파일명이 안 깨지게 한다.
