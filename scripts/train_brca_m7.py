@@ -52,12 +52,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-genes", type=int, default=1500)
-    parser.add_argument("--gene-selection", type=str, default="variance", choices=["variance", "cox"],
+    parser.add_argument("--gene-selection", type=str, default="variance",
+                         choices=["variance", "cox", "literature"],
                          help="2026-09-02: 'variance'(기본, scripts/select_brca_rna_genes.py의 "
                               "고분산 상위 N개, data/brca_rna_gene_selection/) 또는 "
                               "'cox'(scripts/select_brca_rna_genes_cox.py의 생존 라벨 기반 "
                               "univariate Cox score test 상위 N개, "
-                              "data/brca_rna_gene_selection_cox/) 중 선택.")
+                              "data/brca_rna_gene_selection_cox/) 중 선택. 2026-09-03: "
+                              "'literature'(scripts/select_brca_rna_genes_literature.py, PAM50+"
+                              "Oncotype DX 60유전자, 생존 라벨 완전 미사용 — PAAD의 pathway8과 "
+                              "동일한 설계 원칙) 추가 — --n-genes/--fdr-threshold 둘 다 무시하고 "
+                              "고정 60개를 그대로 씀.")
     parser.add_argument("--fdr-threshold", type=float, default=None,
                          help="2026-09-02: --gene-selection cox와 함께 주어지면 top-N(--n-genes) "
                               "대신 scripts/select_brca_rna_genes_cox.py --fdr-threshold가 만든 "
@@ -102,16 +107,22 @@ def main():
     device = torch.device(cfg.light.device if torch.cuda.is_available() else "cpu")
     start_time = datetime.now()
 
-    gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
-    if args.fdr_threshold is not None:
-        if args.gene_selection != "cox":
+    if args.gene_selection == "literature":
+        if args.fdr_threshold is not None:
             raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
-        gene_path = gene_dir / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
-        select_hint = f"python -m scripts.select_brca_rna_genes_cox --seed {args.seed} --fdr-threshold {args.fdr_threshold:g}"
+        gene_path = Path("data/brca_rna_gene_selection_literature/selected_genes.csv")
+        select_hint = "python -m scripts.select_brca_rna_genes_literature"
     else:
-        gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
-        select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
-        select_hint = f"python -m scripts.{select_module} --seed {args.seed} --n-genes {args.n_genes}"
+        gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
+        if args.fdr_threshold is not None:
+            if args.gene_selection != "cox":
+                raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+            gene_path = gene_dir / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
+            select_hint = f"python -m scripts.select_brca_rna_genes_cox --seed {args.seed} --fdr-threshold {args.fdr_threshold:g}"
+        else:
+            gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
+            select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
+            select_hint = f"python -m scripts.{select_module} --seed {args.seed} --n-genes {args.n_genes}"
     if not gene_path.exists():
         raise FileNotFoundError(f"{gene_path} 없음 — 먼저 실행: {select_hint}")
     import pandas as pd
@@ -128,7 +139,12 @@ def main():
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
-    gene_tag = f"FDR{args.fdr_threshold:g}" if args.fdr_threshold is not None else f"TOP{args.n_genes}"
+    if args.gene_selection == "literature":
+        gene_tag = "LIT60"
+    elif args.fdr_threshold is not None:
+        gene_tag = f"FDR{args.fdr_threshold:g}"
+    else:
+        gene_tag = f"TOP{args.n_genes}"
     print(f"RNA 유전자 수: {rna_input_dim} ({gene_tag}, {args.gene_selection} 기준, seed={args.seed})")
     print(f"age_mean={age_mean:.2f} age_std={age_std:.2f} (전체 코호트 기준, train.py 관례와 동일)")
 
