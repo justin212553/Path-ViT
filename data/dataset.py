@@ -788,7 +788,35 @@ class WSISurvivalDataset(Dataset):
                 clinical_df = pd.read_csv(CLINICAL_PATHS[name])[clinical_cols]
                 merged = merged.merge(clinical_df, on="case_id", how="inner")
 
-            if with_rna and self.rna_purist and self.rna_gene_ids is not None:
+            if with_rna and self.rna_purist and self.rna_pathway_categories is not None:
+                # 2026-09-03 추가 — 하이브리드: PurIST 확률(1차원, 고정 계수) + pathway8 카테고리
+                # 평균(8차원) concat, 총 9차원. 위 purist+개별유전자 하이브리드(바로 아래 분기)와
+                # 원리는 같지만 유전자 대신 카테고리 평균을 붙인다 — 둘 다 생존 라벨을 전혀 안 봐서
+                # (PurIST=고정 계수, pathway8=문헌 카테고리 소속 여부만) 완전히 leak-free인 채로
+                # PDAC RNA 표현력을 키우는 조합(BRCA의 PAM50+Oncotype DX+pan-cancer 카테고리
+                # 확장과 같은 발상, findings_backlog.md 2026-09-03 참조).
+                purist_df = pd.read_csv(RNA_PURIST_PATHS[name]).set_index("case_id")
+                rna_df    = pd.read_csv(RNA_PATHS[name]).set_index("case_id")
+                target_ids = set(g for genes in self.rna_pathway_categories.values() for g in genes)
+                gene_cols  = [c for c in rna_df.columns if c in target_ids]
+                col_index  = {c: i for i, c in enumerate(gene_cols)}
+                cat_names  = sorted(self.rna_pathway_categories.keys())
+                gene_matrix = rna_df[gene_cols].to_numpy(dtype="float32")
+                agg = np.zeros((gene_matrix.shape[0], len(cat_names)), dtype="float32")
+                for ci, cat in enumerate(cat_names):
+                    idxs = [col_index[g] for g in self.rna_pathway_categories[cat] if g in col_index]
+                    agg[:, ci] = gene_matrix[:, idxs].mean(axis=1)
+                cat_df = pd.DataFrame(agg, index=rna_df.index, columns=cat_names)
+                self.rna_category_names = cat_names
+                combined = purist_df[["purist_basal_prob"]].join(cat_df, how="inner")
+                if self.rna_gene_cols is None:
+                    self.rna_gene_cols = list(combined.columns)
+                elif list(combined.columns) != self.rna_gene_cols:
+                    raise ValueError(f"[{name}] PurIST+pathway8 하이브리드 컬럼이 다른 코호트와 다릅니다.")
+                rna_matrix = combined.to_numpy(dtype="float32")
+                self.rna_lookup.update(zip(combined.index, rna_matrix))
+                merged = merged.merge(combined.reset_index()[["case_id"]], on="case_id", how="inner")
+            elif with_rna and self.rna_purist and self.rna_gene_ids is not None:
                 # 하이브리드: PurIST 확률(1차원, 고정 계수) + 개별 유전자(z-score, 보통 TCGA/CPTAC
                 # single-cohort top-N) concat. purist 단독(chance 수준이었음)과 개별 유전자 다수
                 # (과적합 경향)의 절충 — case_id 기준 inner join으로 두 소스를 이어붙인다.

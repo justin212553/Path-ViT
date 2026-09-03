@@ -381,7 +381,7 @@ def _parse_args() -> argparse.Namespace:
             "literature_fdr0.1_cptac_only", "purist", "purist_top20_tcga_only",
             "literature_1500_intersection", "pathway8",
             "variance_100_tcga_only", "variance_250_tcga_only", "variance_500_tcga_only",
-            "variance_1000_tcga_only", "variance_1500_tcga_only",
+            "variance_1000_tcga_only", "variance_1500_tcga_only", "purist_pathway8",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -676,9 +676,19 @@ def main():
     else:
         mutation_stats = None
 
-    rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only")
+    rna_purist = with_rna and args.rna_genes in ("purist", "purist_top20_tcga_only", "purist_pathway8")
     rna_pathway_categories = None
-    if with_rna and args.rna_genes == "pathway8":
+    if with_rna and args.rna_genes == "purist_pathway8":
+        # 2026-09-03: PurIST(1차원, 고정 계수) + pathway8(8차원 카테고리 평균) 하이브리드 —
+        # 둘 다 생존 라벨을 전혀 안 봐서(purist_top20_tcga_only와 달리 Cox 선택 유전자가 전혀
+        # 안 섞임) 완전히 leak-free인 채로 PDAC RNA 표현력을 pathway8 단독(8차원)보다 키운다
+        # (BRCA에서 PAM50+Oncotype DX+pan-cancer 카테고리로 확장한 것과 같은 발상,
+        # findings_backlog.md 2026-09-03 참조). data/dataset.py가 rna_purist=True와
+        # rna_pathway_categories가 동시에 주어지면 두 feature를 이어붙이도록 처리한다.
+        rna_gene_ids = None
+        rna_pathway_categories = pathway_category_gene_ids()
+        rna_input_dim = 1 + len(rna_pathway_categories)
+    elif with_rna and args.rna_genes == "pathway8":
         # 2026-09-02: literature_guided_gene_ids_intersection(Cox test 기반)이 라벨을 보고
         # 유전자를 고르는 방식이라, paper-spec 5-fold CV의 fold-test 환자 중 약 60%가 그
         # 선정 과정의 "train"에 이미 들어가 있었다는 leakage가 확인됨(사용자 지적으로 발견,
@@ -719,7 +729,11 @@ def main():
 
     model_prefix = ("M5" if args.M5 else "M6" if args.M6 else "M6X" if args.M6X else "M7" if args.M7
                      else "HDP_PRETRAIN" if args.HDP_PRETRAIN else "HDP")
-    if args.rna_genes == "pathway8":
+    if args.rna_genes == "purist_pathway8":
+        # _DPW8 = PurIST(1차원) + pathway8(8차원) 하이브리드, 총 9차원 — 순수 _PW8(pathway8만)
+        # 및 _D(purist만)와 파일명이 겹치면 안 되므로 별도 접미사(2026-09-03 추가).
+        model_prefix += "_DPW8"
+    elif args.rna_genes == "pathway8":
         # _PW8 = 문헌 큐레이션 8개 카테고리 평균(leakage 없음) — _INT{n}(Cox test 기반,
         # leakage 있음)과 절대 안 섞이게 별도 접미사.
         model_prefix += "_PW8"
