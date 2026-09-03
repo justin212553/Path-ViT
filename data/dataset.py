@@ -218,19 +218,41 @@ def literature_guided_gene_ids_intersection(top_n: int = 1500) -> list[str]:
     return sorted(pd.read_csv(path)["gene_id"].tolist())
 
 
+@lru_cache(maxsize=None)
+def variance_gene_ids_single_cohort(cohort: str, top_n: int) -> list[str]:
+    """data/select_rnaseq_genes_variance.py --single-cohort {cohort} 산출물 로더 — 생존 라벨을
+    전혀 안 보는 고분산(variance) 기준 single-cohort 유전자 패널(반대 코호트 미참조라
+    external 프로토콜에 leak-free). 2026-09-03: BRCA에서 확인된 것 — Cox 기반 선택(라벨
+    직접 사용)은 fold 경계를 넘는 구조적 leak에 취약했지만 variance 기반 선택은 라벨을 아예
+    안 봐서 훨씬 덜 취약했다(findings_backlog.md) — 그 결과를 PAAD에도 적용해보는 실험용."""
+    path = Path(f"data/rna_gene_selection_variance_{cohort}only/selected_genes_top_{top_n}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: "
+            f"python -m data.select_rnaseq_genes_variance --single-cohort {cohort} --n-genes {top_n}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
 def resolve_tcga_only_rna_genes(rna_genes_arg: str) -> list[str]:
-    """train.py/train_light.py --rna-genes "literature_{spec}_{cohort}_only" 문자열을 파싱해
-    single-cohort 로더 중 맞는 쪽으로 dispatch한다 — spec이 정수면 top-N
+    """train.py/train_light.py --rna-genes "{prefix}_{spec}_{cohort}_only" 문자열을 파싱해
+    single-cohort 로더 중 맞는 쪽으로 dispatch한다.
+
+    prefix가 "literature"면(기존 동작 그대로): spec이 정수면 top-N
     (literature_guided_gene_ids_single_cohort), "fdr{q}"면 FDR threshold
-    (literature_guided_gene_ids_fdr_threshold). 이 파싱을 train.py/train_light.py 양쪽에
-    각각 두면 하나만 고치고 다른 쪽을 놓치는 사고가 나기 쉬워 여기 한 곳에만 둔다.
+    (literature_guided_gene_ids_fdr_threshold). prefix가 "variance"면(2026-09-03 추가)
+    spec은 항상 정수 top-N(variance_gene_ids_single_cohort) — FDR 개념이 없다(라벨을 안 써서
+    p-value 자체가 없음). 이 파싱을 train.py/train_light.py 양쪽에 각각 두면 하나만 고치고
+    다른 쪽을 놓치는 사고가 나기 쉬워 여기 한 곳에만 둔다.
 
     2026-08-04: cohort를 "tcga"로 하드코딩했던 버그를 고쳤다 — "literature_fdr0.1_cptac_only"처럼
     반대 코호트를 단일 코호트로 쓰는 문자열도 받아야 하므로, 문자열 끝에서 두 번째 토큰
-    ("_only" 바로 앞)을 실제 cohort로 파싱한다(함수명은 하위 호환을 위해 유지).
+    ("_only" 바로 앞)을 실제 cohort로 파싱한다.
     """
     parts = rna_genes_arg.split("_")
-    spec, cohort = parts[1], parts[-2]
+    prefix, spec, cohort = parts[0], parts[1], parts[-2]
+    if prefix == "variance":
+        return variance_gene_ids_single_cohort(cohort, int(spec))
     if spec.startswith("fdr"):
         return literature_guided_gene_ids_fdr_threshold(cohort, float(spec[3:]))
     return literature_guided_gene_ids_single_cohort(cohort, int(spec))

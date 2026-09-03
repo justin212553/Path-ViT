@@ -380,6 +380,8 @@ def _parse_args() -> argparse.Namespace:
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
             "literature_fdr0.1_cptac_only", "purist", "purist_top20_tcga_only",
             "literature_1500_intersection", "pathway8",
+            "variance_100_tcga_only", "variance_250_tcga_only", "variance_500_tcga_only",
+            "variance_1000_tcga_only", "variance_1500_tcga_only",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -732,12 +734,18 @@ def main():
     elif args.rna_genes.endswith("_tcga_only"):
         # train.py와 동일한 관례 — 기존 _EX(leaky, both-결합)와 절대 섞이면 안 된다. N까지
         # 태그에 넣어 EXT500/EXT1500처럼 서로 다른 크기도 섞이지 않게 한다.
-        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}"
+        # 2026-09-03: prefix가 "variance"면 literature 기반(_EXT{n})과 파일명이 겹치지 않게
+        # _EXTVAR{n}으로 구분한다(같은 n이어도 완전히 다른 유전자 리스트라 절대 섞이면 안 됨).
+        _spec = args.rna_genes.split("_")[1]
+        _prefix_tag = "VAR" if args.rna_genes.startswith("variance_") else ""
+        model_prefix += f"_EXT{_prefix_tag}{_spec}"
     elif args.rna_genes.endswith("_cptac_only"):
         # _tcga_only와 같은 spec(예: fdr0.1)이어도 반대 코호트에서 뽑힌 다른 유전자셋이라
         # CPTAC 접미사로 명시적으로 구분한다 — 안 붙이면 "M7_EXTfdr0.1"이 tcga_only 결과와
         # 파일명이 겹쳐 checkpoint/kfold_preds가 서로 덮어써진다.
-        model_prefix += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
+        _spec = args.rna_genes.split("_")[1]
+        _prefix_tag = "VAR" if args.rna_genes.startswith("variance_") else ""
+        model_prefix += f"_EXT{_prefix_tag}{_spec}CPTAC"
     elif args.rna_genes.endswith("_intersection"):
         # _INT{n} = TCGA-only/CPTAC-only 순위 교집합(양방향 leakage-free) 사용 표시.
         model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
