@@ -18,6 +18,7 @@ utils/data
 
 checkpoint
 reference_repo
+sota
 scripts/_rna_fpkm_uq_cache
 
 data/rna_brca.csv
