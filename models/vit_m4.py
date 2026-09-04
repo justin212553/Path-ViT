@@ -29,7 +29,9 @@ import torch
 import torch.nn as nn
 
 from .vit_m1 import ViT_M1, AttentionPooling
-from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
+from .clinical_encoder import (
+    ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, MUTATION_FIELDS, _MUTATION_BUFFER_NAMES,
+)
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
@@ -62,6 +64,8 @@ class ViT_M4(ViT_M1):
         stage_stats: dict[str, tuple[float, float]] | None = None,
         use_margin: bool = False,
         margin_stats: tuple[float, float] | None = None,
+        use_mutation: bool = False,
+        mutation_stats: dict[str, tuple[float, float]] | None = None,
         use_age_sex: bool = True,
         combine_mode: str = "concat",
         use_attn_dispersion: bool = False,
@@ -84,6 +88,7 @@ class ViT_M4(ViT_M1):
         self.combine_mode = combine_mode
         self.use_staging = use_staging
         self.use_margin = use_margin
+        self.use_mutation = use_mutation
         self.use_age_sex = use_age_sex
         # 2026-08-14: M3(WSI+RNA, clinical 제외) 슬롯을 M4-NOVIT과 같은 계열(단일 gated ABMIL,
         # RNA-guided FiLM, patch-mixing 없음)로 다시 만들기 위한 옵션 — models/vit_pma.py::
@@ -108,6 +113,7 @@ class ViT_M4(ViT_M1):
                 self.clinical_encoder = ClinicalEncoder(
                     cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
                     use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
+                    use_mutation=use_mutation, mutation_stats=mutation_stats,
                 )
         else:  # cox_add
             if not self.use_clinical:
@@ -126,9 +132,22 @@ class ViT_M4(ViT_M1):
                     short = _STAGE_BUFFER_NAMES[field]
                     self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                     self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
-            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+            if use_mutation:
+                if mutation_stats is None:
+                    raise ValueError("use_mutation=True면 mutation_stats가 필요합니다.")
+                for field in MUTATION_FIELDS:
+                    mean, std = mutation_stats[field]
+                    short = _MUTATION_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = ((2 if use_age_sex else 0) + (2 if use_margin else 0)
+                       + (2 * len(STAGE_FIELDS) if use_staging else 0)
+                       + (2 * len(MUTATION_FIELDS) if use_mutation else 0))
             if raw_dim == 0:
-                raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
+                raise ValueError(
+                    "use_age_sex=False이고 use_margin=False이고 use_staging=False이고 "
+                    "use_mutation=False면 clinical 입력이 없습니다."
+                )
             self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
             nn.init.zeros_(self.clinical_linear.weight)  # 초기엔 clinical 가산항 없는 것과 동일
 
@@ -169,6 +188,7 @@ class ViT_M4(ViT_M1):
         z_rna: torch.Tensor,
         stage_ord: dict[str, torch.Tensor] | None = None,
         margin_ord: torch.Tensor | None = None,  # self.use_margin=True일 때만 필요
+        mutation_ord: dict[str, torch.Tensor] | None = None,  # self.use_mutation=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,  # (1,) — self.use_attn_dispersion=True일 때만
     ) -> torch.Tensor:
         """
@@ -199,6 +219,8 @@ class ViT_M4(ViT_M1):
             clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
         if margin_ord is not None:
             clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
+        if mutation_ord is not None:
+            clinical_kwargs["mutation_ord"] = {k: v.unsqueeze(0) for k, v in mutation_ord.items()}
         z_clinical = self.clinical_encoder(
             age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
         ).squeeze(0)  # (D,)
@@ -209,7 +231,8 @@ class ViT_M4(ViT_M1):
 
     def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                          margin_ord: torch.Tensor | None = None,
-                         stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+                         stage_ord: dict[str, torch.Tensor] | None = None,
+                         mutation_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """combine_mode="cox_add" 전용 — models/vit_pma.py::ViT_PMA._clinical_embed와 동일 관례.
         2026-08-31: train.py::_patient_risk가 model._clinical_embed(...)로 호출하는데(공용
         dispatch, 이름이 vit_pma.py/vit_m2_pool.py/clinical_rna_only.py의 clinical cox_add
@@ -231,6 +254,15 @@ class ViT_M4(ViT_M1):
             for field in STAGE_FIELDS:
                 short = _STAGE_BUFFER_NAMES[field]
                 ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
+        if self.use_mutation:
+            for field in MUTATION_FIELDS:
+                short = _MUTATION_BUFFER_NAMES[field]
+                ordv = mutation_ord[field].float()
                 known = (ordv >= 0).float()
                 mean = getattr(self, f"{short}_mean")
                 std = getattr(self, f"{short}_std")

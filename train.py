@@ -47,6 +47,7 @@ from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, pathway_category_gene_ids, literature_guided_gene_ids_intersection,
+    pdac_consistency_gene_ids,
 )
 from data.patch_utils import (
     FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
@@ -59,7 +60,10 @@ from models import (
 )
 from models.rna_predictor import RNAPredictionHead
 from models.stage_predictor import StagePredictionHead
-from models.clinical_encoder import age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df, margin_stats_from_df
+from models.clinical_encoder import (
+    age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df, margin_stats_from_df,
+    MUTATION_FIELDS, mutation_stats_from_df,
+)
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss
@@ -103,6 +107,9 @@ def _identity_collate(batch: list) -> list:
 _BRANCH_ATTRS = {
     "clinical": ("clinical_encoder", "clinical_linear"),
     "rna": ("rna_encoder", "rna_linear"),
+    # 2026-09-03: --wsi-lr-mult용 — --sam-wsi-only가 이미 쓰던 WSI 브랜치 정의
+    # (_WSI_BRANCH_ATTRS, 아래 --sam-wsi-only 분기)와 동일한 attribute 목록을 재사용.
+    "wsi": ("cnn", "vit", "attn_pool", "multi_pool", "component_coattn", "dispersion_scale"),
 }
 
 
@@ -117,9 +124,9 @@ def _attn_entropy(p: torch.Tensor) -> torch.Tensor:
 
 
 def _branch_param_groups(model) -> dict[str, list]:
-    """모델 파라미터를 clinical/rna/other 3개 그룹으로 나눈다(각 브랜치가 없는 모델이면 해당
+    """모델 파라미터를 clinical/rna/wsi/other 4개 그룹으로 나눈다(각 브랜치가 없는 모델이면 해당
     리스트는 빈 리스트)."""
-    groups: dict[str, list] = {"clinical": [], "rna": [], "other": []}
+    groups: dict[str, list] = {"clinical": [], "rna": [], "wsi": [], "other": []}
     attr_to_key = {attr: key for key, attrs in _BRANCH_ATTRS.items() for attr in attrs}
     for name, p in model.named_parameters():
         if not p.requires_grad:
@@ -146,6 +153,15 @@ def _margin_ord_from_patient(patient_slides, device) -> torch.Tensor | None:
     if "margin_ord" not in p:
         return None
     return p["margin_ord"].to(device, non_blocking=True)
+
+
+def _mutation_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] | None:
+    """_stage_ord_from_patient과 동일한 관례의 mutation(--clinical-mutation) 버전 — with_mutation=True로
+    로드된 데이터셋이 아니면 None."""
+    p = patient_slides[0]
+    if MUTATION_FIELDS[0] not in p:
+        return None
+    return {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
 
 
 def _patient_risk(
@@ -332,6 +348,11 @@ def _patient_risk(
             # M4/M4A/M4B의 combine_with_clinical_rna는 이 kwarg 자체가 없으므로, patient_risk_stats가
             # None일 때(=PMA가 아니거나 use_tile_risk_head=False)는 아예 안 넘겨 TypeError를 피한다.
             extra_kwargs = {"risk_stats": patient_risk_stats} if patient_risk_stats is not None else {}
+            # 2026-09-03: mutation_ord도 risk_stats와 같은 이유(models/vit_m4.py::ViT_M4만
+            # combine_with_clinical_rna가 mutation_ord kwarg를 받는다 — M4A/M4B/PM4/PMA는 아직
+            # 없음)로 use_mutation=True인 모델(--M4 --clinical-mutation)에서만 넣는다.
+            if getattr(model, "use_mutation", False):
+                extra_kwargs["mutation_ord"] = _mutation_ord_from_patient(patient_slides, device)
             patient_embed = model.combine_with_clinical_rna(
                 patient_embed, age_years, sex_idx, z_rna, stage_ord=stage_ord, margin_ord=margin_ord,
                 spatial_feat=patient_spatial_feat, **extra_kwargs,
@@ -411,7 +432,15 @@ def _patient_risk(
             # models/vit_pma.py::ViT_PMA combine_mode="cox_add" — clinical은 위 patient_embed에
             # 안 섞여 있고(combine_with_clinical_rna가 concat 안 함), 여기서 고전적 Cox 가산항으로
             # 최종 risk 스칼라에 직접 더한다(models/clinical_rna_only.py::ClinicalRNAOnly와 동일 관례).
-            clin_embed = model._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord)
+            # 2026-09-03: mutation_ord도 combine_with_clinical_rna의 extra_kwargs와 동일한 이유로
+            # use_mutation=True인 모델(models/vit_m4.py::ViT_M4._clinical_embed만 이 kwarg를 받음)
+            # 에서만 넣는다 — 다른 cox_add 모델(PMA 등)의 _clinical_embed는 mutation_ord 자체가 없다.
+            clinical_embed_kwargs = (
+                {"mutation_ord": _mutation_ord_from_patient(patient_slides, device)}
+                if getattr(model, "use_mutation", False) else {}
+            )
+            clin_embed = model._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord,
+                                                **clinical_embed_kwargs)
             clinical_term = model.clinical_linear(clin_embed).view(1)
             if branch_risk_out is not None:
                 branch_risk_out["clinical"] = clinical_term
@@ -509,7 +538,10 @@ def train_one_epoch(
             sq = sum(p.grad.norm().item() ** 2 for p in params if p.grad is not None)
             return sq ** 0.5
 
-        ref_norm = _grad_norm(branch_groups["other"])
+        # 2026-09-03: --wsi-lr-mult 추가로 _branch_param_groups가 "wsi"를 "other"에서 분리해냈다
+        # (전엔 WSI(cnn/vit/attn_pool 등)가 "other"에 섞여 있었음) — 이 함수의 원래 의도("clinical/
+        # rna를 WSI+나머지 전체 기준으로 맞춘다")가 안 바뀌게 여기서 다시 합쳐서 기준으로 쓴다.
+        ref_norm = _grad_norm(branch_groups["other"] + branch_groups["wsi"])
         if ref_norm <= 0:
             return
         for key in ("clinical", "rna"):
@@ -554,7 +586,12 @@ def train_one_epoch(
             dominant_key = "other" if diff > 0 else "clinical"
             k = max(1.0 - math.tanh(ogm_ge_alpha * abs(diff)), 0.0)
 
-            dominant_params = branch_groups[dominant_key]
+            # 2026-09-03: ref_norm과 동일한 이유 — "other"가 더 이상 WSI를 포함하지 않으므로
+            # dominant_key=="other"(WSI 쪽이 우세)일 때는 "wsi"까지 합쳐서 억제한다.
+            dominant_params = (
+                branch_groups["other"] + branch_groups["wsi"] if dominant_key == "other"
+                else branch_groups[dominant_key]
+            )
             for p in dominant_params:
                 if p.grad is not None:
                     p.grad.mul_(k)
@@ -739,6 +776,8 @@ def _parse_args() -> argparse.Namespace:
             "literature_500_tcga_only", "literature_1000_tcga_only",
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
             "literature_fdr0.1_cptac_only", "literature_1500_intersection",
+            "pdac_consistency_500", "pdac_consistency_1000", "pdac_consistency_1500",
+            "pdac_consistency_2000",
         ],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
@@ -834,8 +873,17 @@ def _parse_args() -> argparse.Namespace:
              "켜면 model_prefix에 _RLR{배율}이 붙는다.",
     )
     parser.add_argument(
+        "--wsi-lr-mult", type=float, default=1.0,
+        help="2026-09-03: --clinical-lr-mult/--rna-lr-mult와 동일 관례, WSI 브랜치(cnn/vit/"
+             "attn_pool/multi_pool/component_coattn/dispersion_scale, --sam-wsi-only와 동일 "
+             "정의)에 적용. diagnose_m4_branch_gradients.py 실측 — RNA 인코더 gradient norm이 "
+             "WSI보다 30 epoch 내내 1.6~1.9배 컸다(RNA가 리딩 팩터, 사용자 확인) — RNA를 누르는 "
+             "대신 WSI/clinical 양쪽을 같이 끌어올려 경쟁력을 맞추는 시도. 켜면 model_prefix에 "
+             "_WLR{배율}이 붙는다.",
+    )
+    parser.add_argument(
         "--lr-mult-warmup-epochs", type=int, default=0,
-        help="2026-08-15: --clinical-lr-mult/--rna-lr-mult 전용. 배율을 학습 시작부터 목표값(예: "
+        help="2026-08-15: --clinical-lr-mult/--rna-lr-mult/--wsi-lr-mult 전용. 배율을 학습 시작부터 목표값(예: "
              "20배) 그대로 쓰는 대신, 이 epoch 수에 걸쳐 1.0배에서 목표 배율까지 선형으로 올린다. "
              "M4+RLR20 fold2/3 실측 — 20배를 처음부터 쓰면 rna_encoder가 1~2 epoch 만에 31명짜리 "
              "val set에 우연히 잘 맞는(하지만 불안정한) 지점으로 점프해버리고 그 뒤로 val이 단조 "
@@ -854,6 +902,15 @@ def _parse_args() -> argparse.Namespace:
         "--warm-start-rna", type=str, default=None,
         help="--warm-start-clinical과 동일 관례, RNAOnly(--M6) 체크포인트로 model.rna_encoder를 "
              "초기화한다.",
+    )
+    parser.add_argument(
+        "--freeze-rna", action="store_true",
+        help="2026-09-03: --warm-start-rna와 함께 사용 — rna_encoder를 M6 체크포인트로 초기화한 "
+             "뒤 requires_grad=False로 고정해, RNA를 (fine-tuning 없이) 고정 특징 추출기처럼만 "
+             "쓴다(사용자 제안: 'RNA branch를 백본처럼'). diagnose_m4_branch_gradients.py에서 "
+             "RNA gradient norm이 WSI보다 30 epoch 내내 1.6~1.9배 컸던 것 — RNA를 아예 안 건드리게 "
+             "고정하면 WSI/clinical이 RNA와 gradient 경쟁 없이 온전히 학습 신호를 받는지 검증. "
+             "--warm-start-rna 없이 쓰면 에러(무작위 초기화 상태로 고정하는 건 의미가 없음).",
     )
     parser.add_argument(
         "--auto-branch-balance", action="store_true",
@@ -978,6 +1035,23 @@ def _parse_args() -> argparse.Namespace:
         "--no-age-sex", action="store_true",
         help="train_light.py --no-age-sex와 동일 — --clinical-margin과 함께 사용, age/sex를 빼고 "
              "margin(/staging)만 입력으로 쓴다. 켜면 model_prefix에 _ONLY가 추가로 붙는다.",
+    )
+    parser.add_argument(
+        "--clinical-mutation", action="store_true",
+        help="train_light.py --clinical-mutation과 동일 — ClinicalEncoder 입력에 PDAC 4대 driver "
+             "gene mutation status(KRAS/TP53/SMAD4/CDKN2A, data/clinical_{tcga,cptac}.csv의 "
+             "{gene}_mut 컬럼, models/clinical_encoder.py::MUTATION_FIELDS)를 추가한다. "
+             "--clinical-staging/--clinical-margin과 별개 플래그 — 함께 켤 수 있다. 2026-09-03 "
+             "기준 --M4에서만 지원(models/vit_m4.py::ViT_M4). 켜면 wandb/checkpoint에 _MUT "
+             "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--use-cnv", action="store_true",
+        help="train_light.py --use-cnv와 동일 — data/extract_cnv.py 산출물(pathway8 163유전자 "
+             "범위 copy number, log2-ratio+z-score, 카테고리 8개 평균)을 RNA 브랜치 뒤에 "
+             "concat한다(data/dataset.py::WSISurvivalDataset(with_cnv=True), --rna-genes 종류와 "
+             "무관하게 항상 +8차원). --M4/--M6/--M6X 등 RNA를 쓰는 모델에서 사용 가능. 켜면 "
+             "wandb/checkpoint에 _CNV 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--drop-component", type=str, default=None, choices=["mean", "std", "attn", "top"],
@@ -1783,6 +1857,12 @@ def main():
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
             "--PMA/--M4A_FF/--M2_FF/--M5/--M2_POOL/--MCAT)에서만 사용 가능합니다."
         )
+    if args.clinical_mutation and not (args.M4 and not args.avgpool):
+        # 2026-09-03: models/vit_m4.py::ViT_M4(--M4, --avgpool 미사용)에만 use_mutation/
+        # mutation_stats를 이식했다 — 다른 combine_with_clinical_rna 계열(M4A/M4B/PM4/PMA)이나
+        # ViT_M4_AvgPool은 아직 지원 안 함(_patient_risk의 extra_kwargs["mutation_ord"] 조건부
+        # 배선 참조).
+        raise ValueError("--clinical-mutation은 2026-09-03 기준 --M4(--avgpool 미사용)에서만 사용 가능합니다.")
     if (args.rna_dim is not None or args.clinical_dim is not None) and not args.PMA:
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
     if args.rna_gate_only and not args.PMA:
@@ -1900,6 +1980,21 @@ def main():
     else:
         margin_stats = None
 
+    # [Mutation] --clinical-mutation(ClinicalEncoder 입력) — margin/staging과 동일한 관례
+    # (train_light.py --clinical-mutation과 동일).
+    if args.clinical_mutation:
+        import pandas as pd
+        if args.dataset == "both":
+            mutation_df = pd.concat([
+                pd.read_csv(CLINICAL_PATHS["tcga"]),
+                pd.read_csv(CLINICAL_PATHS["cptac"]),
+            ])
+        else:
+            mutation_df = pd.read_csv(CLINICAL_PATHS[args.dataset])
+        mutation_stats = mutation_stats_from_df(mutation_df)
+    else:
+        mutation_stats = None
+
     # [RNA] --M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X 시 RNAEncoder 입력 유전자셋을 --rna-genes로
     # 고른다 — 기본(subtype)은 Bailey/Moffitt subtype 분류용 ~340개, literature_{1000,1500,2000}은
     # data/select_rnaseq_genes.py 산출물(생존 예측에 직접 최적화된 유전자셋). WSISurvivalDataset에
@@ -1911,7 +2006,7 @@ def main():
         if args.rna_genes == "pathway8":
             rna_pathway_categories = pathway_category_gene_ids()
             rna_gene_ids  = None
-            rna_input_dim = len(rna_pathway_categories)
+            rna_input_dim = len(rna_pathway_categories) + (8 if args.use_cnv else 0)
         elif args.MCAT:
             # [MCAT] GeneGroupEncoder는 rna_gene_ids(개별 유전자 z-score 벡터, 1500개 그대로)와
             # gene_sets(카테고리→유전자ID 매핑)를 둘 다 필요로 한다 — pathway8처럼 미리
@@ -1931,16 +2026,22 @@ def main():
             # literature_guided_gene_ids(N)이 조용히 로드된다 — 반드시 여기서
             # single-cohort/FDR 로더로만 보낸다(data/dataset.py::resolve_tcga_only_rna_genes).
             rna_gene_ids  = resolve_tcga_only_rna_genes(args.rna_genes)
-            rna_input_dim = len(rna_gene_ids)
+            rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
         elif args.rna_genes.endswith("_intersection"):
             rna_gene_ids  = literature_guided_gene_ids_intersection(int(args.rna_genes.split("_")[1]))
-            rna_input_dim = len(rna_gene_ids)
+            rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
+        elif args.rna_genes.startswith("pdac_consistency_"):
+            # 2026-09-03: train_light.py --rna-genes pdac_consistency_{500,1000,1500,2000}과
+            # 동일 관례 이식 — data/select_rnaseq_genes_pdac_consistency.py 산출물(외부 5개 PDAC
+            # 마이크로어레이 데이터셋 교차분석 일관성 |rank| top-N, 우리 코호트/라벨 미참조).
+            rna_gene_ids  = pdac_consistency_gene_ids(int(args.rna_genes.rsplit("_", 1)[1]))
+            rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
         else:
             rna_gene_ids = (
                 pdac_subtype_gene_ids() if args.rna_genes == "subtype"
                 else literature_guided_gene_ids(int(args.rna_genes.split("_")[1]))
             )
-            rna_input_dim = len(rna_gene_ids)
+            rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
     else:
         rna_gene_ids = None
         rna_input_dim = None
@@ -2010,10 +2111,17 @@ def main():
     elif args.rna_genes.endswith("_intersection"):
         # _INT{n} = TCGA-only/CPTAC-only 순위 교집합(양방향 leakage-free) 사용 표시.
         model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes.startswith("pdac_consistency_"):
+        # _PDACCONS{N} = train_light.py와 동일 관례(JCI Insight 2025 5-데이터셋 교차분석
+        # 일관성 순위 top-N, 2026-09-03 이식) — literature_*(_EX) 계열과 절대 안 섞이게 별도 태그.
+        model_prefix += f"_PDACCONS{args.rna_genes.rsplit('_', 1)[1]}"
     elif args.rna_genes != "subtype":
         # _EX = literature_guided_gene_ids() 등 확장 유전자셋(레퍼런스 방식) 사용 표시.
         # wandb에서 기본(subtype, ~340개) run과 섞이지 않게 이름/그룹에 항상 붙인다.
         model_prefix += "_EX"
+    if args.use_cnv:
+        # _CNV = train_light.py와 동일 관례(data/extract_cnv.py 산출물 concat, 2026-09-03 이식).
+        model_prefix += "_CNV"
     if args.patch_keep_frac < 1.0:
         # _SS = PatchDropout(패치 서브샘플링) 사용 표시 - 위 _EX와 같은 관례.
         model_prefix += "_SS"
@@ -2033,6 +2141,9 @@ def main():
         model_prefix += "_R"
         if args.no_age_sex:
             model_prefix += "_ONLY"
+    if args.clinical_mutation:
+        # _MUT = train_light.py와 동일 관례(PDAC 4대 driver gene mutation status, 2026-09-03 이식).
+        model_prefix += "_MUT"
     if args.exclude_normal_slides:
         # _NONORMAL = 확인된 정상 조직 슬라이드만 제외(케이스당 나머지는 전부 유지) 표시.
         model_prefix += "_NONORMAL"
@@ -2123,12 +2234,16 @@ def main():
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     if args.rna_lr_mult != 1.0:
         model_prefix += f"_RLR{args.rna_lr_mult:g}"
+    if args.wsi_lr_mult != 1.0:
+        model_prefix += f"_WLR{args.wsi_lr_mult:g}"
     if args.lr_mult_warmup_epochs > 0:
         model_prefix += f"_LRMW{args.lr_mult_warmup_epochs}"
     if args.warm_start_clinical:
         model_prefix += "_WSCLIN"
     if args.warm_start_rna:
         model_prefix += "_WSRNA"
+    if args.freeze_rna:
+        model_prefix += "_FROZRNA"
     if args.auto_branch_balance:
         model_prefix += "_ABB"
     if args.ogm_ge_alpha is not None:
@@ -2261,7 +2376,8 @@ def main():
 
     ds_kwargs = dict(
         with_clinical=with_clinical, with_staging=with_staging, with_margin=args.clinical_margin,
-        with_rna=with_rna, feature_backbone=args.backbone,
+        with_mutation=args.clinical_mutation,
+        with_rna=with_rna, with_cnv=args.use_cnv, feature_backbone=args.backbone,
         rna_gene_ids=rna_gene_ids, rna_pathway_categories=rna_pathway_categories,
         one_slide_per_case=args.one_slide_per_case,
         exclude_normal_slides=args.exclude_normal_slides,
@@ -2380,6 +2496,9 @@ def main():
     # TypeError가 난다.
     margin_kwargs = dict(use_margin=args.clinical_margin, margin_stats=margin_stats,
                           use_age_sex=not args.no_age_sex)
+    # mutation_kwargs도 margin_kwargs와 같은 이유로 --M4(avgpool 제외)에만 명시적으로 넣는다
+    # (models/vit_m4.py::ViT_M4만 use_mutation/mutation_stats를 받음, 2026-09-03).
+    mutation_kwargs = dict(use_mutation=args.clinical_mutation, mutation_stats=mutation_stats)
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
     if args.M4 and args.avgpool:
@@ -2407,7 +2526,7 @@ def main():
                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                         coord_embed_shuffle=args.coord_embed_shuffle,
                         use_wsi_extra_mlp=args.wsi_extra_mlp,
-                        **stage_kwargs, **margin_kwargs).to(device)
+                        **stage_kwargs, **margin_kwargs, **mutation_kwargs).to(device)
     elif args.M4A:
         # 2026-08-11: margin(R)/combine_mode(cox_add)/attn_dispersion/skip_patch_vit 이식 —
         # patch-level co-attention(MCAT 스타일)을 지금의 최종 레시피와 공정하게 비교하기 위함
@@ -2697,6 +2816,14 @@ def main():
         sub_state = {k[len(prefix):]: v for k, v in ckpt["model_state_dict"].items() if k.startswith(prefix)}
         model.rna_encoder.load_state_dict(sub_state)
         print(f"rna_encoder warm-start: {args.warm_start_rna}")
+    if args.freeze_rna:
+        # 2026-09-03: RNA를 M6 사전학습 가중치로 고정해 "백본처럼" 쓴다(사용자 제안) — 이 파라미터들은
+        # requires_grad=False라 옵티마이저 생성(아래 _branch_param_groups 등)에서 자동으로 걸러진다.
+        if not args.warm_start_rna:
+            raise ValueError("--freeze-rna는 --warm-start-rna와 함께 써야 합니다(무작위 초기화 고정은 무의미).")
+        for p in model.rna_encoder.parameters():
+            p.requires_grad = False
+        print(f"rna_encoder frozen ({sum(p.numel() for p in model.rna_encoder.parameters()):,} params)")
 
     lr_mult_warmup_targets: list[tuple[int, float]] = []
     if args.sam and args.sam_wsi_only:
@@ -2719,7 +2846,7 @@ def main():
             torch.optim.AdamW, rho=args.sam_rho,
             lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
         )
-    elif args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0:
+    elif args.clinical_lr_mult != 1.0 or args.rna_lr_mult != 1.0 or args.wsi_lr_mult != 1.0:
         # 2026-08-15: scripts/diagnose_m2_branch_swap.py(fold1, 정상 학습된 체크포인트) 실측 —
         # M2 공동학습 후 clinical_encoder를 M5(clinical 단독)의 risk_head로 채점하면 M5 네이티브
         # 대비 internal -0.075/external -0.018로 떨어지는 반면, WSI 브랜치는 M1 네이티브 대비
@@ -2729,10 +2856,26 @@ def main():
         # 적용될 수 있어(M3/M4) --rna-lr-mult로 동일하게 지원 — 여러 브랜치를 동시에 다른
         # 배율로 올릴 수 있게 일반화(--sam-wsi-only와 동일 관례로 param_group 분리).
         branch_groups = _branch_param_groups(model)
-        param_groups = [{"params": branch_groups["other"], "lr": cfg.train.lr}]
+        # 2026-09-03: 심각한 기존 버그 발견 — mult==1.0인 브랜치는 아래 for 루프에서 그냥
+        # continue돼 어떤 param_group에도 안 들어갔다. clinical/rna/wsi가 전부 "other"와
+        # 분리된 별도 키라(_branch_param_groups), 예를 들어 --clinical-lr-mult만 켜고
+        # --rna-lr-mult/--wsi-lr-mult는 기본값(1.0)으로 두면 rna_encoder/wsi 파라미터가
+        # 옵티마이저에 아예 등록되지 않아 그 브랜치가 학습 내내 무작위 초기화 상태로 방치됐다
+        # (오늘 --clinical-lr-mult 5/10/20이 배율과 무관하게 전부 거의 동일하게 나쁜 external로
+        # 수렴한 게 이 버그 때문이었음 — rna_encoder가 셋 다 안 학습됐던 것). mult==1.0인
+        # 브랜치는 전부 base(그룹 lr) 쪽에 합쳐 넣어 "배율 1.0 = 평소처럼 학습"이 되게 고쳤다.
+        base_params = list(branch_groups["other"])
+        for key, mult in (
+            ("clinical", args.clinical_lr_mult), ("rna", args.rna_lr_mult), ("wsi", args.wsi_lr_mult),
+        ):
+            if mult == 1.0:
+                base_params += branch_groups[key]
+        param_groups = [{"params": base_params, "lr": cfg.train.lr}]
         # 2026-08-15: --lr-mult-warmup-epochs용 — 어느 param_group index가 어떤 배율을 목표로
         # 하는지 기억해 둔다(매 epoch 시작 시 실제 배율을 1.0->목표까지 선형으로 올리는 데 사용).
-        for key, mult in (("clinical", args.clinical_lr_mult), ("rna", args.rna_lr_mult)):
+        for key, mult in (
+            ("clinical", args.clinical_lr_mult), ("rna", args.rna_lr_mult), ("wsi", args.wsi_lr_mult),
+        ):
             if mult == 1.0:
                 continue
             if not branch_groups[key]:
@@ -2860,10 +3003,14 @@ def main():
         tag += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes.endswith("_intersection"):
         tag += f"_INT{args.rna_genes.split('_')[1]}"
+    elif args.rna_genes.startswith("pdac_consistency_"):
+        tag += f"_PDACCONS{args.rna_genes.rsplit('_', 1)[1]}"
     elif args.rna_genes != "subtype":
         # gene set이 다르면 같은 모델 종류라도 입력 차원이 달라 checkpoint가 호환되지 않는다 —
         # backbone 태그와 같은 이유로 파일명에 반드시 구분자를 남긴다.
         tag += "_EX"
+    if args.use_cnv:
+        tag += "_CNV"
     if args.patch_keep_frac < 1.0:
         tag += "_SS"
     if args.rna_aux_weight > 0:
@@ -2876,6 +3023,8 @@ def main():
         tag += "_R"
         if args.no_age_sex:
             tag += "_ONLY"
+    if args.clinical_mutation:
+        tag += "_MUT"
     if args.pretrained_wsi_trunk:
         # 이게 없으면 같은 레시피를 --pretrained-wsi-trunk 유무만 다르게 동시에 돌릴 때
         # 두 프로세스가 같은 checkpoint 파일을 공유해(경합 상태) best checkpoint를 서로

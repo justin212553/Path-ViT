@@ -96,6 +96,12 @@ RNA_PATHS = {
     "tcga":  Path("data/rna_tcga.csv"),
     "cptac": Path("data/rna_cptac.csv"),
 }
+# data/extract_rna_porpoise_official.py 산출물 — PORPOISE 공식 저장소가 배포한 TCGA-PAAD RNA-seq
+# 값(1553유전자, 이미 z-score됨) 그대로. 원 논문이 CPTAC-PDA를 다룬 적이 없어 "cptac" 키가 없다 —
+# --dataset tcga(external 아님, 내부 5-fold CV 전용)로만 쓸 수 있다.
+RNA_PATHS_PORPOISE_OFFICIAL = {
+    "tcga": Path("data/rna_tcga_porpoise_official.csv"),
+}
 # data/extract_cnv.py 산출물 — pathway8(163유전자) 범위 카피수 변이, raw 정수(정상=2). RNA와
 # 달리 미리 z-score된 버전을 따로 저장해두지 않아서(2026-09-03 신규 추가) 여기서 즉석으로
 # log2-ratio + z-score를 계산한다(cnv_pathway_category_features 참조).
@@ -112,6 +118,94 @@ RNA_PURIST_PATHS = {
 COMMON_GENES_PATH         = Path("data/common_genes.csv")
 BAILEY_SUBTYPE_GENES_PATH  = Path("data/bailey_subtype_genes.tsv")
 MOFFITT_SUBTYPE_GENES_PATH = Path("data/moffitt_subtype_genes.tsv")
+# sota/PORPOISE(공식 저장소, mahmoodlab/PORPOISE)가 자체 전처리 노트북
+# (datasets_csv/Preprocessing.ipynb)에서 RNA/CNV/mutation 피처를 고르는 데 쓰는 6개 범용
+# gene family 목록(암종 무관, Tumor Suppressor/Oncogene/Kinase/Differentiation Marker/
+# Transcription Factor/Cytokine-Growth Factor) — 원문 그대로 재사용.
+PORPOISE_SIGNATURES_PATH  = Path("sota/PORPOISE/datasets_csv/signatures.csv")
+
+
+@lru_cache(maxsize=1)
+def porpoise_signature_gene_ids() -> list[str]:
+    """
+    pdac_subtype_gene_ids()와 정확히 같은 패턴(고정 문헌 목록 -> common_genes.csv로 ENSG 매핑,
+    생존 라벨 미참조라 leakage 없음)이지만, 목록 출처가 PDAC 특이적 문헌이 아니라 PORPOISE
+    자체가 14개 암종에 공용으로 쓰는 6개 gene family(PORPOISE_SIGNATURES_PATH)다.
+
+    2026-09-03: "PORPOISE의 0.653이 우리보다 나은 RNA 큐레이션 덕인가, 아키텍처 덕인가"를
+    갈라보기 위해 추가 — 이 유전자셋을 우리 M7에 그대로 먹여서 pathway8/variance_1500과
+    비교한다(사용자 지시, --rna-genes porpoise_sig). PDAC 특이 지식 없이 범용 기능
+    카테고리로만 고른 목록이라 우리 pathway8(8개 PDAC 특이 카테고리)과 철학적으로 대비된다.
+    """
+    signatures = pd.read_csv(PORPOISE_SIGNATURES_PATH)
+    symbols = pd.concat([signatures[col].dropna() for col in signatures.columns]).unique()
+
+    common_genes = pd.read_csv(COMMON_GENES_PATH).drop_duplicates(subset="gene_name", keep="first")
+    name_to_id   = common_genes.set_index("gene_name")["gene_id"]
+    gene_ids     = name_to_id.reindex(symbols).dropna().unique()
+    return sorted(gene_ids.tolist())
+
+
+@lru_cache(maxsize=1)
+def porpoise_official_gene_ids() -> list[str]:
+    """
+    porpoise_signature_gene_ids()의 대안 — 목록만 재사용하는 대신, PORPOISE 공식 저장소가 배포한
+    실제 발현값(RNA_PATHS_PORPOISE_OFFICIAL, data/extract_rna_porpoise_official.py 산출물)의
+    컬럼을 그대로 반환한다. 우리 자체 RNA-seq 추출 파이프라인을 전혀 안 타므로(사용자 지적:
+    "같은 TCGA-PAAD인데 굳이 우리 유전자에 매핑할 필요가 있나 — 그냥 PORPOISE 값 그대로 쓰자"),
+    유전자 수가 정확히 원 논문의 1553개와 같다(porpoise_sig의 2951개는 signatures.csv 목록을
+    우리 common_genes.csv로 재매핑해서 더 컸음).
+    """
+    df = pd.read_csv(RNA_PATHS_PORPOISE_OFFICIAL["tcga"], nrows=0)
+    return [c for c in df.columns if c != "case_id"]
+
+
+@lru_cache(maxsize=None)
+def pdac_consistency_gene_ids(top_n: int) -> list[str]:
+    """
+    data/select_rnaseq_genes_pdac_consistency.py 산출물 로더 — porpoise_sig(암종 무관 범용
+    6카테고리)의 대안으로, "완전히 객관적이면서 PDAC 특화"인 큰 유전자 패널이 필요하다는 사용자
+    요구 반영(findings_backlog.md 2026-09-03). JCI Insight(2025) 논문이 PDAC 마이크로어레이
+    데이터셋 5개를 교차분석해 만든 cross-dataset 일관성 순위(우리 TCGA/CPTAC 코호트 전혀 미참조,
+    통계도 라벨도 우리 데이터에서 계산하지 않음) 기준 top-N. variance_gene_ids_single_cohort와
+    달리 단일 코호트 분산이 아니라 외부 5개 독립 데이터셋의 합의를 쓴다는 게 핵심 차이.
+    """
+    path = Path(f"data/rna_gene_selection_pdac_consistency/selected_genes_top_{top_n}.csv")
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes_pdac_consistency --n-genes {top_n}"
+        )
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
+@lru_cache(maxsize=1)
+def pdac_consistency_all5_gene_ids() -> list[str]:
+    """
+    pdac_consistency_gene_ids()보다 엄격한 버전 — CUG/CDG 판정 기준(5개 중 4개 일관)이 아니라
+    5개 데이터셋 **전부**에서 adj.P.Val<0.05 + logFC 방향까지 전부 일관된 유전자만(1730개 심볼,
+    ENSG 매핑 1680개). data/select_rnaseq_genes_pdac_consistency.py::load_all5_consistent_symbols
+    산출물. 2026-09-03: 사용자 요청 — "|Rank| top-1500"으로 인위적 개수를 맞추는 대신, 자연스럽게
+    나오는 개수를 그대로 쓰는 쪽.
+    """
+    path = Path("data/rna_gene_selection_pdac_consistency/selected_genes_all5consistent.csv")
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes_pdac_consistency")
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
+
+
+@lru_cache(maxsize=1)
+def pdac_consistency_all5_pluslit_gene_ids() -> list[str]:
+    """
+    pdac_consistency_all5_gene_ids()(1680개)에 우리 기존 PDAC 특화 문헌 세트(Bailey 2016 +
+    Moffitt 2015 + pathway8 8카테고리, 합집합 815 심볼)를 합친 버전(합집합 2167개, ENSG 매핑
+    기준). 두 소스가 겹치는 게 158개뿐이라(서로 다른 방법론 — 하나는 5개 마이크로어레이의
+    교차재현성, 다른 하나는 PDAC subtype/driver 분류 문헌) 합쳐도 중복이 크지 않다. 2026-09-03
+    사용자 요청.
+    """
+    path = Path("data/rna_gene_selection_pdac_consistency/selected_genes_all5consistent_pluslit.csv")
+    if not path.exists():
+        raise FileNotFoundError(f"{path} 없음 — 먼저 실행: python -m data.select_rnaseq_genes_pdac_consistency")
+    return sorted(pd.read_csv(path)["gene_id"].tolist())
 
 
 @lru_cache(maxsize=1)
@@ -765,6 +859,7 @@ class WSISurvivalDataset(Dataset):
         rna_gene_ids: list[str] | None = None,
         rna_pathway_categories: dict[str, list[str]] | None = None,
         rna_purist: bool = False,
+        rna_use_porpoise_official: bool = False,
         with_cnv: bool = False,
         restrict_case_ids: set[str] | None = None,
         one_slide_per_case: bool = False,
@@ -809,6 +904,7 @@ class WSISurvivalDataset(Dataset):
         self.rna_gene_ids     = rna_gene_ids
         self.rna_pathway_categories = rna_pathway_categories
         self.rna_purist       = rna_purist
+        self.rna_use_porpoise_official = rna_use_porpoise_official
         self.with_cnv         = with_cnv
         self.use_stage_stratify = use_stage_stratify
         self.use_leverage_stratify = use_leverage_stratify
@@ -896,7 +992,19 @@ class WSISurvivalDataset(Dataset):
                 self.rna_lookup.update(zip(purist_df["case_id"], rna_matrix))
                 merged = merged.merge(purist_df[["case_id"]], on="case_id", how="inner")
             elif with_rna:
-                rna_df = pd.read_csv(RNA_PATHS[name])
+                if self.rna_use_porpoise_official:
+                    # 2026-09-03 — 사용자 지적: PORPOISE의 signatures.csv "목록"만 우리 유전자에
+                    # 재매핑해서 쓰는 것(porpoise_sig)보다, 같은 TCGA-PAAD 코호트니까 PORPOISE가
+                    # 배포한 값 자체를 그대로 쓰는 게 "그들의 큐레이션이 진짜 더 나은가"를 검증하는
+                    # 데 더 정확하다. CPTAC 데이터가 없어(원 논문 미포함) --dataset tcga 전용.
+                    if name != "tcga":
+                        raise ValueError(
+                            "--rna-genes porpoise_official은 PORPOISE 공식 데이터에 CPTAC-PDA가 "
+                            "없어 --dataset tcga(external 아님, 내부 5-fold CV)로만 쓸 수 있습니다."
+                        )
+                    rna_df = pd.read_csv(RNA_PATHS_PORPOISE_OFFICIAL[name])
+                else:
+                    rna_df = pd.read_csv(RNA_PATHS[name])
                 if self.rna_pathway_categories is not None:
                     # --rna-genes pathway8: 개별 유전자가 아니라 카테고리 평균 z-score를 쓴다 —
                     # target_ids는 8개 카테고리에 속한 전체 유전자의 합집합.

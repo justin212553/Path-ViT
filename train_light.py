@@ -41,6 +41,8 @@ from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, literature_guided_gene_ids_single_cohort,
     literature_guided_gene_ids_intersection, pathway_category_gene_ids, pathway_flat_gene_ids,
+    porpoise_signature_gene_ids, porpoise_official_gene_ids, pdac_consistency_gene_ids,
+    pdac_consistency_all5_gene_ids, pdac_consistency_all5_pluslit_gene_ids,
 )
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
@@ -382,7 +384,9 @@ def _parse_args() -> argparse.Namespace:
             "literature_1500_intersection", "pathway8",
             "variance_100_tcga_only", "variance_250_tcga_only", "variance_500_tcga_only",
             "variance_1000_tcga_only", "variance_1500_tcga_only", "purist_pathway8",
-            "pathway8_flat",
+            "pathway8_flat", "porpoise_sig", "porpoise_official",
+            "pdac_consistency_500", "pdac_consistency_1000", "pdac_consistency_1500",
+            "pdac_consistency_2000", "pdac_consistency_all5", "pdac_consistency_all5_pluslit",
         ],
         help="RNA 브랜치(--M6/--M6X/--M7) 입력 유전자셋 선택. purist: data/compute_purist_subtype.py "
              "산출물(PurIST basal-like 확률, 1차원) — TCGA/CPTAC 어느 쪽에도 fit하지 않는 고정 "
@@ -703,6 +707,41 @@ def main():
         # rna_gene_ids 경로(평균 없이 개별 유전자 concat)를 그대로 탄다.
         rna_gene_ids = pathway_flat_gene_ids()
         rna_input_dim = len(rna_gene_ids)
+    elif with_rna and args.rna_genes == "porpoise_sig":
+        # 2026-09-03: PORPOISE 공식 6-gene-family 목록(암종 무관, pathway8과 대비되는 범용
+        # 큐레이션) 그대로 M7에 주입 — "PORPOISE가 우리보다 잘 나온 게 RNA 큐레이션 덕인지
+        # 아키텍처 덕인지" 갈라보는 진단용(사용자 지시). pathway8_flat과 동일하게 카테고리
+        # 평균 없이 개별 유전자 z-score 그대로 concat. 유전자 목록만 재사용하고 발현값은 우리
+        # 자체 파이프라인(data/rna_tcga.csv)으로 재계산 — porpoise_official(아래)과 대비.
+        rna_gene_ids = porpoise_signature_gene_ids()
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
+    elif with_rna and args.rna_genes == "porpoise_official":
+        # 2026-09-03: porpoise_sig과 달리 목록뿐 아니라 실제 발현값도 PORPOISE 공식 저장소가
+        # 배포한 것(RNA_PATHS_PORPOISE_OFFICIAL, 이미 z-score됨) 그대로 쓴다 — 같은 TCGA-PAAD
+        # 코호트인데 굳이 우리 파이프라인으로 재추출할 필요가 있냐는 사용자 지적 반영. 정확히
+        # 원 논문의 1553개 유전자. CPTAC 데이터가 없어 --dataset tcga(non-external) 전용
+        # (WSISurvivalDataset이 다른 조합이면 에러를 낸다).
+        rna_gene_ids = porpoise_official_gene_ids()
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
+    elif with_rna and args.rna_genes == "pdac_consistency_all5":
+        # 2026-09-03: pdac_consistency_top-N(|Rank| 기준 인위적 개수)보다 엄격한 버전 — 5개
+        # 데이터셋 "전부"에서 유의+방향일관인 유전자만 자연스럽게 나오는 개수 그대로(1680개).
+        rna_gene_ids = pdac_consistency_all5_gene_ids()
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
+    elif with_rna and args.rna_genes == "pdac_consistency_all5_pluslit":
+        # 2026-09-03: all5(1680개) + 우리 기존 PDAC 문헌 세트(Bailey+Moffitt+pathway8, 815
+        # 심볼) 합집합(2167개) — 서로 다른 방법론이라 겹침이 적어(158개) 상호보완적.
+        rna_gene_ids = pdac_consistency_all5_pluslit_gene_ids()
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
+    elif with_rna and args.rna_genes.startswith("pdac_consistency_"):
+        # 2026-09-03: porpoise_sig(암종 무관 범용 6카테고리)의 대안 — "완전히 객관적이면서
+        # PDAC 특화"인 큰 패널이 필요하다는 사용자 요구 반영. 외부 5개 PDAC 마이크로어레이
+        # 데이터셋 교차분석(JCI Insight 2025, data/select_rnaseq_genes_pdac_consistency.py)
+        # 순위 기준 top-N — 우리 코호트도 PORPOISE 카테고리도 전혀 참조하지 않는다. 우리 자체
+        # RNA 데이터(rna_tcga.csv/rna_cptac.csv)에 그대로 적용되므로 --dataset both/external
+        # 어느 조합이든 leakage 없이(라벨 미참조) 쓸 수 있다 — porpoise_official과 달리 CPTAC도 됨.
+        rna_gene_ids = pdac_consistency_gene_ids(int(args.rna_genes.rsplit("_", 1)[1]))
+        rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
     elif with_rna and args.rna_genes == "purist_pathway8":
         # 2026-09-03: PurIST(1차원, 고정 계수) + pathway8(8차원 카테고리 평균) 하이브리드 —
         # 둘 다 생존 라벨을 전혀 안 봐서(purist_top20_tcga_only와 달리 Cox 선택 유전자가 전혀
@@ -758,6 +797,24 @@ def main():
         # _PW8FLAT = pathway8과 같은 163개 유전자를 평균 없이 개별 z-score로(2026-09-03 추가) —
         # _PW8(8차원 평균)/_EX(leaky both-결합)와 절대 안 섞이게 별도 접미사.
         model_prefix += "_PW8FLAT"
+    elif args.rna_genes == "porpoise_sig":
+        # _PORPSIG = PORPOISE 공식 6-gene-family 목록(2026-09-03 추가, 사용자 지시) — pathway8
+        # 계열과 절대 안 섞이게 별도 접미사.
+        model_prefix += "_PORPSIG"
+    elif args.rna_genes == "porpoise_official":
+        # _PORPOFFICIAL = PORPOISE 공식 발현값 그대로(목록만이 아니라 값까지, 2026-09-03 추가) —
+        # _PORPSIG(목록만 재매핑)과 절대 안 섞이게 별도 접미사.
+        model_prefix += "_PORPOFFICIAL"
+    elif args.rna_genes == "pdac_consistency_all5":
+        # _PDACCONSALL5 = 5개 데이터셋 전부 유의+방향일관(1680개, 2026-09-03 추가).
+        model_prefix += "_PDACCONSALL5"
+    elif args.rna_genes == "pdac_consistency_all5_pluslit":
+        # _PDACCONSALL5LIT = all5 + 기존 PDAC 문헌 세트 합집합(2167개, 2026-09-03 추가).
+        model_prefix += "_PDACCONSALL5LIT"
+    elif args.rna_genes.startswith("pdac_consistency_"):
+        # _PDACCONS{N} = JCI Insight(2025) 5-데이터셋 교차분석 일관성 순위 top-N(2026-09-03
+        # 추가) — porpoise_sig/variance 계열과 절대 안 섞이게 별도 접미사.
+        model_prefix += f"_PDACCONS{args.rna_genes.rsplit('_', 1)[1]}"
     elif args.rna_genes == "purist_pathway8":
         # _DPW8 = PurIST(1차원) + pathway8(8차원) 하이브리드, 총 9차원 — 순수 _PW8(pathway8만)
         # 및 _D(purist만)와 파일명이 겹치면 안 되므로 별도 접미사(2026-09-03 추가).
@@ -911,6 +968,7 @@ def main():
                       with_mutation=args.clinical_mutation,
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
                       rna_pathway_categories=rna_pathway_categories, with_cnv=args.use_cnv,
+                      rna_use_porpoise_official=(args.rna_genes == "porpoise_official"),
                       restrict_case_ids=restrict_case_ids)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),

@@ -53,7 +53,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-genes", type=int, default=1500)
     parser.add_argument("--gene-selection", type=str, default="variance",
-                         choices=["variance", "cox", "literature", "literature_categorized"],
+                         choices=["variance", "cox", "literature", "literature_categorized", "consistency"],
                          help="2026-09-02: 'variance'(기본, scripts/select_brca_rna_genes.py의 "
                               "고분산 상위 N개, data/brca_rna_gene_selection/) 또는 "
                               "'cox'(scripts/select_brca_rna_genes_cox.py의 생존 라벨 기반 "
@@ -62,7 +62,10 @@ def main():
                               "'literature'(scripts/select_brca_rna_genes_literature.py, PAM50+"
                               "Oncotype DX 60유전자, 생존 라벨 완전 미사용 — PAAD의 pathway8과 "
                               "동일한 설계 원칙) 추가 — --n-genes/--fdr-threshold 둘 다 무시하고 "
-                              "고정 60개를 그대로 씀.")
+                              "고정 60개를 그대로 씀. 2026-09-04: 'consistency'(Győrffy 2021 "
+                              "55-데이터셋 생존분석 + 기존 BRCA 문헌 + PDAC core_driver 재사용, "
+                              "882유전자, scripts/select_brca_rna_genes_consistency.py — 우리 "
+                              "코호트/라벨 완전 미참조, PDAC의 pdac_consistency_1500과 동일 철학) 추가.")
     parser.add_argument("--fdr-threshold", type=float, default=None,
                          help="2026-09-02: --gene-selection cox와 함께 주어지면 top-N(--n-genes) "
                               "대신 scripts/select_brca_rna_genes_cox.py --fdr-threshold가 만든 "
@@ -117,6 +120,11 @@ def main():
             raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
         gene_path = Path("data/brca_rna_gene_selection_literature/selected_genes.csv")
         select_hint = "python -m scripts.select_brca_rna_genes_literature"
+    elif args.gene_selection == "consistency":
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_path = Path("data/brca_rna_gene_selection_consistency/selected_genes.csv")
+        select_hint = "python -m scripts.select_brca_rna_genes_consistency"
     else:
         gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
         if args.fdr_threshold is not None:
@@ -164,6 +172,8 @@ def main():
         # 기질/basal-EMT/저산소증)를 보강해 165개로 늘어남 — 하드코딩 대신 실제 유전자 수를
         # 태그에 그대로 반영해 이후 또 늘려도 파일명이 안 깨지게 한다.
         gene_tag = f"LIT{rna_input_dim}"
+    elif args.gene_selection == "consistency":
+        gene_tag = f"CONS{rna_input_dim}"
     elif args.fdr_threshold is not None:
         gene_tag = f"FDR{args.fdr_threshold:g}"
     else:
