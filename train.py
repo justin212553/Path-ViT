@@ -1382,6 +1382,42 @@ def _parse_args() -> argparse.Namespace:
              "켜면 wandb/checkpoint에 _LEARNTAU 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--fix-nystrom-landmarks", action="store_true",
+        help="2026-09-05: nystrom_attention 라이브러리의 알려진 결함(findings_backlog.md, "
+             "config.py 주석) — 패치 수 n < num_landmarks(기본 128)면 라이브러리가 (128-n)개 "
+             "zero 토큰을 F.pad로 채워 landmark에 섞어 넣는다(슬라이드 절반 이상이 이 경우, "
+             "실측 중앙값 67). 라이브러리 코드는 안 건드리고, 매 forward 직전 "
+             "self.attn.num_landmarks를 min(설정값, 실제 패치 수)로 clamp해서 우회한다"
+             "(cfg.model.fix_nystrom_landmarks=True, models/vit_encoder.py::NystromEncoderLayer)."
+             " --use-nystrom(기본값)에서만 의미 있음 — rel-bias/knn 계열 attention에는 영향 없음. "
+             "켜면 wandb/checkpoint에 _NYSTROMFIX 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--knn-mean-agg", action="store_true",
+        help="2026-09-05: '패치끼리 정보를 교환하되 attention/O(N^2) 없이' — kNN 이웃 k개(--knn-k)를 "
+             "attention 가중치 없이 단순 평균(GraphSAGE mean-aggregator)해 자기 자신과 concat 후 "
+             "선형변환(models/vit_encoder.py::KNNMeanAggregation, cfg.model.use_knn_mean_agg=True, "
+             "use_nystrom/use_spatial_embed 자동 False). --rel-bias-attention이 A30(24GB)에서도 "
+             "OOM난 뒤 시도하는 저메모리 대안 — attention logit/softmax 자체가 없어 메모리가 "
+             "O(엣지 수)로 dense(O(N^2))보다 훨씬 가볍다. 켜면 wandb/checkpoint에 _KNNMEANAGG "
+             "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--cluster-attn", action="store_true",
+        help="2026-09-05: '패치끼리 정보를 교환하되 O(N^2) 없이' 두 번째 대안 — 패치 N개를 "
+             "K개(--n-clusters, 기본 16) 학습 가능한 클러스터 프로토타입에 소프트 배정해 "
+             "슈퍼토큰으로 압축한 뒤, 그 K개끼리만 dense full self-attention(K가 작아 O(K^2)이 "
+             "사실상 공짜)을 돌리고 같은 배정 가중치로 결과를 다시 각 패치에 broadcast한다"
+             "(models/vit_encoder.py::HierarchicalClusterAttention, cfg.model.use_cluster_attn=True, "
+             "use_nystrom/use_spatial_embed 자동 False). Slot Attention/Perceiver의 병목(bottleneck) "
+             "attention과 같은 발상 — 사전학습된 클러스터(K-means)를 재사용하지 않고 end-to-end로 "
+             "학습시킨다. 켜면 wandb/checkpoint에 _CLUSTERATTN{n_clusters} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--n-clusters", type=int, default=16,
+        help="--cluster-attn 사용 시 슈퍼토큰(클러스터 프로토타입) 개수(cfg.model.n_clusters, 기본 16).",
+    )
+    parser.add_argument(
         "--epochs", type=int, default=None,
         help="cfg.train.epochs(기본 30) 덮어쓰기 — 짧은 파일럿 실험용(예: 실시간 augmentation "
              "시간 확인, --epochs 10).",
@@ -1844,6 +1880,18 @@ def main():
         cfg.model.knn_bias_learnable_tau = args.learnable_tau
         cfg.model.use_nystrom = False
         cfg.model.use_spatial_embed = False
+    if args.fix_nystrom_landmarks:
+        cfg.model.fix_nystrom_landmarks = True
+    if args.knn_mean_agg:
+        cfg.model.use_knn_mean_agg = True
+        cfg.model.knn_attn_k = args.knn_k
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.cluster_attn:
+        cfg.model.use_cluster_attn = True
+        cfg.model.n_clusters = args.n_clusters
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
 
     if args.rna_snn and not args.M6:
         raise ValueError("--rna-snn은 현재 --M6(RNAOnly)에서만 배선돼 있습니다.")
@@ -2217,6 +2265,12 @@ def main():
         model_prefix += "_FIXEDBIAS"
         if args.learnable_tau:
             model_prefix += "_LEARNTAU"
+    if args.fix_nystrom_landmarks:
+        model_prefix += "_NYSTROMFIX"
+    if args.knn_mean_agg:
+        model_prefix += "_KNNMEANAGG"
+    if args.cluster_attn:
+        model_prefix += f"_CLUSTERATTN{args.n_clusters}"
     if args.pretrained_wsi_trunk:
         model_prefix += "_PRETRAINED"
     if args.combine_mode != "concat":
@@ -2366,6 +2420,10 @@ def main():
                 "attn_dispersion":       args.attn_dispersion,
                 "knn_fixed_bias_attention": args.knn_fixed_bias_attention,
                 "learnable_tau":         args.learnable_tau,
+                "fix_nystrom_landmarks": args.fix_nystrom_landmarks,
+                "knn_mean_agg":          args.knn_mean_agg,
+                "cluster_attn":          args.cluster_attn,
+                "n_clusters":            args.n_clusters,
                 "dataset":               args.dataset,
                 "external_dataset":      external_dataset,
             },

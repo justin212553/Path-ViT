@@ -170,6 +170,88 @@ class KNNBiasAttention(nn.Module):
         return out.unsqueeze(0)                             # (1, N, D)
 
 
+class KNNMeanAggregation(nn.Module):
+    """KNNBiasAttention/KNNFixedBiasAttention과 같은 kNN 그래프를 쓰지만, attention(softmax
+    가중치, q/k projection)을 아예 없애고 이웃 k개를 단순 평균(GraphSAGE mean-aggregator 스타일)
+    해서 자기 자신과 concat 후 선형변환한다 — "학습되는 attention 파라미터 자체가 작은 코호트
+    에서 과적합 유인"이라는 KNNFixedBiasAttention의 문제의식을 극단까지 밀어붙인 버전. bias조차
+    없고 순수 평균이라 학습 파라미터가 결합 MLP 하나뿐이다.
+
+    2026-09-05: "self-attention 말고 패치끼리 정보를 주고받는 다른 방법"(사용자 질문) 중 하나 —
+    RelativeBiasFullAttention이 A30(24GB)에서도 OOM났던 것과 달리, 이웃 집계는 attention
+    logit/softmax 없이 인덱스 합산(index_add_)만 쓰므로 메모리가 O(E)(엣지 수)로 훨씬 가볍다.
+    """
+
+    def __init__(self, dim: int, k: int = 8, edge_dropout: float = 0.2, dropout: float = 0.0):
+        super().__init__()
+        self.k = k
+        self.edge_dropout = edge_dropout
+        self.combine = nn.Sequential(
+            nn.Linear(dim * 2, dim), nn.GELU(), nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        """x: (1, N, D), coords: (N, 2) -> (1, N, D)"""
+        n = x.shape[1]
+        x0 = x[0]                                        # (N, D)
+        edge_index = knn_edges(coords, self.k)
+        if edge_index.shape[1] == 0:                      # 패치 1개뿐 — 이웃 없음
+            return x
+        if self.training and self.edge_dropout > 0:
+            keep = torch.rand(edge_index.shape[1], device=x.device) >= self.edge_dropout
+            if keep.any():
+                edge_index = edge_index[:, keep]
+        src, dst = edge_index[0], edge_index[1]            # src=쿼리(i), dst=이웃(j)
+
+        neighbor_sum = torch.zeros_like(x0)
+        neighbor_sum.index_add_(0, src, x0[dst])
+        neighbor_count = torch.zeros(n, device=x.device, dtype=x0.dtype)
+        neighbor_count.index_add_(0, src, torch.ones(edge_index.shape[1], device=x.device, dtype=x0.dtype))
+        neighbor_mean = neighbor_sum / neighbor_count.clamp_min(1.0).unsqueeze(-1)  # (N, D)
+
+        out = self.combine(torch.cat([x0, neighbor_mean], dim=-1))  # (N, D)
+        return out.unsqueeze(0)                             # (1, N, D)
+
+
+class HierarchicalClusterAttention(nn.Module):
+    """패치(N개, 수천~수만일 수 있음)를 K개(기본 16) 학습 가능한 클러스터 프로토타입에 먼저
+    소프트 배정해 슈퍼토큰으로 압축한 뒤(N -> K), 그 K개끼리만 dense full self-attention을
+    돌리고(K가 작아 O(K^2)이 사실상 공짜), 같은 배정 가중치로 그 결과를 다시 각 패치에
+    broadcast한다 — Slot Attention/Perceiver의 병목(bottleneck) attention과 같은 발상.
+    RelativeBiasFullAttention(dense, 전체 패치끼리 O(N^2))이 메모리를 못 감당하는 문제를,
+    "패치 수천 개가 서로 직접 다 보는" 대신 "미리 K개 대표로 압축한 뒤 그 대표들끼리만 다 보고,
+    그 결과를 다시 나눠준다"로 우회한다 — 원래 의도("패치들이 서로 정보를 교환해 거시적 구조를
+    합성")를 압축된 병목에서 수행하는 셈.
+
+    사전학습된 클러스터(예: data/cluster_centroids_uni2native.pt, K=10, raw 1536차원)는 재사용
+    하지 않는다 — 그 centroid는 이 레이어가 보는 embed_dim(64) 투영 공간과 차원이 달라 그대로
+    못 쓰고, 애초에 생존 예측과 무관한 기준(단순 K-means)으로 뽑힌 군집이라 이 태스크에 맞는
+    군집을 처음부터 end-to-end로 학습시키는 쪽이 더 원칙적이다.
+
+    2026-09-05: "self-attention 말고 패치끼리 정보를 주고받는 다른 방법"(사용자 질문) 중 하나.
+    """
+
+    def __init__(self, dim: int, heads: int, dropout: float, n_clusters: int = 16):
+        super().__init__()
+        self.n_clusters = n_clusters
+        self.prototypes = nn.Parameter(torch.randn(n_clusters, dim) * 0.02)
+        self.cluster_attn = nn.MultiheadAttention(dim, heads, dropout=dropout, batch_first=True)
+        self.out_proj = nn.Linear(dim, dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (1, N, D) -> (1, N, D)"""
+        x0 = x[0]                                                          # (N, D)
+        sim = x0 @ self.prototypes.T / (x0.shape[-1] ** 0.5)               # (N, K)
+        assign = sim.softmax(dim=-1)                                       # (N, K) — 패치별 소프트 배정
+        cluster_weight_sum = assign.sum(dim=0).clamp_min(1e-6)             # (K,)
+        super_tokens = (assign.T @ x0) / cluster_weight_sum.unsqueeze(-1)  # (K, D) — 패치 -> 슈퍼토큰
+        mixed, _ = self.cluster_attn(
+            super_tokens.unsqueeze(0), super_tokens.unsqueeze(0), super_tokens.unsqueeze(0), need_weights=False
+        )                                                                  # (1, K, D) — 슈퍼토큰끼리 full attn
+        out = assign @ mixed[0]                                            # (N, D) — 슈퍼토큰 -> 패치로 broadcast
+        return self.out_proj(out).unsqueeze(0)                            # (1, N, D)
+
+
 class HybridLocalGlobalAttention(nn.Module):
     """local(KNNBiasAttention) + global(NystromAttention)를 같은 레이어에서 계산해 더한다.
 
@@ -306,6 +388,10 @@ class NystromEncoderLayer(nn.Module):
         use_knn_bias_attn: bool = False,
         use_hybrid_attn: bool = False,
         use_knn_fixed_bias_attn: bool = False,
+        use_knn_mean_agg: bool = False,
+        use_cluster_attn: bool = False,
+        n_clusters: int = 16,
+        fix_nystrom_landmarks: bool = False,
         knn_k: int = 8,
         knn_edge_dropout: float = 0.2,
         knn_bias_tau: float = 50.0,
@@ -313,11 +399,15 @@ class NystromEncoderLayer(nn.Module):
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(embed_dim)
-        # use_rel_bias_attn/use_knn_bias_attn/use_hybrid_attn/use_knn_fixed_bias_attn이
-        # use_nystrom보다 우선한다(모델/ViT_M1.__init__이 배타적 조합을 강제) — dense(전체
-        # O(N^2), PAAD처럼 패치 수가 작을 때), sparse(kNN, BRCA처럼 패치 수가 많아 dense가
-        # OOM나는 경우), hybrid(kNN 국소 + Nystrom 전역을 병렬로 더함), knn_fixed_bias(kNN이되
-        # relative bias가 학습 없는 고정 거리 커널) 중 하나.
+        # use_rel_bias_attn/use_knn_bias_attn/use_hybrid_attn/use_knn_fixed_bias_attn/
+        # use_knn_mean_agg/use_cluster_attn이 use_nystrom보다 우선한다(모델/ViT_M1.__init__이
+        # 배타적 조합을 강제) — dense(전체 O(N^2), PAAD처럼 패치 수가 작을 때), sparse(kNN,
+        # BRCA처럼 패치 수가 많아 dense가 OOM나는 경우), hybrid(kNN 국소 + Nystrom 전역을
+        # 병렬로 더함), knn_fixed_bias(kNN이되 relative bias가 학습 없는 고정 거리 커널),
+        # knn_mean_agg(kNN이되 attention 자체를 없애고 단순 평균), cluster_attn(패치를 K개
+        # 학습형 슈퍼토큰으로 압축해 그 안에서만 dense attention) 중 하나.
+        self._fix_nystrom_landmarks = fix_nystrom_landmarks
+        self._configured_num_landmarks = num_landmarks
         if use_rel_bias_attn:
             self.attn = RelativeBiasFullAttention(embed_dim, num_heads, dropout)
         elif use_hybrid_attn:
@@ -331,6 +421,10 @@ class NystromEncoderLayer(nn.Module):
             )
         elif use_knn_bias_attn:
             self.attn = KNNBiasAttention(embed_dim, num_heads, dropout, k=knn_k, edge_dropout=knn_edge_dropout)
+        elif use_knn_mean_agg:
+            self.attn = KNNMeanAggregation(embed_dim, k=knn_k, edge_dropout=knn_edge_dropout, dropout=dropout)
+        elif use_cluster_attn:
+            self.attn = HierarchicalClusterAttention(embed_dim, num_heads, dropout, n_clusters=n_clusters)
         elif use_nystrom:
             self.attn = NystromAttention(
                 dim=embed_dim,
@@ -343,7 +437,8 @@ class NystromEncoderLayer(nn.Module):
             )
         else:
             self.attn = _FullSelfAttention(embed_dim, num_heads, dropout)
-        self.needs_coords = use_rel_bias_attn or use_knn_bias_attn or use_hybrid_attn or use_knn_fixed_bias_attn
+        self.needs_coords = (use_rel_bias_attn or use_knn_bias_attn or use_hybrid_attn
+                              or use_knn_fixed_bias_attn or use_knn_mean_agg)
         self.dropout1 = nn.Dropout(dropout)
 
         self.use_ffn = use_ffn
@@ -364,6 +459,14 @@ class NystromEncoderLayer(nn.Module):
         self, x: torch.Tensor, coords: torch.Tensor | None = None,
         context: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self._fix_nystrom_landmarks and isinstance(self.attn, NystromAttention):
+            # 2026-09-05: findings_backlog.md에서 이미 지적된 버그 — nystrom_attention 라이브러리는
+            # n<num_landmarks면 F.pad로 (num_landmarks-n)개 zero 토큰을 채워 넣어(nystrom_attention.py
+            # forward의 `remainder = n % m` 분기), 슬라이드 절반 이상(패치 수 중앙값 67 < landmark
+            # 128)에서 landmark의 상당수가 진짜 패치가 아니라 0벡터가 된다. self.attn.num_landmarks는
+            # forward마다 다시 읽히는 평범한 int라, 매 호출 직전에 실제 패치 수로 clamp하면 라이브러리
+            # 코드를 건드리지 않고도 이 특정 호출에서만 안전하게 고칠 수 있다.
+            self.attn.num_landmarks = min(self._configured_num_landmarks, x.shape[1])
         if self.needs_coords:
             attn_out = self.attn(self.norm1(x), coords)
         else:
@@ -398,6 +501,10 @@ class ViTEncoder(nn.Module):
         use_knn_bias_attn: bool = False,
         use_hybrid_attn: bool = False,
         use_knn_fixed_bias_attn: bool = False,
+        use_knn_mean_agg: bool = False,
+        use_cluster_attn: bool = False,
+        n_clusters: int = 16,
+        fix_nystrom_landmarks: bool = False,
         knn_k: int = 8,
         knn_edge_dropout: float = 0.2,
         knn_bias_tau: float = 50.0,
@@ -434,6 +541,10 @@ class ViTEncoder(nn.Module):
                 use_knn_bias_attn=use_knn_bias_attn,
                 use_hybrid_attn=use_hybrid_attn,
                 use_knn_fixed_bias_attn=use_knn_fixed_bias_attn,
+                use_knn_mean_agg=use_knn_mean_agg,
+                use_cluster_attn=use_cluster_attn,
+                n_clusters=n_clusters,
+                fix_nystrom_landmarks=fix_nystrom_landmarks,
                 knn_bias_learnable_tau=knn_bias_learnable_tau,
                 knn_k=knn_k,
                 knn_edge_dropout=knn_edge_dropout,

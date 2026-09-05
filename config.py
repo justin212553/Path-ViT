@@ -33,6 +33,22 @@ class ModelConfig:
     # (findings_backlog.md), 이 규모에서는 O(N^2)이 전혀 부담 없다는 점(N<=544)까지 확인하고
     # 일반 self-attention(nn.MultiheadAttention)으로 교체하는 옵션을 추가한다.
     use_nystrom:             bool  = True
+    # 2026-09-05: 위 버그(landmark가 실제 패치 수보다 많으면 zero-padding이 landmark로 섞여
+    # 들어감)를 라이브러리 코드는 안 건드리고 호출 직전 clamp로 고치는 옵션(train.py
+    # --fix-nystrom-landmarks, models/vit_encoder.py::NystromEncoderLayer.forward). 기본 False로
+    # 기존 동작(버그 있는 채) 유지 — 사용자가 "이게 진짜 문제였는지" 직접 A/B로 확인하길 원함.
+    fix_nystrom_landmarks:  bool  = False
+    # 2026-09-05: "self-attention 말고 패치끼리 정보를 주고받는 다른 방법"(사용자 질문) — dense
+    # full self-attention(RelativeBiasFullAttention)이 PAAD 규모에서도 OOM(A30 24GB조차 부족,
+    # cox_batch_size=16이라 패치 수 많은 슬라이드가 배치에 여럿 겹치면 N^2 텐서가 누적됨)이라
+    # 나온 두 가지 대안. 학습 파라미터/attention 자체를 없앤 kNN 평균 집계(GraphSAGE류,
+    # models/vit_encoder.py::KNNMeanAggregation, train.py --knn-mean-agg)와, 패치를 K개
+    # 학습형 슈퍼토큰으로 압축해 그 안에서만 dense attention을 돌리는 계층적 압축
+    # (models/vit_encoder.py::HierarchicalClusterAttention, train.py --cluster-attn/--n-clusters)
+    # 둘 다 메모리가 O(N)(엣지 수 또는 K개 슈퍼토큰)라 dense O(N^2)보다 훨씬 가볍다.
+    use_knn_mean_agg:       bool  = False
+    use_cluster_attn:       bool  = False
+    n_clusters:              int   = 16
     # 2026-07-22: attention이 이미 uniform으로 붕괴한 상태에서 좌표 임베딩이 실제로 기여하는지
     # 직접 검증(findings_backlog.md, train.py --no-spatial-embed).
     use_spatial_embed:       bool  = True
