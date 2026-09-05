@@ -305,7 +305,8 @@ def _patient_risk(
         patient_risk_stats = torch.stack(slide_risk_stats).mean(dim=0) if slide_risk_stats else None
 
         patient_meanpool = None
-        if slide_meanpool_embeds and (hasattr(model, "rna_aux_head") or hasattr(model, "stage_aux_head")):
+        if slide_meanpool_embeds and (hasattr(model, "rna_aux_head") or hasattr(model, "stage_aux_head")
+                                       or hasattr(model, "clinical_aux_head")):
             patient_meanpool = torch.stack(slide_meanpool_embeds).mean(dim=0)  # (D,) — RNA/clinical-free
 
         aux_loss = None
@@ -319,6 +320,20 @@ def _patient_risk(
             stage_aux_loss = model.stage_aux_head.loss(
                 patient_meanpool, stage_ord["ajcc_t"], stage_ord["tumor_grade"]
             )
+
+        # 2026-09-04: models/clinical_aux_classifier.py::ClinicalAuxClassifier(scripts/experiment_
+        # cptac_clinical_aux.py 전용) — stage_aux_head와 같은 원리지만 CPTAC 전용 라벨(PNI/면역
+        # 침윤)까지 필요해 이 함수가 모르는 값이다. branch_risk_out을 입력 side-channel로도 써서
+        # (기존엔 출력 전용) 호출부가 미리 채워둔 pni_ord/immune_ord를 여기서 읽는다 — 둘 다 없으면
+        # (branch_risk_out 자체가 없거나, 이 모델이 clinical_aux_head가 없으면) 완전히 비활성.
+        if hasattr(model, "clinical_aux_head") and patient_meanpool is not None and branch_risk_out is not None:
+            pni_ord = branch_risk_out.get("pni_ord")
+            immune_ord = branch_risk_out.get("immune_ord")
+            if pni_ord is not None and immune_ord is not None:
+                stage_ord = _stage_ord_from_patient(patient_slides, device)
+                branch_risk_out["clinical_aux_loss"] = model.clinical_aux_head.loss(
+                    patient_meanpool, stage_ord["ajcc_t"], pni_ord, immune_ord
+                )
 
         if hasattr(model, "combine_with_clinical_rna"):
             age_years = patient_slides[0]["age_years"].to(device, non_blocking=True)

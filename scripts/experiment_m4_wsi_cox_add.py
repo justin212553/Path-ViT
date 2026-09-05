@@ -41,6 +41,7 @@ from utils.losses import cox_ph_loss
 from train import (
     _patient_risk, _build_scheduler, _identity_collate, _make_amp_ctx, evaluate,
     _stage_ord_from_patient, _margin_ord_from_patient, _mutation_ord_from_patient,
+    _branch_param_groups,
 )
 
 
@@ -74,6 +75,13 @@ def main():
     parser.add_argument("--fold", type=int, default=0)
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="2026-09-04: train.py --clinical-lr-mult 이식 — 지금까지 M4에서 "
+                              "가장 잘 나온 개입(CLR100)을 WSI-split 구조 위에도 얹어보기 위함 "
+                              "(사용자 지시). --lr-mult-warmup-epochs와 함께 써야 안전.")
+    parser.add_argument("--lr-mult-warmup-epochs", type=int, default=0,
+                         help="train.py --lr-mult-warmup-epochs와 동일 — clinical-lr-mult를 "
+                              "1.0배에서 목표 배율까지 이 epoch 수에 걸쳐 선형으로 올린다.")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -120,7 +128,21 @@ def main():
     # risk_head(단일 2D->1 선형)를 WSI/RNA 독립 가산항으로 교체 — 다른 배선은 전혀 안 바꾼다.
     model.risk_head = SplitAdditiveHead(cfg.model.embed_dim).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
+    # 2026-09-04: train.py의 (버그 수정된) --clinical-lr-mult 로직 그대로 이식. risk_head는
+    # SplitAdditiveHead로 교체됐지만 _BRANCH_ATTRS 어디에도 안 걸려("other" 취급) — 원래
+    # ViT_M4의 risk_head도 마찬가지라 이 스크립트만의 특별 취급은 필요 없다.
+    lr_mult_warmup_targets: list[tuple[int, float]] = []
+    if args.clinical_lr_mult != 1.0:
+        branch_groups = _branch_param_groups(model)
+        base_params = list(branch_groups["other"]) + branch_groups["rna"] + branch_groups["wsi"]
+        param_groups = [{"params": base_params, "lr": cfg.train.lr}]
+        if not branch_groups["clinical"]:
+            raise ValueError("--clinical-lr-mult != 1.0인데 clinical 파라미터가 없는 모델입니다.")
+        param_groups.append({"params": branch_groups["clinical"], "lr": cfg.train.lr * args.clinical_lr_mult})
+        lr_mult_warmup_targets.append((len(param_groups) - 1, args.clinical_lr_mult))
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
     scheduler = _build_scheduler(optimizer, cfg)
     batch_size = cfg.train.cox_batch_size
     chunk_size = cfg.train.cnn_chunk_size
@@ -128,6 +150,12 @@ def main():
     best_val_c = -1.0
     best_state = None
     for epoch in range(args.epochs):
+        lr_now = optimizer.param_groups[0]["lr"]
+        if args.lr_mult_warmup_epochs > 0 and lr_mult_warmup_targets:
+            progress = min((epoch + 1) / args.lr_mult_warmup_epochs, 1.0)
+            for group_idx, target_mult in lr_mult_warmup_targets:
+                effective_mult = 1.0 + (target_mult - 1.0) * progress
+                optimizer.param_groups[group_idx]["lr"] = lr_now * effective_mult
         model.train()
         if hasattr(model, "cnn") and model.cnn.backbone is not None:
             model.cnn.backbone.eval()
@@ -181,6 +209,10 @@ def main():
     # 비교하기 위해, 같은 파일명 관례(train.py의 kfold_preds/external_preds 저장 형식)로
     # CSV를 남긴다. 태그에 _WSISPLIT을 붙여 baseline과 절대 안 섞이게 한다.
     model_tag = "M4_PDACCONS1500_CNV_STG_R_MUT_COX_ADD_WSISPLIT"
+    if args.clinical_lr_mult != 1.0:
+        model_tag += f"_CLR{int(args.clinical_lr_mult)}"
+    if args.lr_mult_warmup_epochs > 0:
+        model_tag += f"_LRMW{args.lr_mult_warmup_epochs}"
     import csv
     kfold_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
     kfold_dir.mkdir(parents=True, exist_ok=True)
