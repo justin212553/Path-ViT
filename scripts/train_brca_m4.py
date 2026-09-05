@@ -144,6 +144,12 @@ def main():
                               "메모리 문제가 없을 것으로 예상 — 이번이 그 가설의 실제 검증.")
     parser.add_argument("--n-clusters", type=int, default=16,
                          help="--cluster-attn 사용 시 슈퍼토큰(클러스터 프로토타입) 개수(기본 16).")
+    parser.add_argument("--early-stop-patience", type=int, default=None,
+                         help="train.py --early-stop-patience 이식 — best-val c_index가 이 patience "
+                              "(epoch 수)만큼 연속으로 갱신 안 되면 조기 종료. 2026-09-05: 2-layer "
+                              "Nystrom이 fold0/seed84에서 --epochs 30 끝까지도 best epoch=30(사실상 "
+                              "정체 구간이었지만)이었던 것을 보고, epoch 예산을 넉넉히(--epochs 200) "
+                              "주고 진짜 수렴 지점을 patience 기반으로 찾기 위함.")
     parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
                          help="train.py --clinical-lr-mult 이식 — clinical_encoder 파라미터그룹 lr을 "
                               "base lr의 이 배수로. PAAD에서 20x가 branch-competition을 해소한 효과가 "
@@ -315,6 +321,8 @@ def main():
         model_prefix += f"_CLUSTERATTN{args.n_clusters}"
     if args.num_transformer_layers is not None:
         model_prefix += f"_VITLAYERS{args.num_transformer_layers}"
+    if args.early_stop_patience is not None:
+        model_prefix += f"_ES{args.early_stop_patience}"
     if args.wsi_extra_mlp:
         model_prefix += "_XMLP"
     if args.clinical_lr_mult != 1.0:
@@ -385,6 +393,7 @@ def main():
     ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
     best_score, best_metrics = -1.0, {}
+    epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
         loss = train_one_epoch(
@@ -414,12 +423,20 @@ def main():
         if score > best_score:
             best_score = score
             best_metrics = {**metrics, "epoch": epoch + 1}
+            epochs_since_improve = 0
             torch.save({"model_state_dict": model.state_dict(), "epoch": epoch + 1, "val_c_index": best_score}, ckpt_path)
             print(f"  -> checkpoint saved (c_index={best_score:.4f}, HR={metrics['hr']:.3f}, "
                   f"log-rank p={metrics['log_rank_p']:.4f})")
             if WANDB_AVAILABLE:
                 wandb.run.summary["best_val_c_index"] = best_score
                 wandb.run.summary["best_epoch"] = epoch + 1
+        else:
+            epochs_since_improve += 1
+            if (args.early_stop_patience is not None
+                    and epochs_since_improve >= args.early_stop_patience):
+                print(f"  -> early stop: 최근 {epochs_since_improve} epoch 동안 val c_index 갱신 없음 "
+                      f"(best epoch {best_metrics.get('epoch', '-')}, best c_index={best_score:.4f})")
+                break
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])

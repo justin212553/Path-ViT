@@ -1152,6 +1152,21 @@ def main():
         )
         print(f"\n=== External Test ({external_dataset} 전체 코호트) ===")
         print(_log_line("external", external_metrics, external_td_auc))
+        # 2026-09-05: train.py와 동일한 gap — k-fold 모드(--fold/--n-folds, --full-train 아님)에서
+        # external 평가가 화면/wandb에만 남고 CSV로 저장이 안 되던 문제를 여기서도 고친다
+        # (train.py 3489행 부근에 적용한 것과 대칭).
+        if not args.full_train and args.fold is not None:
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                            external_metrics["times"], external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> external predictions saved: {pred_path}")
         if args.full_train:
             # 2026-09-02: --full-train은 checkpoint 저장 자체가 없어(위 969행 주석 — val이 없어
             # "best" 선택이 불가능) --eval-external-ckpt로 나중에 CSV를 다시 뽑을 방법이 없다.
