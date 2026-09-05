@@ -115,7 +115,29 @@ def main():
                               "67,268이라 dense(--rel-bias-attention)가 즉시 CUDA OOM나서 대신 이걸 "
                               "쓴다(use_nystrom/use_spatial_embed 자동 False).")
     parser.add_argument("--knn-k", type=int, default=8,
-                         help="--knn-bias-attention 사용 시 패치당 kNN 이웃 수(기본 8).")
+                         help="--knn-bias-attention/--knn-mean-agg 사용 시 패치당 kNN 이웃 수(기본 8).")
+    parser.add_argument("--fix-nystrom-landmarks", action="store_true",
+                         help="train.py --fix-nystrom-landmarks 이식 — n<num_landmarks(128)면 라이브러리가 "
+                              "zero-padding을 landmark에 섞어 넣는 결함을, 매 forward 직전 num_landmarks를 "
+                              "min(128, 실제 패치 수)로 clamp해 우회한다. 2026-09-05: BRCA는 슬라이드당 패치 "
+                              "수 중앙값이 10,309로 128을 항상 초과해 이 결함 자체가 거의 발생하지 않는다 — "
+                              "PAAD(중앙값 67 < 128, 결함이 실제로 발생)와 달리 BRCA에서는 이 플래그를 켜도 "
+                              "사실상 no-op에 가까울 것으로 예상됨(참고용으로만 남겨둠).")
+    parser.add_argument("--knn-mean-agg", action="store_true",
+                         help="train.py --knn-mean-agg 이식 — kNN 이웃 k개를 attention 없이 단순 평균"
+                              "(GraphSAGE류, models/vit_encoder.py::KNNMeanAggregation)해 결합한다"
+                              "(use_nystrom/use_spatial_embed 자동 False). --knn-bias-attention과 같은 "
+                              "kNN 그래프를 쓰지만 attention 파라미터(q/k/v/softmax) 자체가 없어 더 가볍다.")
+    parser.add_argument("--cluster-attn", action="store_true",
+                         help="train.py --cluster-attn 이식 — 패치 N개를 K개(--n-clusters) 학습형 클러스터 "
+                              "프로토타입으로 압축해 슈퍼토큰을 만들고, 그 K개끼리만 dense full self-attention "
+                              "(K가 작아 O(K^2)이 공짜)을 돌린 뒤 같은 배정 가중치로 패치에 broadcast한다"
+                              "(models/vit_encoder.py::HierarchicalClusterAttention, use_nystrom/"
+                              "use_spatial_embed 자동 False). N=67,268(BRCA 최대)에서도 O(N*K)라 "
+                              "RelativeBiasFullAttention(dense O(N^2), BRCA에서 이미 OOM 확인됨)과 달리 "
+                              "메모리 문제가 없을 것으로 예상 — 이번이 그 가설의 실제 검증.")
+    parser.add_argument("--n-clusters", type=int, default=16,
+                         help="--cluster-attn 사용 시 슈퍼토큰(클러스터 프로토타입) 개수(기본 16).")
     parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
                          help="train.py --clinical-lr-mult 이식 — clinical_encoder 파라미터그룹 lr을 "
                               "base lr의 이 배수로. PAAD에서 20x가 branch-competition을 해소한 효과가 "
@@ -158,6 +180,18 @@ def main():
     if args.knn_bias_attention:
         cfg.model.use_knn_bias_attn = True
         cfg.model.knn_attn_k = args.knn_k
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.fix_nystrom_landmarks:
+        cfg.model.fix_nystrom_landmarks = True
+    if args.knn_mean_agg:
+        cfg.model.use_knn_mean_agg = True
+        cfg.model.knn_attn_k = args.knn_k
+        cfg.model.use_nystrom = False
+        cfg.model.use_spatial_embed = False
+    if args.cluster_attn:
+        cfg.model.use_cluster_attn = True
+        cfg.model.n_clusters = args.n_clusters
         cfg.model.use_nystrom = False
         cfg.model.use_spatial_embed = False
     set_seed(cfg.train.seed)
@@ -265,6 +299,12 @@ def main():
         model_prefix += "_RELBIAS"
     if args.knn_bias_attention:
         model_prefix += "_KNNATTN"
+    if args.fix_nystrom_landmarks:
+        model_prefix += "_NYSTROMFIX"
+    if args.knn_mean_agg:
+        model_prefix += "_KNNMEANAGG"
+    if args.cluster_attn:
+        model_prefix += f"_CLUSTERATTN{args.n_clusters}"
     if args.wsi_extra_mlp:
         model_prefix += "_XMLP"
     if args.clinical_lr_mult != 1.0:
@@ -300,6 +340,10 @@ def main():
                 "use_spatial_embed": cfg.model.use_spatial_embed,
                 "use_rel_bias_attn": cfg.model.use_rel_bias_attn,
                 "use_knn_bias_attn": cfg.model.use_knn_bias_attn,
+                "fix_nystrom_landmarks": cfg.model.fix_nystrom_landmarks,
+                "use_knn_mean_agg": cfg.model.use_knn_mean_agg,
+                "use_cluster_attn": cfg.model.use_cluster_attn,
+                "n_clusters": cfg.model.n_clusters,
                 "wsi_extra_mlp": args.wsi_extra_mlp,
                 "clinical_lr_mult": args.clinical_lr_mult, "rna_lr_mult": args.rna_lr_mult,
                 "fold": args.fold, "n_folds": args.n_folds,
