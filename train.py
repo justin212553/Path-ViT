@@ -3498,6 +3498,22 @@ def main():
         ckpt_desc = "마지막 epoch 모델, full-train" if args.full_train else "best checkpoint"
         print(f"\n=== External Test 성능 ({external_dataset} 전체 코호트, {ckpt_desc}) ===")
         print(_log_line("external", external_metrics, external_td_auc))
+        # 2026-09-05: k-fold 모드(--fold/--n-folds, --full-train 아님)에서는 external 평가
+        # 결과가 화면/wandb에만 남고 CSV로 저장이 안 되던 gap — internal kfold_preds 저장(위
+        # 3459행 부근)과 대칭으로 여기서도 저장한다. pool_multiseed_external_preds.py가 찾는
+        # 파일명 규칙과 정확히 맞춰야 한다(scripts/experiment_*.py들이 이미 쓰던 관례와 동일).
+        if not args.full_train and args.fold is not None:
+            import csv
+            pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            pred_path = pred_dir / f"{external_dataset}_{model_prefix}_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(external_metrics["case_ids"], external_metrics["risks"],
+                                            external_metrics["times"], external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> external predictions saved: {pred_path}")
         if args.full_train:
             # 2026-09-02: --full-train은 checkpoint를 저장하지 않아(val이 없어 "best" 선택이
             # 불가능, torch.save가 위 3045행처럼 항상 val 분기 안에서만 호출됨) --eval-external-ckpt
