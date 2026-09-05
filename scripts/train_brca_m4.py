@@ -97,6 +97,12 @@ def main():
     parser.add_argument("--patch-keep-frac", type=float, default=0.8)
     parser.add_argument("--rna-aux-weight", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=None, help="cfg.train.epochs(기본 30) 덮어쓰기.")
+    parser.add_argument("--num-transformer-layers", type=int, default=None,
+                         help="cfg.model.num_transformer_layers(기본 1) 덮어쓰기. 2026-07-19: PAAD에서 "
+                              "2-layer(원래 TransMIL 관례)로 시도했다가 표본 대비 과적합으로 1-layer로 "
+                              "되돌린 전례(config.py 주석) — 2026-09-05, '레이어 1개라 다단계 거시구조 "
+                              "형성이 안 됐을 수 있다'는 가설을, 과적합 위험이 훨씬 낮은 BRCA(표본 7배)에서 "
+                              "2-layer로 재검증.")
     parser.add_argument("--no-spatial-embed", action="store_true",
                          help="train.py --no-spatial-embed와 동일 — SpatialPositionEmbedding(좌표 "
                               "sin/cos 인코딩)을 끈다. PAAD에서는 null이었지만 WSI 신호 자체가 "
@@ -171,6 +177,8 @@ def main():
     cfg.data.seed = cfg.train.seed = args.seed
     if args.epochs is not None:
         cfg.train.epochs = args.epochs
+    if args.num_transformer_layers is not None:
+        cfg.model.num_transformer_layers = args.num_transformer_layers
     if args.no_spatial_embed:
         cfg.model.use_spatial_embed = False
     if args.rel_bias_attention:
@@ -305,6 +313,8 @@ def main():
         model_prefix += "_KNNMEANAGG"
     if args.cluster_attn:
         model_prefix += f"_CLUSTERATTN{args.n_clusters}"
+    if args.num_transformer_layers is not None:
+        model_prefix += f"_VITLAYERS{args.num_transformer_layers}"
     if args.wsi_extra_mlp:
         model_prefix += "_XMLP"
     if args.clinical_lr_mult != 1.0:
