@@ -27,16 +27,32 @@ if str(_ROOT) not in sys.path:
 from utils.metrics import compute_survival_metrics
 
 
+def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> Path:
+    """model_prefix에 _FOLD{f}OF{n} 접미사가 붙는지 여부(train.py의 여러 조건부 접미사 순서를
+    손으로 재현하다 보면 붙는 자리를 놓치기 쉽다)와 무관하게, 접두사/접미사만 고정하고 그
+    사이는 와일드카드로 찾는다 — 정확한 model_prefix 문자열을 매번 손으로 완벽히 재현해야
+    하는 취약함을 없앤다."""
+    suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
+    matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"seed={seed} fold={fold}: '{dataset}_{model}*{suffix}' 패턴에 여러 파일이 걸림 "
+            f"(model 태그가 다른 실행과 접두사를 공유해 모호함) — {[p.name for p in matches]}"
+        )
+    # 못 찾았을 때: 같은 dataset+seed+fold의 다른 태그 파일이 있는지 보여줘서 "아예 안 돎"과
+    # "태그 문자열이 틀림"을 구분할 수 있게 한다.
+    nearby = sorted(pred_dir.glob(f"{dataset}_*{suffix}"))
+    hint = f" (같은 seed/fold의 다른 태그 후보: {[p.name for p in nearby]})" if nearby else " (같은 seed/fold 파일 자체가 없음 — 그 array task가 아직 안 끝났거나 실패했을 가능성)"
+    raise FileNotFoundError(f"seed={seed} fold={fold} 예측 파일을 못 찾음: {pred_dir}/{dataset}_{model}*{suffix}{hint}")
+
+
 def _load_seed_predictions(pred_dir: Path, dataset: str, model: str, seed: int, n_folds: int) -> dict:
     """seed 하나의 n_folds개 fold CSV를 모아 {case_id: (risk, OS_time, OS_event)}로 반환한다."""
     preds = {}
     for fold in range(n_folds):
-        path = pred_dir / f"{dataset}_{model}_FOLD{fold}OF{n_folds}_seed{seed}_fold{fold}of{n_folds}.csv"
-        if not path.exists():
-            # model_prefix 자체에 _FOLD{f}OF{n} 접미사가 이미 붙어 저장되므로 접미사 없는 이름도 시도
-            path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
-        if not path.exists():
-            raise FileNotFoundError(f"seed={seed} fold={fold} 예측 파일을 못 찾음: {path}")
+        path = _find_pred_path(pred_dir, dataset, model, seed, fold, n_folds)
         with open(path, newline="") as f:
             for row in csv.DictReader(f):
                 cid = row["case_id"]
