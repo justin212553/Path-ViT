@@ -88,6 +88,7 @@ class ViT_PORPOISE(ViT_M4):
         use_coattn: bool = False,
         num_heads: int = 4,
         attn_temperature: float = 1.0,
+        surv_n_classes: int = 1,
     ):
         if use_meanpool and use_coattn:
             raise ValueError("use_meanpool과 use_coattn은 동시에 켤 수 없습니다(attn_pool 자리가 하나뿐).")
@@ -123,11 +124,17 @@ class ViT_PORPOISE(ViT_M4):
 
         # ViT_M4.__init__이 만든 risk_head는 [z_wsi, z_rna] concat(2*embed_dim) 기준이라 여기선
         # 안 맞는다 — fusion 출력(mmhid) 기준으로 새로 만든다.
+        # surv_n_classes>1: train.py --surv-loss nll_surv(PORPOISE 원조 discretized-hazard NLL,
+        # utils/losses.py::nll_surv_loss) 전용 — 시간-구간별 raw hazard logit을 그대로 뱉는다.
+        # train.py::_patient_risk가 clinical/rna cox_add 스칼라 항을 더한 뒤(브로드캐스팅으로
+        # 각 구간에 동일하게 더해짐, PH 모델의 공변량 가산과 같은 원리) C-index 등 기존
+        # 스칼라 파이프라인용으로 utils/losses.py::hazard_to_risk를 거쳐 다시 스칼라로 변환한다
+        # — 기본값 1이면 기존 Cox 레시피와 완전히 동일(동작 변경 없음).
         spatial_feat_dim = 1 if use_attn_dispersion else 0
         risk_input_dim = cfg.embed_dim + spatial_feat_dim
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
-            nn.Linear(risk_input_dim, 1),
+            nn.Linear(risk_input_dim, surv_n_classes),
         )
 
     def combine_with_clinical_rna(
