@@ -1437,6 +1437,13 @@ def _parse_args() -> argparse.Namespace:
              "기본값(None)과 다르면 wandb/checkpoint에 _EMBDIM{embed_dim} 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--num-transformer-layers", type=int, default=None,
+        help="cfg.model.num_transformer_layers(기본 1) 덮어쓰기 — scripts/train_brca_m4.py의 "
+             "동명 플래그와 동일 관례(2026-07-19: PAAD에서 2-layer로 시도했다가 표본 대비 "
+             "과적합으로 1-layer로 되돌린 전례, config.py 주석 참조). 기본값(None)과 다르면 "
+             "wandb/checkpoint에 _VITLAYERS{num_transformer_layers} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--one-slide-per-case", action="store_true",
         help="케이스당 슬라이드를 대표 1장으로 줄인다(data/dataset.py::_select_representative_slide, "
              "findings_backlog.md 14번 항목). 기본은 미사용(케이스가 가진 슬라이드를 전부 사용하는 "
@@ -1601,6 +1608,40 @@ def _parse_args() -> argparse.Namespace:
              "자체를 안 만들고, RNA-query 가중합 대신 4개 pooling 관점의 단순 평균을 쓴다 — "
              "RNA가 4관점 중 뭘 볼지 고르는 게 실제로 도움되는지 검증. 켜면 wandb/checkpoint에 "
              "_NOCOATTN 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--cluster-pool", action="store_true",
+        help="2026-09-05: --PMA 전용 — Nystrom(oversmoothing 무죄로 확인)과 ABMIL(gradient가 "
+             "weight_decay 유무와 무관하게 전혀 안 닿는 dead module로 확인, scripts/"
+             "diagnose_abmil_attn_training.py) 둘 다 우회하는 대안. 학습 파라미터 없는 사전계산 "
+             "군집 중심(data/cluster_centroids_{backbone}.pt, K=10, raw feature 공간)으로 패치 "
+             "N개를 K개의 '슬라이드 내 실존 조직 유형' 대표값으로 미리 요약해, 기존 4-component "
+             "(mean/std/attn/top) 자리에 그대로 꽂아 RNA co-attention에 넘긴다(models/vit_pma.py "
+             "ViT_PMA.forward cluster_pool 분기). self.vit/self.attn_pool(MultiComponentPooling)은 "
+             "생성은 되지만 forward에서 안 쓰인다(파라미터 낭비는 있지만 나머지 코드 경로 호환 "
+             "유지). 켜면 wandb/checkpoint에 _CLUSTERPOOL 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--cluster-centroids-path", type=str, default=None,
+        help="2026-09-05: --cluster-pool 전용 — 기본(None)이면 data/cluster_centroids_{backbone}.pt. "
+             "K/적합 데이터셋을 바꿔가며 비교할 때(예: TCGA-only 재적합 vs 원래 tcga+cptac 적합) "
+             "다른 경로를 명시적으로 지정하기 위함.",
+    )
+    parser.add_argument(
+        "--cluster-pool-temperature", type=float, default=None,
+        help="2026-09-05: --cluster-pool 전용 — None(기본)이면 hard argmin(패치를 가장 가까운 "
+             "군집 1개에 확정 배정). 양수를 주면 -distance/T의 softmax로 모든 K개 군집에 부드럽게 "
+             "걸치는 가중평균을 쓴다(fuzzy c-means류, 경계에 걸친 패치의 정보 손실을 줄임). "
+             "raw feature 공간 거리 스케일 감(TCGA-only K=11 재적합 기준 RMS 거리 ~14) 참고해 "
+             "값을 잡을 것. 켜면 wandb/checkpoint에 _CLUSTERTEMP{T} 접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
+        "--cluster-pool-after-vit", action="store_true",
+        help="2026-09-05: --cluster-pool과 함께만 의미 있음 — 원본 PMA 구조에서 ABMIL'만' "
+             "cluster_pool로 교체(Nystrom은 그대로 살림). raw feature로 군집 배정은 그대로 "
+             "정하되, 그 군집별 평균을 raw feature가 아니라 self.vit(Nystrom)를 통과한 "
+             "ctx_tokens 위에서 계산한다 — 'Nystrom-클러스터풀-co-attention' 구조 검증용. "
+             "켜면 wandb/checkpoint에 _CLUSTERPOOLVIT 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
         "--no-clinical", action="store_true",
@@ -1851,6 +1892,8 @@ def main():
         cfg.model.dropout = args.dropout
     if args.embed_dim is not None:
         cfg.model.embed_dim = args.embed_dim
+    if args.num_transformer_layers is not None:
+        cfg.model.num_transformer_layers = args.num_transformer_layers
     if args.epochs is not None:
         cfg.train.epochs = args.epochs
     if args.full_attention:
@@ -2233,10 +2276,18 @@ def main():
         model_prefix += f"_CLINDIM{args.clinical_dim}"
     if args.embed_dim is not None:
         model_prefix += f"_EMBDIM{args.embed_dim}"
+    if args.num_transformer_layers is not None:
+        model_prefix += f"_VITLAYERS{args.num_transformer_layers}"
     if args.rna_gate_only:
         model_prefix += "_RNAGATE"
     if args.no_coattn:
         model_prefix += "_NOCOATTN"
+    if args.cluster_pool:
+        model_prefix += "_CLUSTERPOOL"
+    if args.cluster_pool_after_vit:
+        model_prefix += "_CLUSTERPOOLVIT"
+    if args.cluster_pool_temperature is not None:
+        model_prefix += f"_CLUSTERTEMP{args.cluster_pool_temperature:g}"
     if args.porpoise_meanpool:
         model_prefix += "_MEANPOOL"
     if args.porpoise_coattn:
@@ -2650,6 +2701,10 @@ def main():
                          coord_embed_shuffle=args.coord_embed_shuffle,
                          use_wsi_extra_mlp=args.wsi_extra_mlp,
                          use_coattn=not args.no_coattn,
+                         cluster_pool=args.cluster_pool,
+                         cluster_pool_after_vit=args.cluster_pool_after_vit,
+                         cluster_pool_temperature=args.cluster_pool_temperature,
+                         cluster_centroids_path=args.cluster_centroids_path,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,

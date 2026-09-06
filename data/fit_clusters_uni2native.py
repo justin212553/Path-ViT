@@ -115,7 +115,11 @@ def main():
                          help="슬라이드당 최대 샘플 patch 수(0=전체, 슬라이드당 평균 ~9600개라 "
                               "기본값 3000이면 전체의 ~31%%만 써도 k-means엔 충분).")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--out-path", type=str, default=None,
+                         help="2026-09-05: 기본(None)이면 OUT_PATH(data/cluster_centroids_uni2native.pt) "
+                              "덮어씀 — 재적합 버전끼리 비교할 때 다른 경로로 저장하기 위함.")
     args = parser.parse_args()
+    out_path = Path(args.out_path) if args.out_path else OUT_PATH
 
     datasets = args.datasets.split(",")
     start = datetime.now()
@@ -133,8 +137,8 @@ def main():
     print(f"\n[2/3] K={k} 최종 k-means 실행")
     centroids, km = _fit_kmeans(features, k, args.seed)
 
-    print(f"\n[3/3] 저장: {OUT_PATH}")
-    torch.save(torch.from_numpy(centroids), OUT_PATH)
+    print(f"\n[3/3] 저장: {out_path}")
+    torch.save(torch.from_numpy(centroids), out_path)
 
     # 군집별 patch 비율(대략적인 크기 감) — exemplar 추출 전에도 "이 군집이 흔한지 희귀한지" 참고용
     labels_all = km.labels_
@@ -142,7 +146,8 @@ def main():
     print(f"  군집별 patch 수(샘플 {len(labels_all):,}개 기준): {sizes.tolist()}")
     print(f"  군집별 비율: {(sizes / sizes.sum() * 100).round(1).tolist()}%")
 
-    torch.save({"k": k, "sizes": sizes.tolist(), "n_slides": len(slide_meta), "datasets": datasets}, OUT_META_PATH)
+    meta_path = out_path.with_name(out_path.stem + "_meta.pt")
+    torch.save({"k": k, "sizes": sizes.tolist(), "n_slides": len(slide_meta), "datasets": datasets}, meta_path)
 
     elapsed = datetime.now() - start
     print(f"\n완료 — 소요 시간: {elapsed}")

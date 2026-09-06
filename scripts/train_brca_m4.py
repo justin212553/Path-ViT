@@ -159,6 +159,27 @@ def main():
     parser.add_argument("--wsi-extra-mlp", action="store_true",
                          help="train.py --wsi-extra-mlp 이식(models/vit_m1.py::ViT_M1, ViT_PMA가 상속) "
                               "— patch_tokens에 잔차 MLP 한 층 추가.")
+    parser.add_argument("--cluster-pool", action="store_true",
+                         help="train.py --cluster-pool 이식(models/vit_pma.py ViT_PMA) — 2026-09-05 "
+                              "PAAD에서 Nystrom(oversmoothing 무죄로 확인)/ABMIL(gradient가 전혀 안 "
+                              "닿는 dead module로 확인) 둘 다 우회하고 raw feature 공간 unsupervised "
+                              "군집(K개) 대표 토큰을 RNA co-attention에 바로 넘겨 M7과 통계적으로 "
+                              "동등한 수준까지 WSI의 '해로움'을 없앤 구조 — BRCA(N=1058, PAAD의 "
+                              "~10배라 WSI 기여 유의성 검정력이 훨씬 큼)에서 재검증. backbone='uni'라 "
+                              "PAAD의 uni2native centroids를 못 쓰고 data/fit_clusters_brca_uni.py로 "
+                              "따로 적합한 data/cluster_centroids_brca_uni.pt(--cluster-centroids-path "
+                              "기본값)가 필요하다.")
+    parser.add_argument("--cluster-pool-after-vit", action="store_true",
+                         help="train.py --cluster-pool-after-vit 이식 — Nystrom은 살리고 ABMIL만 "
+                              "cluster_pool로 교체(PAAD 10-fold 검증 결과 오히려 유의하게 나빠짐, "
+                              "external delta -0.0165 p=0.015 — BRCA에서도 재현되는지 참고용).")
+    parser.add_argument("--cluster-pool-temperature", type=float, default=None,
+                         help="train.py --cluster-pool-temperature 이식 — None(기본)이면 hard "
+                              "argmin, 양수면 soft(fuzzy) 가중배정. PAAD에서는 hard/soft 차이가 "
+                              "실질적으로 없었음(val 노이즈 아티팩트였음).")
+    parser.add_argument("--cluster-centroids-path", type=str,
+                         default="data/cluster_centroids_brca_uni.pt",
+                         help="data/fit_clusters_brca_uni.py 산출물 경로.")
     parser.add_argument("--group-ts", type=str, default=None)
     parser.add_argument("--fold", type=int, default=None,
                          help="2026-09-01: 주어지면(0-based) 기존 단일 6:2:2 대신 PAAD와 동일한 "
@@ -294,6 +315,9 @@ def main():
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         precomputed=True, backbone="uni", use_wsi_extra_mlp=args.wsi_extra_mlp,
         use_staging=args.clinical_staging, stage_stats=stage_stats,
+        cluster_pool=args.cluster_pool, cluster_pool_after_vit=args.cluster_pool_after_vit,
+        cluster_pool_temperature=args.cluster_pool_temperature,
+        cluster_centroids_path=args.cluster_centroids_path if args.cluster_pool else None,
     ).to(device)
     if args.rna_aux_weight > 0:
         model.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, rna_input_dim).to(device)
@@ -319,6 +343,12 @@ def main():
         model_prefix += "_KNNMEANAGG"
     if args.cluster_attn:
         model_prefix += f"_CLUSTERATTN{args.n_clusters}"
+    if args.cluster_pool:
+        model_prefix += "_CLUSTERPOOL"
+    if args.cluster_pool_after_vit:
+        model_prefix += "_CLUSTERPOOLVIT"
+    if args.cluster_pool_temperature is not None:
+        model_prefix += f"_CLUSTERTEMP{args.cluster_pool_temperature:g}"
     if args.num_transformer_layers is not None:
         model_prefix += f"_VITLAYERS{args.num_transformer_layers}"
     if args.early_stop_patience is not None:

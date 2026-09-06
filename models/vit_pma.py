@@ -69,6 +69,10 @@ class ViT_PMA(ViT_M1):
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
         use_coattn: bool = True,
+        cluster_pool: bool = False,
+        cluster_centroids_path: str | None = None,
+        cluster_pool_after_vit: bool = False,
+        cluster_pool_temperature: float | None = None,
     ):
         super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit,
                           use_tumor_type_embed=use_tumor_type_embed,
@@ -115,6 +119,36 @@ class ViT_PMA(ViT_M1):
         self.use_tile_risk_head = use_tile_risk_head
         self.attn_pool = MultiComponentPooling(cfg.embed_dim, exclude=drop_component, top_frac=top_frac,
                                                 use_tile_risk_head=use_tile_risk_head)
+        # 2026-09-05: Nystrom(oversmoothing 무죄로 확인됨, scripts/diagnose_nystrom_oversmoothing*.py)도
+        # ABMIL(entropy~0.999로 붕괴, weight_decay 무관하게 gradient가 아예 안 닿는 dead module로
+        # 확인됨, scripts/diagnose_abmil_attn_training.py) 둘 다 N->1 풀링을 제대로 못 한다는
+        # 진단에 이어, ABMIL/Nystrom을 완전히 우회하는 대안 — 학습 전혀 없는 unsupervised 군집화
+        # (data/fit_clusters_uni2native.py가 raw feature 공간에서 미리 계산해 둔 K=10 중심,
+        # scripts/extract_cluster_exemplars.py로 사람이 눈으로 "종양/기질/..." 해석 확인됨)로
+        # 패치 수만 개를 K개의 "그 슬라이드에 실제로 존재하는 조직 유형" 대표값으로 미리
+        # 요약한다. 이 K개를 기존 4-component(mean/std/attn/top) 자리에 그대로 꽂아 RNA
+        # co-attention(component_coattn, 이미 gradient가 살아있는 걸로 확인된 모듈)에 넘긴다 —
+        # "어떤 조직 유형이 이 환자의 RNA subtype에 중요한가"를 co-attention이 직접 고르게 하는
+        # 것으로, ABMIL이 실패한 "N개 중 중요한 것 찾기"를 gradient 경로가 훨씬 짧은 co-attention
+        # 쪽으로 옮긴다.
+        self.cluster_pool = cluster_pool
+        # 2026-09-05(2차): cluster_pool 단독(external C 0.535->0.608, M7 대비 손해가 거의 사라짐)
+        # 결과를 본 뒤, "원본 PMA(Nystrom+ABMIL+co-attn)에서 ABMIL만 cluster_pool로 갈아끼우면
+        # 어떤지"도 확인 — Nystrom(패치 간 self-attention, oversmoothing 무죄로 이미 확인됨)은
+        # 그대로 살려서 self.vit로 문맥화(ctx_tokens)까지 한 뒤, 그 ctx_tokens를 raw feature
+        # 기반 군집 배정(assign은 원래 있는 raw-feature 공간에서 결정, ctx_tokens는 64차원이라
+        # cluster_centroids와 직접 비교 불가)에 따라 평균 낸다 — "Nystrom이 문맥을 섞어준 뒤의
+        # 표현"을 군집별로 요약하는 조합.
+        self.cluster_pool_after_vit = cluster_pool_after_vit
+        # 2026-09-05(3차): None(기본)이면 기존 hard argmin 그대로. 양수면 fuzzy soft assignment
+        # 온도(작을수록 hard에 가까움, 클수록 균등에 가까움) — raw feature 공간에서 k-means
+        # inertia 실측(TCGA-only, K=11 재적합 기준 patch당 평균 제곱거리 ~190, RMS거리 ~13.8)
+        # 대비 적당히 부드럽게 걸치도록 register 시점에 스케일 감 잡을 것.
+        self.cluster_pool_temperature = cluster_pool_temperature
+        if cluster_pool:
+            path = cluster_centroids_path or f"data/cluster_centroids_{backbone}.pt"
+            centroids = torch.load(path, weights_only=True)
+            self.register_buffer("cluster_centroids", centroids.float())
         # 2026-08-31: co-attention이 WSI가 성능에 안 먹히는 원인 셋(Nystrom self-attn/ABMIL/
         # co-attention) 중 하나인지 분리 검증하는 ablation용(train.py --no-coattn). False면
         # component_coattn 자체를 안 만들고, combine_with_clinical_rna()가 RNA-query 가중합 대신
@@ -206,6 +240,36 @@ class ViT_PMA(ViT_M1):
         tile_cache: dict | None = None,
         tumor_type: torch.Tensor | None = None,
     ) -> dict:
+        if self.cluster_pool:
+            if features is None:
+                raise ValueError("cluster_pool=True는 precomputed features 모드에서만 지원합니다.")
+            raw = features.to(coords.device, non_blocking=True).float()  # (N, raw_dim) — 투영 이전
+            centroids = self.cluster_centroids.to(raw.device)             # (K, raw_dim)
+            dist = torch.cdist(raw, centroids)                            # (N, K) — raw 공간 기준(고정)
+            # 2026-09-05(3차): hard argmin(경계에 걸친 패치를 1개 군집에 확정 배정 — 경계 근처
+            # 정보 손실) 대신, cluster_pool_temperature가 주어지면 -distance/T의 softmax로
+            # 모든 군집에 부드럽게 걸치는 가중치를 쓴다(fuzzy c-means류). weights를
+            # one-hot(hard)이든 softmax(soft)든 동일한 가중평균 수식으로 통일 — 분기 로직 중복 제거.
+            if self.cluster_pool_temperature is not None:
+                weights = torch.softmax(-dist / self.cluster_pool_temperature, dim=1)  # (N, K)
+            else:
+                assign = dist.argmin(dim=1)
+                weights = torch.zeros_like(dist).scatter_(1, assign.unsqueeze(1), 1.0)  # (N, K) one-hot
+            wsum = weights.sum(dim=0)                                      # (K,) — 군집별 유효 가중치 총합
+            empty = wsum < 1e-6                                            # 이 배치에 사실상 배정 안 된 군집
+            if self.cluster_pool_after_vit:
+                # Nystrom(self.vit)까지 살려서 문맥화한 뒤(ctx_tokens, embed_dim) 그 표현을
+                # 군집별로 가중평균 — 가중치는 위에서 이미 raw feature 공간으로 정해뒀다
+                # (ctx_tokens는 embed_dim=64라 raw 1536차원 centroids와 직접 비교 불가).
+                patch_tokens = self.cnn.forward_pooled(raw)                # (N, D)
+                ctx_tokens = patch_tokens if self.skip_patch_vit else self.vit(patch_tokens, coords)  # (N, D)
+                components = (weights.T @ ctx_tokens) / wsum.clamp(min=1e-8).unsqueeze(1)  # (K, D)
+                components[empty] = ctx_tokens.mean(dim=0)
+            else:
+                cluster_raw = (weights.T @ raw) / wsum.clamp(min=1e-8).unsqueeze(1)  # (K, raw_dim)
+                cluster_raw[empty] = centroids[empty]
+                components = self.cnn.forward_pooled(cluster_raw)              # (K, D) — 기존 4관점 자리
+            return {"embed": components, "meanpool_embed": components.mean(dim=0), "patch_tokens": components}
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         if self.use_coord_embed:
             coord_input = coords[torch.randperm(coords.shape[0], device=coords.device)] if self.coord_embed_shuffle else coords
