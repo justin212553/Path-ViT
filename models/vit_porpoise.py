@@ -79,6 +79,8 @@ class ViT_PORPOISE(ViT_M4):
         stage_stats: dict[str, tuple[float, float]] | None = None,
         use_margin: bool = False,
         margin_stats: tuple[float, float] | None = None,
+        use_mutation: bool = False,
+        mutation_stats: dict[str, tuple[float, float]] | None = None,
         use_age_sex: bool = True,
         use_attn_dispersion: bool = False,
         skip_patch_vit: bool = False,
@@ -92,9 +94,15 @@ class ViT_PORPOISE(ViT_M4):
     ):
         if use_meanpool and use_coattn:
             raise ValueError("use_meanpool과 use_coattn은 동시에 켤 수 없습니다(attn_pool 자리가 하나뿐).")
+        # use_mutation/mutation_stats: ViT_M4(부모 클래스)엔 2026-09-03부터 있었지만 여기선
+        # 이식이 안 돼 있었다(2026-09-06 추가) — _clinical_embed는 ViT_M4에서 그대로 물려받으므로
+        # (오버라이드 없음) super()에 넘기기만 하면 self.use_mutation이 세팅되고, train.py::
+        # _patient_risk의 getattr(model, "use_mutation", False) 분기가 그대로 작동한다.
         super().__init__(cfg, age_mean, age_std, rna_input_dim, precomputed, backbone,
                           use_staging=use_staging, stage_stats=stage_stats,
-                          use_margin=use_margin, margin_stats=margin_stats, use_age_sex=use_age_sex,
+                          use_margin=use_margin, margin_stats=margin_stats,
+                          use_mutation=use_mutation, mutation_stats=mutation_stats,
+                          use_age_sex=use_age_sex,
                           combine_mode="cox_add", use_attn_dispersion=use_attn_dispersion,
                           skip_patch_vit=skip_patch_vit, use_clinical=True)
 
