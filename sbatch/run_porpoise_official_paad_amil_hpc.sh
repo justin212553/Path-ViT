@@ -38,8 +38,16 @@ conda activate Path-ViT
 # data_root_dir 아래 {study}_20x_features/pt_files/ 구조를 main.py가 요구 — 새로 추출한
 # 진짜 feature(../data/porpoise_style_features/tcga/pt_files)를 그 경로로 심볼릭 링크.
 DATA_ROOT="/pub/wonseukl/Path-ViT/porpoise/data_root_true_resnet50"
+PT_FILES_DIR="/pub/wonseukl/Path-ViT/data/porpoise_style_features/tcga/pt_files"
 mkdir -p "${DATA_ROOT}/tcga_paad_20x_features"
-ln -sfn /pub/wonseukl/Path-ViT/data/porpoise_style_features/tcga/pt_files "${DATA_ROOT}/tcga_paad_20x_features/pt_files"
+ln -sfn "${PT_FILES_DIR}" "${DATA_ROOT}/tcga_paad_20x_features/pt_files"
+
+# 2026-09-05: UNI2-h 공식 추출(우리 patch 좌표 출처) 슬라이드 목록이 PORPOISE 공식 CSV(377개
+# 슬라이드)와 완전히 일치하지 않아 일부 .pt가 없다 — main.py/dataset_survival.py는 안 건드리고
+# CSV만 "실제 존재하는 슬라이드"로 걸러낸다(케이스가 슬라이드 여러 장이면 없는 것만 빠지고
+# 나머지는 그대로 살아있음 — porpoise_datasets/dataset_survival.py 확인 완료, 안전).
+echo "=== 슬라이드 존재 여부로 CSV 필터링: $(date) ==="
+python -u filter_available_slides.py --pt-files-dir "${PT_FILES_DIR}"
 
 echo "=== PORPOISE 공식 코드, 진짜 ResNet50(1024d) feature, AMIL(WSI only) Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
 python -u main.py \
