@@ -31,13 +31,16 @@
 # SLURM_ARRAY_TASK_ID(0~9) -> seed_idx = id/5, fold = id%5. seed=84/126, fold=0..4.
 #
 # 완료 후(10개 fold 로그 확인, .logs/kfold_preds/에 CSV 10개 있는지 확인):
+#   주의(2026-09-05 정정) — --patch-keep-frac 기본값이 0.8(<1.0)이고 --rna-aux-weight
+#   기본값이 1.0(>0)이라 명시적으로 안 꺼도 model_prefix에 _SS_AUX가 자동으로 붙는다
+#   (BRCA_PMA_CONS882_STG_CLUSTERPOOL이 아니라 BRCA_PMA_CONS882_STG_SS_AUX_CLUSTERPOOL).
+#   그리고 --external-tss none이라 external 평가 자체가 없다(1-layer/2-layer 기존 BRCA
+#   실험과 동일 관례) — pool_multiseed_external_preds.py는 해당 없음, internal만.
 #   python scripts/pool_multiseed_kfold_preds.py --dataset brca \
-#       --model BRCA_PMA_CONS882_STG_CLUSTERPOOL --seeds 84,126 --n-folds 5 --bootstrap 2000
-#   python scripts/pool_multiseed_external_preds.py --dataset brca \
-#       --model BRCA_PMA_CONS882_STG_CLUSTERPOOL --seeds 84,126 --n-folds 5 --bootstrap 2000
+#       --model BRCA_PMA_CONS882_STG_SS_AUX_CLUSTERPOOL --seeds 84,126 --n-folds 5 --bootstrap 2000
 #   (M7은 이미 완료된 .logs/kfold_preds/brca_BRCA_M7_CONS882_STG_seed{84,126}_fold{0-4}of5.csv 재사용)
 #   python scripts/paired_bootstrap_delta.py --split internal --dataset brca \
-#       --model-a BRCA_M7_CONS882_STG --model-b BRCA_PMA_CONS882_STG_CLUSTERPOOL \
+#       --model-a BRCA_M7_CONS882_STG --model-b BRCA_PMA_CONS882_STG_SS_AUX_CLUSTERPOOL \
 #       --seeds 84,126 --n-folds 5 --bootstrap 2000
 #
 # 제출(fit_clusters 완료 확인 후): sbatch sbatch/brca_m4_clusterpool_kfold_array_hpc.sh
