@@ -6,16 +6,25 @@ ImageNet is used as an encoder to convert each 256x256 patch into 1024-dimension
 vector, via spatial average pooling after the 3rd residual block").
 
 2026-09-05(3차 수정): 패치 자체는 새로 만들 필요가 없었다 — uni2native 리타일링 단계
-(sbatch/preprocess_uni2native_retile_array_hpc.sh, data/patches_tcga_uni2native/tiles/<slide_id>/
-*.jpg)가 이미 256px@0.5MPP(=PORPOISE 논문 스펙과 사실상 동일 해상도)로 tissue segmentation까지
-끝낸 jpg를 만들어 뒀다. 1차/2차 버전에서 재구현한 Otsu tissue segmentation은 중복 작업이었음
-— 그 jpg 픽셀 자체는 인코더와 무관하게 재사용 가능하고, 재사용 불가능한 건 오직
-features_uni2native.pt(UNI2-h 임베딩, 1536차원)뿐이다. 이건 이미 다른 아키텍처를 통과시킨
-"결과물"이라 PORPOISE의 ResNet50 임베딩과 호환되지 않는다 — 그래서 이 스크립트가 다시 해야 하는
-일은 "같은 jpg를 다른 인코더에 통과시키는 GPU forward pass" 하나뿐이다(SVS/openslide 접근 없음).
+(sbatch/preprocess_uni2native_retile_array_hpc.sh, data/patches_{tcga,cptac}_uni2native/
+tiles/<slide_id>/*.jpg)가 이미 256px@0.5MPP(=PORPOISE 논문 스펙과 사실상 동일 해상도)로
+tissue segmentation까지 끝낸 jpg를 만들어 뒀다. 1차/2차 버전에서 재구현한 Otsu tissue
+segmentation은 중복 작업이었음 — 그 jpg 픽셀 자체는 인코더와 무관하게 재사용 가능하고,
+재사용 불가능한 건 오직 features_uni2native.pt(UNI2-h 임베딩, 1536차원)뿐이다. 이건 이미
+다른 아키텍처를 통과시킨 "결과물"이라 PORPOISE의 ResNet50 임베딩과 호환되지 않는다 —
+그래서 이 스크립트가 다시 해야 하는 일은 "같은 jpg를 다른 인코더에 통과시키는 GPU forward
+pass" 하나뿐이다(SVS/openslide 접근 없음).
+
+2026-09-06(4차 수정, --dataset 추가): PORPOISE는 자체적으로 internal(TCGA) 5-fold CV만
+평가하고 CPTAC 같은 별도 코호트로의 external validation 개념이 아예 없다 — 그래도 재현이
+끝나면 우리 프로젝트 관례대로 external(CPTAC) 평가도 해볼 계획이라, CPTAC 슬라이드도 같은
+스펙(ResNet50 truncated, 1024차원)으로 미리 추출해 둔다. TCGA와 달리 CPTAC은 PORPOISE
+공식 CSV가 아예 없으므로(애초에 지원 안 하는 코호트), 슬라이드 목록은 CSV가 아니라
+data/patches_cptac_uni2native/tiles/ 아래 존재하는 슬라이드 폴더 전부를 그대로 쓴다.
 
 사용법(HPC — uni2native 리타일링이 이미 끝나 있어야 함):
-    python -m data.extract_porpoise_style_features
+    python -m data.extract_porpoise_style_features                       # TCGA(기본)
+    python -m data.extract_porpoise_style_features --dataset cptac       # CPTAC
     python -m data.extract_porpoise_style_features --slide-ids TCGA-2J-AAB1-01Z-00-DX1....
 """
 import argparse
@@ -34,8 +43,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 CSV_PATH = _ROOT / "porpoise" / "datasets_csv" / "tcga_paad_all_clean.csv.zip"
-PATCHES_ROOT = _ROOT / "data" / "patches_tcga_uni2native" / "tiles"
-OUT_DIR = _ROOT / "data" / "porpoise_style_features" / "tcga" / "pt_files"
 DISPLAY_SIZE = 256
 
 _IMAGENET_TRANSFORM = transforms.Compose([
@@ -70,22 +77,34 @@ class TruncatedResNet50(nn.Module):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--dataset", type=str, choices=["tcga", "cptac"], default="tcga")
     parser.add_argument("--slide-ids", type=str, default=None, help="쉼표구분, 주어지면 이 슬라이드만(디버그용).")
     parser.add_argument("--batch-size", type=int, default=256)
     args = parser.parse_args()
+
+    PATCHES_ROOT = _ROOT / "data" / f"patches_{args.dataset}_uni2native" / "tiles"
+    OUT_DIR = _ROOT / "data" / "porpoise_style_features" / args.dataset / "pt_files"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = TruncatedResNet50().to(device).eval()
     print(f"TruncatedResNet50(ImageNet, layer3 truncated, 1024-dim) 로드 완료, device={device}")
 
-    df = pd.read_csv(CSV_PATH, compression="zip")
-    slide_ids = df["slide_id"].tolist()
+    if args.dataset == "tcga":
+        # PORPOISE 공식 CSV가 실제로 쓰는 슬라이드 목록 기준(377개, DX+TS/BS).
+        df = pd.read_csv(CSV_PATH, compression="zip")
+        slide_ids = df["slide_id"].tolist()
+    else:
+        # CPTAC은 PORPOISE 공식 CSV가 아예 없다(지원 안 하는 코호트) — uni2native 리타일링이
+        # 이미 처리해 둔 슬라이드 폴더 전부를 그대로 쓴다(external 평가용, 나중에 별도 스크립트에서
+        # clinical/survival 라벨과 매칭).
+        slide_ids = sorted(p.name for p in PATCHES_ROOT.iterdir() if p.is_dir()) if PATCHES_ROOT.is_dir() else []
+
     if args.slide_ids:
         wanted = set(args.slide_ids.split(","))
         slide_ids = [s for s in slide_ids if s in wanted]
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"PORPOISE 공식 CSV 기준 슬라이드 {len(slide_ids)}개 처리 (패치 출처: {PATCHES_ROOT})")
+    print(f"[{args.dataset}] 슬라이드 {len(slide_ids)}개 처리 (패치 출처: {PATCHES_ROOT})")
 
     for i, slide_id in enumerate(slide_ids):
         out_path = OUT_DIR / f"{slide_id}.pt"
