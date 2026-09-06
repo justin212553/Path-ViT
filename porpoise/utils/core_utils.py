@@ -268,12 +268,14 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
         if isinstance(loss_fn, NLLSurvLoss):
             hazards = torch.sigmoid(h)
             survival = torch.cumprod(1 - hazards, dim=1)
-            # validate_survival/summary_survival과 동일한 numpy 버전 호환성 패치 — else 분기의
-            # .squeeze()와 동등하게 배치 차원 1개를 스칼라로 만든다(batch_size=1 항상 가정,
-            # 계산 자체는 동일). 원래 이 분기만 squeeze/item이 빠져 있어서 shape-(1,) 배열이
-            # 남았고, 100배치마다 찍는 아래 float(risk)에서 크래시했다(fold별 train 표본이
-            # 100개 이상일 때만 발현 — 97개였던 fold 0은 안 걸렸었음).
-            risk = -torch.sum(survival, dim=1).detach().cpu().item()
+            # 2026-09-06: risk는 shape-(1,) 배열로 유지해야 한다 — 아래 all_risk_scores.append(risk)
+            # 후 나중에 np.concatenate(all_risk_scores)로 이어붙이는데(311번째 줄 부근),
+            # concatenate는 최소 1차원 배열이 필요해서 0차원 스칼라(.item())를 넣으면
+            # "zero-dimensional arrays cannot be concatenated"로 크래시한다(직접 겪음 —
+            # 처음엔 .item()으로 고쳤다가 이 크래시로 되돌림). 100배치마다 찍는 아래 print문
+            # float(risk)만 (1,)-배열이라 실패했던 것뿐이라, risk 자체는 그대로 두고 그
+            # 줄에서만 risk[0]으로 스칼라를 뽑는다.
+            risk = -torch.sum(survival, dim=1).detach().cpu().numpy()
         else:
             risk = h.detach().cpu().numpy().squeeze()
 
@@ -289,7 +291,7 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
         train_loss += loss_value + loss_reg
 
         if y_disc.shape[0] == 1 and (batch_idx + 1) % 100 == 0:
-            print('batch {}, loss: {:.4f}, label: {}, event_time: {:.4f}, risk: {:.4f}, bag_size: {}'.format(batch_idx, loss_value + loss_reg, y_disc.detach().cpu().item(), float(event_time.detach().cpu().item()), float(risk), data_WSI.size(0)))
+            print('batch {}, loss: {:.4f}, label: {}, event_time: {:.4f}, risk: {:.4f}, bag_size: {}'.format(batch_idx, loss_value + loss_reg, y_disc.detach().cpu().item(), float(event_time.detach().cpu().item()), float(risk[0]) if risk.ndim > 0 else float(risk), data_WSI.size(0)))
         elif y_disc.shape[0] != 1 and (batch_idx + 1) % 5 == 0:
             print('batch {}, loss: {:.4f}, label: {}, event_time: {:.4f}, risk: {:.4f}, bag_size: {}'.format(batch_idx, loss_value + loss_reg, y_disc.detach().cpu()[0], float(event_time.detach().cpu()[0]), float(risk[0]), data_WSI.size(0)))
         
