@@ -1636,6 +1636,15 @@ def _parse_args() -> argparse.Namespace:
              "값을 잡을 것. 켜면 wandb/checkpoint에 _CLUSTERTEMP{T} 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--tumor-content-head-path", type=str, default=None,
+        help="2026-09-05: --cluster-pool 전용 — PanNuke(우리 코호트/라벨 완전 미참조)로 학습된 "
+             "frozen TumorContentHead(models/tumor_content_head.py) 체크포인트 경로를 주면, "
+             "패치별 종양함량 점수(0~1)를 군집 가중치에 곱해 정상/기질 조직이 군집 대표값을 "
+             "희석하는 걸 줄인다. 기본(None)이면 미사용(기존 동작 그대로). 예: "
+             "data/hdp_pretrain_tumor_content_head.pt. 켜면 wandb/checkpoint에 _TUMORFILTER "
+             "접미사가 자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--cluster-pool-after-vit", action="store_true",
         help="2026-09-05: --cluster-pool과 함께만 의미 있음 — 원본 PMA 구조에서 ABMIL'만' "
              "cluster_pool로 교체(Nystrom은 그대로 살림). raw feature로 군집 배정은 그대로 "
@@ -2288,6 +2297,8 @@ def main():
         model_prefix += "_CLUSTERPOOLVIT"
     if args.cluster_pool_temperature is not None:
         model_prefix += f"_CLUSTERTEMP{args.cluster_pool_temperature:g}"
+    if args.tumor_content_head_path is not None:
+        model_prefix += "_TUMORFILTER"
     if args.porpoise_meanpool:
         model_prefix += "_MEANPOOL"
     if args.porpoise_coattn:
@@ -2705,6 +2716,7 @@ def main():
                          cluster_pool_after_vit=args.cluster_pool_after_vit,
                          cluster_pool_temperature=args.cluster_pool_temperature,
                          cluster_centroids_path=args.cluster_centroids_path,
+                         tumor_content_head_path=args.tumor_content_head_path,
                          **stage_kwargs, **margin_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,

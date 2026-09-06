@@ -16,6 +16,7 @@ from .spatial_features import spatial_autocorr, attention_dispersion
 from .multi_component_pooling import MultiComponentPooling
 from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
 from .rna_encoder import RNAEncoder
+from .tumor_content_head import TumorContentHead
 from config import ModelConfig
 
 # 2026-07-21: 레퍼런스 인코더 폭 비율(RNA=256, Clinical=16, WSI엔 안 맞춤)을 RNA 전처리
@@ -73,6 +74,7 @@ class ViT_PMA(ViT_M1):
         cluster_centroids_path: str | None = None,
         cluster_pool_after_vit: bool = False,
         cluster_pool_temperature: float | None = None,
+        tumor_content_head_path: str | None = None,
     ):
         super().__init__(cfg, precomputed, backbone, skip_patch_vit=skip_patch_vit,
                           use_tumor_type_embed=use_tumor_type_embed,
@@ -149,6 +151,20 @@ class ViT_PMA(ViT_M1):
             path = cluster_centroids_path or f"data/cluster_centroids_{backbone}.pt"
             centroids = torch.load(path, weights_only=True)
             self.register_buffer("cluster_centroids", centroids.float())
+        # 2026-09-05(4차): 비지도 k-means의 silhouette가 매우 낮았던 것(0.02~0.04, 종양/정상
+        # 조직을 깨끗이 못 가름)을 보완 — PanNuke(핵 단위 라벨, 우리 코호트/라벨 완전 미참조,
+        # scripts/train_hdp_pretrain_head.py)로 학습된 frozen TumorContentHead(models/
+        # tumor_content_head.py)의 패치별 종양함량 점수(0~1)를 군집 가중치에 곱한다 — 완전히
+        # 새로운 지도학습이 아니라 이미 있던, 우리 라벨과 무관한 외부 학습 자산을 재활용.
+        self.tumor_content_head = None
+        if tumor_content_head_path is not None:
+            ckpt = torch.load(tumor_content_head_path, map_location="cpu", weights_only=False)
+            head = TumorContentHead(in_dim=ckpt["in_dim"], hidden_dim=ckpt["hidden_dim"])
+            head.load_state_dict(ckpt["state_dict"])
+            for p in head.parameters():
+                p.requires_grad = False
+            head.eval()
+            self.tumor_content_head = head
         # 2026-08-31: co-attention이 WSI가 성능에 안 먹히는 원인 셋(Nystrom self-attn/ABMIL/
         # co-attention) 중 하나인지 분리 검증하는 ablation용(train.py --no-coattn). False면
         # component_coattn 자체를 안 만들고, combine_with_clinical_rna()가 RNA-query 가중합 대신
@@ -255,6 +271,15 @@ class ViT_PMA(ViT_M1):
             else:
                 assign = dist.argmin(dim=1)
                 weights = torch.zeros_like(dist).scatter_(1, assign.unsqueeze(1), 1.0)  # (N, K) one-hot
+            if self.tumor_content_head is not None:
+                # 2026-09-05(4차): 비지도 k-means(silhouette 0.02~0.04로 매우 낮음 — 종양/정상
+                # 조직을 깨끗하게 못 가름)를 보완 — PanNuke(핵 단위 라벨, 우리 코호트/라벨 완전
+                # 미참조)로 학습된 frozen TumorContentHead의 패치별 종양함량 점수(0~1)를 군집
+                # 가중치에 곱해, 같은 군집 안에서도 종양함량이 높은 패치가 그 군집 대표값에
+                # 더 많이 기여하게 한다(정상/기질 조직이 대표값을 희석하는 것을 줄임).
+                with torch.no_grad():
+                    tumor_score = self.tumor_content_head(raw)  # (N,) 0~1
+                weights = weights * tumor_score.unsqueeze(1)
             wsum = weights.sum(dim=0)                                      # (K,) — 군집별 유효 가중치 총합
             empty = wsum < 1e-6                                            # 이 배치에 사실상 배정 안 된 군집
             if self.cluster_pool_after_vit:
