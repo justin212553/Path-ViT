@@ -239,6 +239,19 @@ class ViT_PMA(ViT_M1):
         # 추가한다. 둘 다 독립적으로 켤 수 있다(순차 검증용).
         self.use_spatial_autocorr = getattr(cfg, "use_spatial_autocorr", False)
         self.use_attn_dispersion = getattr(cfg, "use_attn_dispersion", False)
+        if cluster_pool and (self.use_spatial_autocorr or self.use_attn_dispersion or use_tile_risk_head):
+            # 2026-09-06(버그 발견): forward()의 cluster_pool 분기(위)는 attn_weights/attn_pool을
+            # 아예 안 만들고 조기 return한다 — spatial_autocorr/attn_dispersion/risk_stats
+            # 셋 다 그 attn_pool(MultiComponentPooling) 출력에 의존하므로 cluster_pool에선
+            # 존재 자체가 불가능하다(attn_dispersion은 특히 개념적으로도 성립 안 함 — "패치별
+            # attention 가중치의 공간 분산"인데 cluster_pool엔 patch-level attention이 없음).
+            # 예전엔 risk_input_dim만 이 셋을 무조건 반영해 실제 forward 출력과 어긋나
+            # LayerNorm shape 에러(expected 129, got 128)로 학습 시작부터 크래시했다 — 조합
+            # 자체를 명시적으로 막는다.
+            raise ValueError(
+                "cluster_pool=True는 use_spatial_autocorr/use_attn_dispersion/use_tile_risk_head와 "
+                "함께 쓸 수 없습니다(전부 cluster_pool이 안 만드는 attn_pool 출력에 의존)."
+            )
         if self.use_attn_dispersion:
             # 2026-07-30: vit_m1.py와 동일한 이유(dispersion 원값 스케일이 나머지 risk_head
             # 입력보다 5~10배 커서 LayerNorm 통계를 왜곡할 수 있음) — 학습되는 배율로 낮춘다.

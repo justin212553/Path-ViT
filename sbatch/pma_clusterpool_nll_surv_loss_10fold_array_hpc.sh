@@ -19,6 +19,14 @@
 # 쓴다 — backbone=uni2native면 data/cluster_centroids_uni2native_k10_tcgacptac.pt(로컬 확인
 # 완료, CPU 생성 테스트로 실제 로딩까지 검증됨).
 #
+# 2026-09-06 수정: 최초 제출본은 --attn-dispersion을 베이스 PMA 레시피에서 그대로 물려받았는데,
+# cluster_pool=True에선 attn_pool(patch-level attention) 자체가 없어(forward()가 cluster
+# 대표값만 만들고 조기 return) attn_dispersion이 필요로 하는 attn_weights가 존재하지 않는다 —
+# risk_head는 여전히 그 차원을 기대해서 LayerNorm shape 에러로 10개 fold 전부 시작하자마자
+# 크래시했다(모델 초기화만 하고 학습은 한 스텝도 못 감). models/vit_pma.py에 이 조합을 막는
+# 명시적 검증도 추가했다 — 여기서는 --attn-dispersion을 아예 뺐다(cluster_pool은 애초에
+# patch-level attention을 안 쓰므로 "attention 분산"이라는 개념 자체가 성립 안 함).
+#
 # 완료 후: 정확한 모델 태그는 `ls .logs/kfold_preds/tcga_PMA*CLUSTERPOOL*NLLSURV4*`로 확인 후
 #   python scripts/pool_multiseed_kfold_preds.py --dataset tcga \
 #       --model <확인한 태그> --seeds 84 --n-folds 10 --bootstrap 2000
@@ -44,7 +52,7 @@ python -u ./train.py --PMA --rna-genes literature_1500_intersection --dataset tc
     --backbone uni2native \
     --clinical-margin --clinical-staging --combine-mode cox_add \
     --clinical-lr-mult 100 --use-cnv --clinical-mutation \
-    --patch-keep-frac 0.8 --attn-dispersion --rna-aux-weight 1.0 \
+    --patch-keep-frac 0.8 --rna-aux-weight 1.0 \
     --cluster-pool \
     --surv-loss nll_surv --nll-n-bins 4 \
     --fold "${FOLD}" --n-folds "${N_FOLDS}" --group-ts 0906pma_clusterpool_nllsurv_10fold_array 2>&1 | tee "${log}"
