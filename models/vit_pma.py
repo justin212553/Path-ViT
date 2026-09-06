@@ -14,7 +14,9 @@ from .vit_m1 import ViT_M1
 from .vit_m4a import CoAttentionPooling
 from .spatial_features import spatial_autocorr, attention_dispersion
 from .multi_component_pooling import MultiComponentPooling
-from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
+from .clinical_encoder import (
+    ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, MUTATION_FIELDS, _MUTATION_BUFFER_NAMES,
+)
 from .rna_encoder import RNAEncoder
 from .tumor_content_head import TumorContentHead
 from config import ModelConfig
@@ -56,6 +58,8 @@ class ViT_PMA(ViT_M1):
         use_clinical: bool = True,
         use_margin: bool = False,
         margin_stats: tuple[float, float] | None = None,
+        use_mutation: bool = False,
+        mutation_stats: dict[str, tuple[float, float]] | None = None,
         use_age_sex: bool = True,
         combine_mode: str = "concat",
         drop_component: str | None = None,
@@ -70,6 +74,7 @@ class ViT_PMA(ViT_M1):
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
         use_coattn: bool = True,
+        surv_n_classes: int = 1,
         cluster_pool: bool = False,
         cluster_centroids_path: str | None = None,
         cluster_pool_after_vit: bool = False,
@@ -86,6 +91,11 @@ class ViT_PMA(ViT_M1):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         if rna_combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 rna_combine_mode: {rna_combine_mode}")
+        if use_mutation and combine_mode != "cox_add":
+            # models/vit_m4.py::ViT_M4와 달리 ViT_PMA는 combine_mode="concat"일 때 clinical을
+            # ClinicalEncoder(MLP)에 통째로 맡기고(mutation 미지원) cox_add일 때만 raw feature를
+            # 직접 다룬다(_clinical_embed) — mutation은 이 raw feature 경로에만 이식했다.
+            raise ValueError("use_mutation=True는 combine_mode='cox_add'에서만 지원합니다.")
         rna_dim = rna_dim or cfg.embed_dim
         clinical_dim = clinical_dim or cfg.embed_dim
         self.rna_gate_only = rna_gate_only
@@ -111,6 +121,7 @@ class ViT_PMA(ViT_M1):
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
         self.use_staging = use_staging
+        self.use_mutation = use_mutation
         # 2026-08-09: scripts/diagnose_pma_component_reliance.py의 zero-ablation 진단(4개 성분
         # 다 지워봐도 손해가 없었음)에 이어, 구조적으로 하나를 빼고 재학습하는 ablation용
         # (train.py --drop-component). 기본 None이면 기존과 완전히 동일(4개 다 사용).
@@ -203,7 +214,19 @@ class ViT_PMA(ViT_M1):
                     short = _STAGE_BUFFER_NAMES[field]
                     self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                     self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
-            raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+            if use_mutation:
+                # models/vit_m4.py::ViT_M4와 동일 관례(PDAC 4대 driver gene mutation status,
+                # 2026-09-06 이식) — margin/staging과 같은 known-indicator 방식.
+                if mutation_stats is None:
+                    raise ValueError("use_mutation=True면 mutation_stats가 필요합니다.")
+                for field in MUTATION_FIELDS:
+                    mean, std = mutation_stats[field]
+                    short = _MUTATION_BUFFER_NAMES[field]
+                    self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
+                    self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
+            raw_dim = ((2 if use_age_sex else 0) + (2 if use_margin else 0)
+                       + (2 * len(STAGE_FIELDS) if use_staging else 0)
+                       + (2 * len(MUTATION_FIELDS) if use_mutation else 0))
             if raw_dim == 0:
                 raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
             self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
@@ -240,9 +263,12 @@ class ViT_PMA(ViT_M1):
             + spatial_feat_dim
             + risk_stats_dim
         )
+        # surv_n_classes>1: train.py --surv-loss nll_surv(PORPOISE 원조 discretized-hazard NLL,
+        # utils/losses.py::nll_surv_loss, 2026-09-06 이식) 전용 — models/vit_porpoise.py::
+        # ViT_PORPOISE와 동일 관례. 기본값 1이면 기존 Cox 레시피와 완전히 동일.
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
-            nn.Linear(risk_input_dim, 1),
+            nn.Linear(risk_input_dim, surv_n_classes),
         )
 
     def forward(
@@ -343,7 +369,13 @@ class ViT_PMA(ViT_M1):
         margin_ord: torch.Tensor | None = None,  # self.clinical_encoder.use_margin=True일 때만 필요
         spatial_feat: torch.Tensor | None = None,  # (spatial_feat_dim,) — 환자 단위 평균, models/spatial_features.py
         risk_stats: torch.Tensor | None = None,  # (10,) — 환자 단위 평균, self.use_tile_risk_head=True일 때만
+        mutation_ord: dict[str, torch.Tensor] | None = None,  # combine_mode="cox_add"에서만 의미 있음(아래서 안 씀)
     ) -> torch.Tensor:
+        # mutation_ord는 여기서 안 쓰인다 — combine_mode="cox_add"(mutation 지원 조건, __init__
+        # 검증 참조)에서는 clinical_kwargs 자체가 아래 concat 분기에서 쓰이지 않고, mutation은
+        # train.py::_patient_risk가 별도로 self._clinical_embed(..., mutation_ord=...)를 호출해
+        # 처리한다(margin_ord/stage_ord와 달리 raw feature Cox 가산항 경로). train.py가
+        # use_mutation=True인 모델엔 항상 이 kwarg를 넘기므로 시그니처에서 받아만 준다.
         clinical_kwargs = {}
         if stage_ord is not None:
             clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
@@ -376,10 +408,13 @@ class ViT_PMA(ViT_M1):
 
     def _clinical_embed(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
                          margin_ord: torch.Tensor | None = None,
-                         stage_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
+                         stage_ord: dict[str, torch.Tensor] | None = None,
+                         mutation_ord: dict[str, torch.Tensor] | None = None) -> torch.Tensor:
         """combine_mode="cox_add" 전용. 2026-08-20: ClinicalEncoder(MLP) 경유 버전을 ablation
         검증 후 raw feature 직결로 원복(이름은 train.py 호출부 호환을 위해 _clinical_embed 유지,
-        실제로는 (1, raw_dim) raw z-score를 반환). stage_ord: self.use_staging=True일 때만 필요."""
+        실제로는 (1, raw_dim) raw z-score를 반환). stage_ord: self.use_staging=True일 때만 필요.
+        mutation_ord: self.use_mutation=True일 때만 필요(2026-09-06, models/vit_m4.py::ViT_M4와
+        동일 관례 이식)."""
         feats = []
         if self.use_age_sex:
             age_z = (age_years.float() - self.age_mean) / self.age_std
@@ -393,6 +428,15 @@ class ViT_PMA(ViT_M1):
             for field in STAGE_FIELDS:
                 short = _STAGE_BUFFER_NAMES[field]
                 ordv = stage_ord[field].float()
+                known = (ordv >= 0).float()
+                mean = getattr(self, f"{short}_mean")
+                std = getattr(self, f"{short}_std")
+                z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
+                feats += [z, known]
+        if self.use_mutation:
+            for field in MUTATION_FIELDS:
+                short = _MUTATION_BUFFER_NAMES[field]
+                ordv = mutation_ord[field].float()
                 known = (ordv >= 0).float()
                 mean = getattr(self, f"{short}_mean")
                 std = getattr(self, f"{short}_std")

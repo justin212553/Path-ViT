@@ -2017,13 +2017,14 @@ def main():
             "--clinical-staging은 ClinicalEncoder를 쓰는 모델(--M2/--M4/--M4A/--M4B/--PM4/"
             "--PMA/--M4A_FF/--M2_FF/--M5/--M2_POOL/--MCAT)에서만 사용 가능합니다."
         )
-    if args.clinical_mutation and not ((args.M4 and not args.avgpool) or args.PORPOISE):
+    if args.clinical_mutation and not ((args.M4 and not args.avgpool) or args.PORPOISE or args.PMA):
         # 2026-09-03: models/vit_m4.py::ViT_M4(--M4, --avgpool 미사용)에만 use_mutation/
-        # mutation_stats를 이식했다 — 다른 combine_with_clinical_rna 계열(M4A/M4B/PM4/PMA)이나
+        # mutation_stats를 이식했다 — 다른 combine_with_clinical_rna 계열(M4A/M4B/PM4)이나
         # ViT_M4_AvgPool은 아직 지원 안 함(_patient_risk의 extra_kwargs["mutation_ord"] 조건부
         # 배선 참조). 2026-09-06: --PORPOISE(ViT_PORPOISE)도 ViT_M4를 상속하고 _clinical_embed를
-        # 오버라이드하지 않으므로 동일하게 지원 추가(models/vit_porpoise.py).
-        raise ValueError("--clinical-mutation은 --M4(--avgpool 미사용) 또는 --PORPOISE에서만 사용 가능합니다.")
+        # 오버라이드하지 않으므로 동일하게 지원 추가(models/vit_porpoise.py). --PMA도 같은 날
+        # 이식(models/vit_pma.py — combine_mode="cox_add"에서만, ViT_PMA 자체 검증 참조).
+        raise ValueError("--clinical-mutation은 --M4(--avgpool 미사용)/--PORPOISE/--PMA(combine-mode cox_add)에서만 사용 가능합니다.")
     if (args.rna_dim is not None or args.clinical_dim is not None) and not args.PMA:
         raise ValueError("--rna-dim/--clinical-dim은 --PMA에서만 사용 가능합니다.")
     if args.rna_gate_only and not args.PMA:
@@ -2043,9 +2044,10 @@ def main():
             "--porpoise-attn-temperature는 plain gated-ABMIL(--porpoise-meanpool/--porpoise-coattn "
             "둘 다 꺼진 상태)에서만 의미가 있습니다."
         )
-    if args.surv_loss == "nll_surv" and not args.PORPOISE:
-        raise ValueError("--surv-loss nll_surv는 --PORPOISE에서만 사용 가능합니다(risk_head 출력 "
-                          "차원 변경을 models/vit_porpoise.py::ViT_PORPOISE만 지원).")
+    if args.surv_loss == "nll_surv" and not (args.PORPOISE or args.PMA):
+        raise ValueError("--surv-loss nll_surv는 --PORPOISE/--PMA에서만 사용 가능합니다(risk_head "
+                          "출력 차원 변경을 이 두 클래스만 지원 — models/vit_porpoise.py, "
+                          "models/vit_pma.py).")
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -2764,12 +2766,13 @@ def main():
                          coord_embed_shuffle=args.coord_embed_shuffle,
                          use_wsi_extra_mlp=args.wsi_extra_mlp,
                          use_coattn=not args.no_coattn,
+                         surv_n_classes=(args.nll_n_bins if args.surv_loss == "nll_surv" else 1),
                          cluster_pool=args.cluster_pool,
                          cluster_pool_after_vit=args.cluster_pool_after_vit,
                          cluster_pool_temperature=args.cluster_pool_temperature,
                          cluster_centroids_path=args.cluster_centroids_path,
                          tumor_content_head_path=args.tumor_content_head_path,
-                         **stage_kwargs, **margin_kwargs).to(device)
+                         **stage_kwargs, **margin_kwargs, **mutation_kwargs).to(device)
     elif args.M4A_FF:
         model = ViT_M4A_FF(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
                             precomputed=cfg.data.precomputed, backbone=args.backbone, **stage_kwargs).to(device)
