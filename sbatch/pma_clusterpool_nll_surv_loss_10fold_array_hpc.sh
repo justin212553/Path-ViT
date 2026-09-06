@@ -27,9 +27,16 @@
 # 명시적 검증도 추가했다 — 여기서는 --attn-dispersion을 아예 뺐다(cluster_pool은 애초에
 # patch-level attention을 안 쓰므로 "attention 분산"이라는 개념 자체가 성립 안 함).
 #
+# [2026-09-06 수정] "10개 fold를 한번에"를 1seed x 10fold(fold당 테스트 ~15명)로 잘못 해석했다
+# — 이 프로젝트의 실제 "10개" 관례는 **2seed(84,126) x 5fold**(seed42는 WSI 포함 모델에서 유독
+# 튀는 값이 나와 최종 집계에서 제외해온 관례, paper/final_results_summary.md). 5fold(fold당
+# ~30명)로 되돌리고 시드를 2개로 늘려 검정력을 확보한다. sbatch/porpoise_no_aux_multiseed_
+# kfold_array_hpc.sh와 동일한 SEED_IDX/FOLD 인덱싱 관례(3seed 대신 2seed라 --array=0-9는
+# 그대로, 의미만 5fold*2seed로 바뀜).
+#
 # 완료 후: 정확한 모델 태그는 `ls .logs/kfold_preds/tcga_PMA*CLUSTERPOOL*NLLSURV4*`로 확인 후
 #   python scripts/pool_multiseed_kfold_preds.py --dataset tcga \
-#       --model <확인한 태그> --seeds 84 --n-folds 10 --bootstrap 2000
+#       --model <확인한 태그> --seeds 84,126 --n-folds 5 --bootstrap 2000
 #
 # 제출: sbatch sbatch/pma_clusterpool_nll_surv_loss_10fold_array_hpc.sh
 
@@ -41,11 +48,14 @@ conda activate Path-ViT
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE=offline
 
-SEED=84
-N_FOLDS=10
-FOLD=$SLURM_ARRAY_TASK_ID
+SEEDS=(84 126)
+N_FOLDS=5
+IDX=$SLURM_ARRAY_TASK_ID
+SEED_IDX=$((IDX / N_FOLDS))
+FOLD=$((IDX % N_FOLDS))
+SEED=${SEEDS[$SEED_IDX]}
 
-log=".logs/train_tcga_seed${SEED}_PMA_uni2native_INT1500_CNV_SS_AUX_STG_R_MUT_CLUSTERPOOL_NLLSURV4_kfold10_fold${FOLD}.log"
+log=".logs/train_tcga_seed${SEED}_PMA_uni2native_INT1500_CNV_SS_AUX_STG_R_MUT_CLUSTERPOOL_NLLSURV4_kfold5_fold${FOLD}.log"
 
 echo "=== PMA+ClusterPool nll_surv loss(uni2native,cox_add,CLR100,CNV,MUT) seed=${SEED} fold=${FOLD}/${N_FOLDS} Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
 python -u ./train.py --PMA --rna-genes literature_1500_intersection --dataset tcga --external --seed "${SEED}" \
@@ -55,5 +65,5 @@ python -u ./train.py --PMA --rna-genes literature_1500_intersection --dataset tc
     --patch-keep-frac 0.8 --rna-aux-weight 1.0 \
     --cluster-pool \
     --surv-loss nll_surv --nll-n-bins 4 \
-    --fold "${FOLD}" --n-folds "${N_FOLDS}" --group-ts 0906pma_clusterpool_nllsurv_10fold_array 2>&1 | tee "${log}"
+    --fold "${FOLD}" --n-folds "${N_FOLDS}" --group-ts 0906pma_clusterpool_nllsurv_2seed_kfold5_array 2>&1 | tee "${log}"
 echo "=== PMA+ClusterPool nll_surv loss(uni2native,cox_add,CLR100,CNV,MUT) seed=${SEED} fold=${FOLD}/${N_FOLDS} Complete: $(date) ==="
