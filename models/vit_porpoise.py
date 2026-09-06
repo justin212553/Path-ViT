@@ -154,10 +154,13 @@ class ViT_PORPOISE(ViT_M4):
         stage_ord: dict[str, torch.Tensor] | None = None,
         margin_ord: torch.Tensor | None = None,
         spatial_feat: torch.Tensor | None = None,
+        mutation_ord: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """clinical은 ViT_M4와 동일하게 여기 안 섞이고(combine_mode="cox_add" 고정) train.py가
         _clinical_embed()로 별도 계산해 최종 스칼라에 Cox 가산항으로 더한다. 여기서는 WSI-RNA만
-        BilinearFusion(Kronecker product)으로 융합한다."""
+        BilinearFusion(Kronecker product)으로 융합한다. mutation_ord는 margin_ord/stage_ord와
+        마찬가지로 여기서 안 쓰인다(train.py::_patient_risk가 use_mutation=True인 모델에는 항상
+        이 kwarg를 넘기므로, 시그니처에서 받아만 주고 무시 — 실제 사용은 _clinical_embed 쪽)."""
         fused = self.fusion(patient_embed, z_rna)  # (mmhid,)
         if spatial_feat is not None:
             fused = torch.cat([fused, spatial_feat], dim=-1)
