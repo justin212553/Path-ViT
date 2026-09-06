@@ -30,15 +30,21 @@ from utils.metrics import compute_survival_metrics
 
 
 def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> dict:
-    # train.py --eval-external-ckpt는 model_prefix를 그대로 파일명에 쓰는데, model_prefix 자체에
-    # 이미 "_FOLD{fold}OF{n_folds}" 접미사가 붙어 있다(args.fold is not None일 때 항상 추가됨,
-    # pool_kfold_preds.py::internal 예측 파일명과 동일한 관례) — 그래서 이 형태를 먼저 시도하고,
-    # 혹시 model_prefix에 그 접미사가 없는 값을 넘긴 경우를 대비해 접미사 없는 이름도 폴백으로 둔다.
-    path = pred_dir / f"{dataset}_{model}_FOLD{fold}OF{n_folds}_seed{seed}_fold{fold}of{n_folds}.csv"
-    if not path.exists():
-        path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"seed={seed} fold={fold} external 예측 파일을 못 찾음: {path}")
+    # 2026-09-06: model_prefix를 손으로 완벽히 재현해야 하는 두 개 하드코딩 패턴(with/without
+    # "_FOLD{fold}OF{n_folds}") 대신 글롭으로 찾는다 — scripts/pool_multiseed_kfold_preds.py::
+    # _find_pred_path와 동일한 이유/관례.
+    suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
+    matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    if len(matches) > 1:
+        raise ValueError(
+            f"seed={seed} fold={fold}: '{dataset}_{model}*{suffix}' 패턴에 여러 파일이 걸림 — "
+            f"{[p.name for p in matches]}"
+        )
+    if not matches:
+        nearby = sorted(pred_dir.glob(f"{dataset}_*{suffix}"))
+        hint = f" (같은 seed/fold의 다른 태그 후보: {[p.name for p in nearby]})" if nearby else " (같은 seed/fold 파일 자체가 없음 — 그 실행이 아직 안 끝났거나 실패했을 가능성)"
+        raise FileNotFoundError(f"seed={seed} fold={fold} external 예측 파일을 못 찾음: {pred_dir}/{dataset}_{model}*{suffix}{hint}")
+    path = matches[0]
     preds = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
