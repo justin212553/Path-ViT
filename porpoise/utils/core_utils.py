@@ -268,7 +268,12 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
         if isinstance(loss_fn, NLLSurvLoss):
             hazards = torch.sigmoid(h)
             survival = torch.cumprod(1 - hazards, dim=1)
-            risk = -torch.sum(survival, dim=1).detach().cpu().numpy()
+            # validate_survival/summary_survival과 동일한 numpy 버전 호환성 패치 — else 분기의
+            # .squeeze()와 동등하게 배치 차원 1개를 스칼라로 만든다(batch_size=1 항상 가정,
+            # 계산 자체는 동일). 원래 이 분기만 squeeze/item이 빠져 있어서 shape-(1,) 배열이
+            # 남았고, 100배치마다 찍는 아래 float(risk)에서 크래시했다(fold별 train 표본이
+            # 100개 이상일 때만 발현 — 97개였던 fold 0은 안 걸렸었음).
+            risk = -torch.sum(survival, dim=1).detach().cpu().item()
         else:
             risk = h.detach().cpu().numpy().squeeze()
 
