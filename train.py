@@ -496,6 +496,7 @@ def train_one_epoch(
     entropy_reg_weight: float = 0.0,
     surv_loss: str = "cox",
     nll_bin_edges: np.ndarray | None = None,
+    nll_cox_weight: float = 1.0,
     desc: str = "train",
 ) -> float:
     model.train()
@@ -512,7 +513,7 @@ def train_one_epoch(
     is_sam = isinstance(optimizer, SAM)
 
     def _compute_loss(risk_list, time_t, event_t, aux_list, stage_aux_list, entropy_list):
-        if surv_loss == "nll_surv":
+        if surv_loss in ("nll_surv", "both"):
             # risk_list의 각 원소는 _patient_risk가 branch_risk_out["hazard_logits"]로 빼둔
             # (n_bins,) raw hazard logit(스칼라 변환 전) — torch.cat이 아니라 torch.stack으로
             # (B, n_bins)를 만든다. y(시간-구간 label)는 이 fold의 train split에서 미리 fit한
@@ -521,6 +522,12 @@ def train_one_epoch(
             y_np = digitize_survival_time(time_t.detach().cpu().numpy(), nll_bin_edges)
             y = torch.from_numpy(y_np).to(h.device)
             loss = nll_surv_loss(h, y, event_t)
+            if surv_loss == "both":
+                # --nll-cox-weight: 같은 hazard logit에서 유도한 스칼라 risk(utils/losses.py::
+                # hazard_to_risk)에 cox_ph_loss를 추가로 적용해 더한다 — 두 loss가 서로 다른
+                # 것(전체 우도 vs 순위/분리력)을 최적화한다는 관찰에서, 한쪽만 고르지 않고
+                # 같이 최적화해보는 ablation.
+                loss = loss + nll_cox_weight * cox_ph_loss(hazard_to_risk(h), time_t, event_t)
         else:
             loss = cox_ph_loss(torch.cat(risk_list), time_t, event_t)
         if rna_aux_weight > 0 and aux_list:
@@ -548,7 +555,7 @@ def train_one_epoch(
         risks2, aux2, stage_aux2, entropy2 = [], [], [], []
         for ps in patients:
             branch_risk_out2 = {} if (ogm_ge_alpha is not None or entropy_reg_weight > 0
-                                       or surv_loss == "nll_surv") else None
+                                       or surv_loss in ("nll_surv", "both")) else None
             r2, a2_, s2_ = _patient_risk(
                 model, ps, device, amp_ctx, transform, chunk_size, patch_keep_frac,
                 shuffle_patches=shuffle_patches, tile_cache=tile_cache,
@@ -556,7 +563,7 @@ def train_one_epoch(
                 modality_dropout_p=modality_dropout_p,
                 branch_risk_out=branch_risk_out2,
             )
-            risks2.append(branch_risk_out2["hazard_logits"] if surv_loss == "nll_surv" else r2)
+            risks2.append(branch_risk_out2["hazard_logits"] if surv_loss in ("nll_surv", "both") else r2)
             if a2_ is not None:
                 aux2.append(a2_)
             if s2_ is not None:
@@ -696,7 +703,7 @@ def train_one_epoch(
         if len(patient_slides) == 0:
             continue
         branch_risk_out = {} if (ogm_ge_alpha is not None or entropy_reg_weight > 0
-                                  or surv_loss == "nll_surv") else None
+                                  or surv_loss in ("nll_surv", "both")) else None
         risk, aux_loss, stage_aux_loss = _patient_risk(
             model, patient_slides, device, amp_ctx, transform, chunk_size, patch_keep_frac,
             shuffle_patches=shuffle_patches, tile_cache=tile_cache,
@@ -705,7 +712,7 @@ def train_one_epoch(
             branch_risk_out=branch_risk_out,
         )
 
-        risks.append(branch_risk_out["hazard_logits"] if surv_loss == "nll_surv" else risk)
+        risks.append(branch_risk_out["hazard_logits"] if surv_loss in ("nll_surv", "both") else risk)
         times.append(patient_slides[0]["OS_time"])
         events.append(patient_slides[0]["OS_event"])
         if aux_loss is not None:
@@ -1625,7 +1632,7 @@ def _parse_args() -> argparse.Namespace:
              "학습 자체를 낮은 T로 처음부터 하게 만드는 ablation. 1.0(기본)이면 기존과 동일.",
     )
     parser.add_argument(
-        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv"],
+        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
         help="2026-09-06: 생존 loss 함수 선택. 기본 'cox'(utils/losses.py::cox_ph_loss, 이 "
              "프로젝트 전체 기본값, risk_head가 스칼라 log-risk 1개를 뱉음)는 동작 변화 없음. "
              "'nll_surv'는 PORPOISE(Chen et al. 2022) 원조 discretized-time NLL(utils/losses.py::"
@@ -1633,16 +1640,30 @@ def _parse_args() -> argparse.Namespace:
              "hazard logit을 뱉도록 바뀐다(models/vit_porpoise.py::ViT_PORPOISE surv_n_classes). "
              "'PORPOISE 공식 코드를 그대로 재현'(sbatch/run_porpoise_official_paad_*.sh)과는 "
              "별개 실험 — 이쪽은 우리 아키텍처/백본을 그대로 두고 loss 함수만 저쪽 것으로 "
-             "바꿔서, loss 함수 차이 자체가 성능에 미치는 영향만 분리해서 본다. --PORPOISE에서만 "
-             "쓸 수 있다(다른 모델은 risk_head 출력 차원 변경 미지원).",
+             "바꿔서, loss 함수 차이 자체가 성능에 미치는 영향만 분리해서 본다. "
+             "'both'(2026-09-06 추가): 두 loss를 더해서 같이 최적화한다 — cox/nll_surv 매칭 "
+             "실험에서 nll_surv가 raw C-index는 근소 우세, cox가 HR/log-rank 유의성·seed 간 "
+             "안정성은 확실히 우세했던 관찰(서로 다른 것을 최적화하는 게 원인으로 보임 — Cox "
+             "score test는 log-rank와 점근적으로 동일, nll_surv는 이분화 분리력을 직접 밀지 "
+             "않음)에서, 한쪽만 고르지 않고 같은 risk_head 출력(hazard logit)에서 둘 다 계산해 "
+             "더하면 상호 보완될 수 있다는 아이디어. hazard logit -> utils/losses.py::"
+             "hazard_to_risk로 스칼라화한 뒤 그 스칼라에 cox_ph_loss를 추가로 적용(가중치는 "
+             "--nll-cox-weight). --PORPOISE/--PMA에서만 쓸 수 있다(다른 모델은 risk_head 출력 "
+             "차원 변경 미지원).",
     )
     parser.add_argument(
         "--nll-n-bins", type=int, default=4,
-        help="--surv-loss nll_surv 전용 — 생존시간을 몇 개 구간으로 이산화할지(PORPOISE 논문 "
-             "기본값 4). 구간 경계는 매 fold의 train split 내 사망자(OS_event=1) OS_time만으로 "
-             "quantile fit한다(utils/losses.py::fit_survival_bins) — PORPOISE 원본은 전체 "
+        help="--surv-loss nll_surv/both 전용 — 생존시간을 몇 개 구간으로 이산화할지(PORPOISE "
+             "논문 기본값 4). 구간 경계는 매 fold의 train split 내 사망자(OS_event=1) OS_time만"
+             "으로 quantile fit한다(utils/losses.py::fit_survival_bins) — PORPOISE 원본은 전체 "
              "코호트로 fit하지만, 이 프로젝트의 RNA 유전자 선정 leakage 전례(findings_backlog.md)"
              "를 피하려고 항상 그 fold의 train split만 쓴다.",
+    )
+    parser.add_argument(
+        "--nll-cox-weight", type=float, default=1.0,
+        help="--surv-loss both 전용 — nll_surv_loss + 이 가중치 * cox_ph_loss(같은 hazard "
+             "logit에서 유도한 스칼라 risk 기준)로 합산할 때 cox 항의 가중치. 기본 1.0(동등 "
+             "가중). 0으로 주면 nll_surv 단독과 사실상 동일(디버그용).",
     )
     parser.add_argument(
         "--no-coattn", action="store_true",
@@ -2044,7 +2065,7 @@ def main():
             "--porpoise-attn-temperature는 plain gated-ABMIL(--porpoise-meanpool/--porpoise-coattn "
             "둘 다 꺼진 상태)에서만 의미가 있습니다."
         )
-    if args.surv_loss == "nll_surv" and not (args.PORPOISE or args.PMA):
+    if args.surv_loss in ("nll_surv", "both") and not (args.PORPOISE or args.PMA):
         raise ValueError("--surv-loss nll_surv는 --PORPOISE/--PMA에서만 사용 가능합니다(risk_head "
                           "출력 차원 변경을 이 두 클래스만 지원 — models/vit_porpoise.py, "
                           "models/vit_pma.py).")
@@ -2434,8 +2455,10 @@ def main():
         model_prefix += f"_MODDROP{args.modality_dropout_p:g}"
     if args.entropy_reg_weight > 0:
         model_prefix += f"_ENTREG{args.entropy_reg_weight:g}"
-    if args.surv_loss == "nll_surv":
+    if args.surv_loss in ("nll_surv", "both"):
         model_prefix += f"_NLLSURV{args.nll_n_bins}"
+    if args.surv_loss == "both":
+        model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     if args.lr is not None:
         model_prefix += f"_LR{args.lr:.0e}"
     if args.weight_decay is not None:
@@ -2743,7 +2766,7 @@ def main():
                               skip_patch_vit=args.skip_patch_vit,
                               use_meanpool=args.porpoise_meanpool, use_coattn=args.porpoise_coattn,
                               attn_temperature=args.porpoise_attn_temperature,
-                              surv_n_classes=(args.nll_n_bins if args.surv_loss == "nll_surv" else 1),
+                              surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
                               **stage_kwargs, **margin_kwargs, **mutation_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -2766,7 +2789,7 @@ def main():
                          coord_embed_shuffle=args.coord_embed_shuffle,
                          use_wsi_extra_mlp=args.wsi_extra_mlp,
                          use_coattn=not args.no_coattn,
-                         surv_n_classes=(args.nll_n_bins if args.surv_loss == "nll_surv" else 1),
+                         surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
                          cluster_pool=args.cluster_pool,
                          cluster_pool_after_vit=args.cluster_pool_after_vit,
                          cluster_pool_temperature=args.cluster_pool_temperature,
@@ -3297,7 +3320,7 @@ def main():
     # RNA 유전자 선정에서 겪은 것과 같은 종류의 leakage(findings_backlog.md)를 피하려고 이
     # 프로젝트에서는 항상 그 fold의 train split만 쓴다(utils/losses.py::fit_survival_bins).
     nll_bin_edges = None
-    if args.surv_loss == "nll_surv":
+    if args.surv_loss in ("nll_surv", "both"):
         _train_labels = train_ds.items.drop_duplicates("case_id")
         nll_bin_edges = fit_survival_bins(
             _train_labels["OS_time"].to_numpy(), _train_labels["OS_event"].to_numpy(),
@@ -3332,6 +3355,7 @@ def main():
                                          ogm_ge_epoch_progress=epoch / max(cfg.train.epochs - 1, 1),
                                          entropy_reg_weight=args.entropy_reg_weight,
                                          surv_loss=args.surv_loss, nll_bin_edges=nll_bin_edges,
+                                         nll_cox_weight=args.nll_cox_weight,
                                          desc=f"epoch {epoch+1} train")
         # train_c_index는 진단용 리포팅일 뿐 학습 신호가 아니라, val/test/external과 동일하게
         # 항상 증강 없는 eval_transform으로 평가한다 — train_ds.transform을 쓰면 --tile-augment
