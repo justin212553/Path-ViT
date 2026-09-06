@@ -352,13 +352,21 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
         if isinstance(loss_fn, NLLSurvLoss):
             hazards = torch.sigmoid(h)
             survival = torch.cumprod(1 - hazards, dim=1)
-            risk = -torch.sum(survival, dim=1).detach().cpu().numpy()
+            # 2026-09-06: batch_size=1(이 프로젝트 실행은 항상 기본값 그대로)이라 이 텐서는
+            # 원래도 원소 1개뿐인데, 예전 numpy는 .numpy()가 준 shape-(1,) 배열을 아래
+            # all_risk_scores[batch_idx]=risk(스칼라 슬롯) 대입에서 알아서 스칼라로 캐스팅해줬다
+            # — 지금 환경의 numpy는 이 암묵적 캐스팅을 막아 TypeError/ValueError로 막 학습
+            # 시작한 fold 0 validation에서 크래시했다. .item()으로 원래도 스칼라 1개였던 값을
+            # 명시적으로 스칼라로 뽑는 것뿐, 계산 자체는 전혀 안 바뀜(순수 환경 호환성 패치).
+            risk = -torch.sum(survival, dim=1).detach().cpu().item()
         else:
             risk = h.detach().cpu().numpy()
 
         all_risk_scores[batch_idx] = risk
-        all_censorships[batch_idx] = censor.detach().cpu().numpy()
-        all_event_times[batch_idx] = event_time.detach().cpu().numpy()
+        # censor/event_time도 risk와 같은 이유(batch_size=1, shape-(1,) 배열을 스칼라 슬롯에
+        # 대입)로 numpy 버전에 따라 똑같이 크래시할 수 있어 동일하게 .item()으로 고침.
+        all_censorships[batch_idx] = censor.detach().cpu().item()
+        all_event_times[batch_idx] = event_time.detach().cpu().item()
 
         val_loss_surv += loss_value
         val_loss += loss_value + loss_reg
@@ -409,7 +417,9 @@ def summary_survival(model, loader, n_classes):
         if h.shape[1] > 1:
             hazards = torch.sigmoid(h)
             survival = torch.cumprod(1 - hazards, dim=1)
-            risk = -torch.sum(survival, dim=1).detach().cpu().numpy()
+            # validate_survival과 동일한 numpy 버전 호환성 패치(.item()) — 계산 동일, 순수
+            # 스칼라 캐스팅 방식만 명시적으로 바꿈.
+            risk = -torch.sum(survival, dim=1).detach().cpu().item()
         else:
             risk = h.detach().cpu().numpy().squeeze()
 
