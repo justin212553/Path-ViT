@@ -106,8 +106,13 @@ class ViT_M4(ViT_M1):
             if gene_group_gene_ids is None:
                 raise ValueError("use_gene_group_rna=True면 gene_group_gene_ids가 필요합니다.")
             if gene_group_gene_sets is None:
-                from data.select_rnaseq_genes import PDAC_LITERATURE_GENE_SETS
-                gene_group_gene_sets = PDAC_LITERATURE_GENE_SETS
+                # 2026-09-07 버그 수정: data.select_rnaseq_genes.PDAC_LITERATURE_GENE_SETS는 유전자
+                # "심볼"("KRAS" 등)인데 gene_group_gene_ids(pdac_consistency 등)는 ENSG ID라 겹치는
+                # 게 하나도 없어 GeneGroupEncoder가 "카테고리 하나도 없음"으로 죽었다(실측
+                # ValueError). data.dataset.pathway_category_gene_ids()가 ENSG ID로 매핑해둔
+                # 버전(train.py가 --MCAT에서 실제로 쓰는 것과 동일) — 이걸 써야 한다.
+                from data.dataset import pathway_category_gene_ids
+                gene_group_gene_sets = pathway_category_gene_ids()
             from .gene_group_rna_encoder import GeneGroupRNAEncoder
             self.rna_encoder = GeneGroupRNAEncoder(
                 gene_group_gene_ids, gene_group_gene_sets, gene_group_cnv_dim,
