@@ -18,8 +18,10 @@
 # 있는지.
 #
 # 확정 레시피(PORPOISE 최종과 동일하게 최대한 맞춤):
-#   --PMA --cluster-pool, uni2native, pdac_consistency_1500, CNV, mutation, staging+margin,
-#   CLR100, --surv-loss both --nll-cox-weight 1.0, patch-keep-frac 0.8
+#   --PMA --cluster-pool --combine-mode cox_add, uni2native, pdac_consistency_1500, CNV,
+#   mutation, staging+margin, CLR100, --surv-loss both --nll-cox-weight 1.0, patch-keep-frac 0.8
+# --combine-mode cox_add 필수 — 2026-09-07 최초 제출 시 빠뜨려서 "use_mutation=True는
+# combine_mode='cox_add'에서만 지원합니다" ValueError로 즉시 죽었다(--PMA 기본값은 concat).
 # 뺀 것 — --attn-dispersion: cluster_pool=True는 forward()가 일찍 return해서 attn-dispersion/
 # spatial-autocorr 블록을 아예 안 타므로 같이 쓰면 ValueError(models/vit_pma.py 가드,
 # 2026-09-05 확인된 사양) — 애초에 호환 안 됨.
@@ -31,17 +33,17 @@
 #
 # 완료 후:
 #   python scripts/pool_multiseed_kfold_preds.py --dataset tcga \
-#       --model PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_CLR100_NLLSURV4_NLLCOX1 \
+#       --model PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4_NLLCOX1 \
 #       --seeds 84,126 --n-folds 5 --bootstrap 2000
 #   python scripts/pool_multiseed_external_preds.py --dataset cptac \
-#       --model PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_CLR100_NLLSURV4_NLLCOX1 \
+#       --model PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4_NLLCOX1 \
 #       --seeds 84,126 --n-folds 5 --bootstrap 2000
 # (정확한 태그는 train.py의 여러 조건부 접미사 순서를 직접 뽑은 추정치 — 실제 생성된 CSV로
 #  확인 권장: `ls .logs/kfold_preds/tcga_PMA_uni2native_PDACCONS1500*CLUSTERPOOL*`)
 # PORPOISE 최종(pdac_consistency_1500)과 paired bootstrap 비교:
 #   python scripts/paired_bootstrap_delta.py --split external --dataset cptac \
 #       --model-a PORPOISE_uni2native_PDACCONS1500_CNV_SS_STG_R_MUT_DISP_CLR100_NLLSURV4_NLLCOX1 \
-#       --model-b PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_CLR100_NLLSURV4_NLLCOX1 \
+#       --model-b PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4_NLLCOX1 \
 #       --seeds 84,126 --n-folds 5 --bootstrap 2000
 #
 # 제출: sbatch sbatch/pma_clusterpool_pdaccons_final_recipe_2seed_kfold_array_hpc.sh
@@ -61,10 +63,10 @@ SEED_IDX=$((IDX / N_FOLDS))
 FOLD=$((IDX % N_FOLDS))
 SEED=${SEEDS[$SEED_IDX]}
 
-log=".logs/train_tcga_seed${SEED}_PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_CLR100_NLLSURV4_NLLCOX1_kfold5_fold${FOLD}.log"
+log=".logs/train_tcga_seed${SEED}_PMA_uni2native_PDACCONS1500_CNV_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4_NLLCOX1_kfold5_fold${FOLD}.log"
 
 echo "=== PMA ClusterPool(pdac_consistency_1500, 확정 레시피) seed=${SEED} fold=${FOLD}/${N_FOLDS} Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
-python -u ./train.py --PMA --cluster-pool --rna-genes pdac_consistency_1500 --dataset tcga --external --seed "${SEED}" \
+python -u ./train.py --PMA --cluster-pool --combine-mode cox_add --rna-genes pdac_consistency_1500 --dataset tcga --external --seed "${SEED}" \
     --backbone uni2native \
     --clinical-margin --clinical-staging \
     --clinical-lr-mult 100 --use-cnv --clinical-mutation \
