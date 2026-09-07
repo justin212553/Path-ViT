@@ -39,10 +39,14 @@ def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, f
     # "_FOLD{fold}OF{n_folds}") 대신 글롭으로 찾는다 — scripts/pool_multiseed_kfold_preds.py::
     # _find_pred_path와 동일한 이유/관례.
     suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
-    matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    prefix = f"{dataset}_{model}"
+    matches = sorted(pred_dir.glob(f"{prefix}*{suffix}"))
     matches = [
         p for p in matches
-        if all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
+        # scripts/pool_multiseed_kfold_preds.py::_find_pred_path와 동일한 이유 — model 태그가
+        # 숫자로 끝날 때 와일드카드가 그 뒤에 숫자가 더 붙는 별개 태그까지 주워버리는 걸 막는다.
+        if not p.name[len(prefix):len(prefix) + 1].isdigit()
+        and all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
     ]
     if len(matches) > 1:
         raise ValueError(

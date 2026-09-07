@@ -42,10 +42,15 @@ def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: i
     하는 취약함을 없앤다. 단 _SPECIAL_INFIXES(진단용 변형 태그)는 --model이 명시적으로
     요청하지 않는 한 매칭에서 제외한다."""
     suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
-    matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    prefix = f"{dataset}_{model}"
+    matches = sorted(pred_dir.glob(f"{prefix}*{suffix}"))
     matches = [
         p for p in matches
-        if all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
+        # model 태그가 숫자로 끝날 때(예: "..._NLLCOX1") 와일드카드가 그 뒤에 숫자가 더 붙는
+        # 별개 태그(예: "..._NLLCOX10")까지 접두사 매칭으로 주워버리는 걸 막는다 — 접두사
+        # 바로 다음 글자가 숫자면 실제로는 다른 태그이므로 제외(2026-09-06 실사용 중 발견).
+        if not p.name[len(prefix):len(prefix) + 1].isdigit()
+        and all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
     ]
     if len(matches) == 1:
         return matches[0]
