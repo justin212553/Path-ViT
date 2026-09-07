@@ -76,6 +76,10 @@ class ViT_M4(ViT_M1):
         coord_embed_learnable_scale: bool = False,
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
+        use_gene_group_rna: bool = False,
+        gene_group_gene_ids: list[str] | None = None,
+        gene_group_gene_sets: dict[str, list[str]] | None = None,
+        gene_group_cnv_dim: int = 0,
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
                           skip_patch_vit=skip_patch_vit, use_coord_embed=use_coord_embed,
@@ -95,7 +99,22 @@ class ViT_M4(ViT_M1):
         # ViT_PMA의 use_clinical과 동일 관례. False면 clinical_encoder/clinical_linear를 아예
         # 안 만들고 risk_head 입력이 [z_wsi, z_rna]만으로 구성된다(train.py --no-clinical).
         self.use_clinical = use_clinical
-        self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
+        if use_gene_group_rna:
+            # 2026-09-06: models/gene_group_rna_encoder.py 참조 — 유전자를 8개 PDAC 카테고리로
+            # 나눠 카테고리마다 독립 Linear로 인코딩(+CNV를 9번째 카테고리로) 한 뒤 concat,
+            # 기존 flat RNAEncoder와 동일한 (B,G[+CNV])->(B,cfg.embed_dim) 인터페이스로 대체.
+            if gene_group_gene_ids is None:
+                raise ValueError("use_gene_group_rna=True면 gene_group_gene_ids가 필요합니다.")
+            if gene_group_gene_sets is None:
+                from data.select_rnaseq_genes import PDAC_LITERATURE_GENE_SETS
+                gene_group_gene_sets = PDAC_LITERATURE_GENE_SETS
+            from .gene_group_rna_encoder import GeneGroupRNAEncoder
+            self.rna_encoder = GeneGroupRNAEncoder(
+                gene_group_gene_ids, gene_group_gene_sets, gene_group_cnv_dim,
+                token_dim=cfg.embed_dim, out_dim=cfg.embed_dim,
+            )
+        else:
+            self.rna_encoder = RNAEncoder(rna_input_dim, cfg.embed_dim, dropout=cfg.dropout)
 
         # ViT_M1이 만든 context 없는 attn_pool을, z_rna(D차원)를 attention 게이트에
         # additive bias로 받을 수 있는 버전으로 교체한다 — RNA-guided attention pooling.

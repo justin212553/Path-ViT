@@ -1634,6 +1634,20 @@ def _parse_args() -> argparse.Namespace:
              "학습 자체를 낮은 T로 처음부터 하게 만드는 ablation. 1.0(기본)이면 기존과 동일.",
     )
     parser.add_argument(
+        "--rna-gene-groups", action="store_true",
+        help="2026-09-06: --PORPOISE 전용 — flat RNAEncoder(1500+개 유전자를 그대로 하나의 MLP에 "
+             "concat) 대신 models/gene_group_rna_encoder.py::GeneGroupRNAEncoder를 쓴다: 유전자를 "
+             "8개 PDAC 카테고리로 나눠 카테고리마다 독립된 학습 Linear로 토큰 하나씩 만들고(models/"
+             "gene_group_encoder.py, MCAT과 동일 컴포넌트), --use-cnv면 CNV를 9번째 카테고리로 "
+             "같은 방식으로 인코딩한 뒤, 전부 concat해서 cfg.embed_dim으로 재투영한다. 그 뒤로는 "
+             "기존 BilinearFusion(z_wsi, z_rna)에 그대로 들어가 하류는 전혀 안 바뀐다. 배경 — "
+             "카테고리를 unsigned mean으로 뭉갠 pathway8은 실패(external C 0.49~0.52)했고, 카테고리별 "
+             "학습 Linear(지금 이 컴포넌트)를 co-attention과 묶은 MCAT도 internal C=0.46으로 더 "
+             "나빴지만, 진단 결과 원인은 카테고리 집계가 아니라 co-attention 자체의 uniform 붕괴였다"
+             "(findings_backlog.md). 즉 카테고리별 학습 집계는 이미 검증됐고 fusion만 문제였으므로, "
+             "attention에 의존하지 않는 PORPOISE의 BilinearFusion과 처음으로 조합해본다.",
+    )
+    parser.add_argument(
         "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
         help="2026-09-06: 생존 loss 함수 선택. 기본 'cox'(utils/losses.py::cox_ph_loss, 이 "
              "프로젝트 전체 기본값, risk_head가 스칼라 log-risk 1개를 뱉음)는 동작 변화 없음. "
@@ -2067,6 +2081,14 @@ def main():
             "--porpoise-attn-temperature는 plain gated-ABMIL(--porpoise-meanpool/--porpoise-coattn "
             "둘 다 꺼진 상태)에서만 의미가 있습니다."
         )
+    if args.rna_gene_groups and not args.PORPOISE:
+        raise ValueError("--rna-gene-groups는 --PORPOISE에서만 사용 가능합니다.")
+    if args.rna_gene_groups and args.rna_genes == "pathway8":
+        raise ValueError(
+            "--rna-gene-groups는 --rna-genes pathway8과 같이 쓸 수 없습니다 — pathway8은 이미 "
+            "카테고리 평균으로 뭉갠 8차원 입력이라 GeneGroupRNAEncoder가 다시 카테고리로 나눌 "
+            "개별 유전자 z-score가 없습니다."
+        )
     if args.surv_loss in ("nll_surv", "both") and not (args.PORPOISE or args.PMA):
         raise ValueError("--surv-loss nll_surv는 --PORPOISE/--PMA에서만 사용 가능합니다(risk_head "
                           "출력 차원 변경을 이 두 클래스만 지원 — models/vit_porpoise.py, "
@@ -2335,6 +2357,10 @@ def main():
     if args.use_cnv:
         # _CNV = train_light.py와 동일 관례(data/extract_cnv.py 산출물 concat, 2026-09-03 이식).
         model_prefix += "_CNV"
+    if args.rna_gene_groups:
+        # _GENEGROUP = flat RNAEncoder 대신 GeneGroupRNAEncoder(8개 카테고리+CNV 9번째, 카테고리별
+        # 학습 Linear) 사용 표시.
+        model_prefix += "_GENEGROUP"
     if args.patch_keep_frac < 1.0:
         # _SS = PatchDropout(패치 서브샘플링) 사용 표시 - 위 _EX와 같은 관례.
         model_prefix += "_SS"
@@ -2793,6 +2819,9 @@ def main():
                               use_meanpool=args.porpoise_meanpool, use_coattn=args.porpoise_coattn,
                               attn_temperature=args.porpoise_attn_temperature,
                               surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
+                              use_gene_group_rna=args.rna_gene_groups,
+                              gene_group_gene_ids=rna_gene_ids if args.rna_gene_groups else None,
+                              gene_group_cnv_dim=(8 if (args.rna_gene_groups and args.use_cnv) else 0),
                               **stage_kwargs, **margin_kwargs, **mutation_kwargs).to(device)
     elif args.M4B:
         model = ViT_M4B(cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
@@ -3259,6 +3288,8 @@ def main():
         tag += "_EX"
     if args.use_cnv:
         tag += "_CNV"
+    if args.rna_gene_groups:
+        tag += "_GENEGROUP"
     if args.patch_keep_frac < 1.0:
         tag += "_SS"
     if args.rna_aux_weight > 0:

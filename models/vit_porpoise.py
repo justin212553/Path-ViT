@@ -91,6 +91,10 @@ class ViT_PORPOISE(ViT_M4):
         num_heads: int = 4,
         attn_temperature: float = 1.0,
         surv_n_classes: int = 1,
+        use_gene_group_rna: bool = False,
+        gene_group_gene_ids: list[str] | None = None,
+        gene_group_gene_sets: dict[str, list[str]] | None = None,
+        gene_group_cnv_dim: int = 0,
     ):
         if use_meanpool and use_coattn:
             raise ValueError("use_meanpool과 use_coattn은 동시에 켤 수 없습니다(attn_pool 자리가 하나뿐).")
@@ -104,7 +108,11 @@ class ViT_PORPOISE(ViT_M4):
                           use_mutation=use_mutation, mutation_stats=mutation_stats,
                           use_age_sex=use_age_sex,
                           combine_mode="cox_add", use_attn_dispersion=use_attn_dispersion,
-                          skip_patch_vit=skip_patch_vit, use_clinical=True)
+                          skip_patch_vit=skip_patch_vit, use_clinical=True,
+                          use_gene_group_rna=use_gene_group_rna,
+                          gene_group_gene_ids=gene_group_gene_ids,
+                          gene_group_gene_sets=gene_group_gene_sets,
+                          gene_group_cnv_dim=gene_group_cnv_dim)
 
         # ViT_M4가 만든 RNA-guided attn_pool(context_dim=embed_dim)을 평범한 gated-ABMIL로
         # 교체 — PORPOISE는 원래 WSI 풀링 단계에서 RNA를 전혀 참조하지 않는다.
