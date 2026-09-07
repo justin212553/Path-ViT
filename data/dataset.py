@@ -161,6 +161,40 @@ def porpoise_official_gene_ids() -> list[str]:
 
 
 @lru_cache(maxsize=None)
+def pdac_consistency_cox_intersection_gene_ids(top_n: int = 1500, p_threshold: float = 0.01) -> list[str]:
+    """
+    2026-09-06: pdac_consistency_gene_ids()(외부 5개 PDAC 마이크로어레이 데이터셋 교차분석,
+    우리 코호트/라벨 전혀 미참조)와 TCGA-only Cox 회귀(data/rna_gene_selection_tcgaonly/
+    gene_cox_ranking.csv::tcga_cox_p, nominal p<{p_threshold}, BH 보정 안 함)의 교집합.
+
+    literature_guided_gene_ids_intersection()의 leakage는 "TCGA-only 순위와 CPTAC-only 순위의
+    교집합"이라면서도 그 각각의 순위 자체가 반대 코호트 정보 없이도 우리 코호트(TCGA 또는
+    CPTAC) 라벨을 써서 계산된다는 점과 무관하게, "intersection"이라는 이름이 실제로는 두
+    코호트 모두의 신호를 반영한 유전자만 남긴다는 의미였다 — 사용자 지적(2026-09-06): 그
+    "CPTAC 정보가 섞여 들어간다"는 성격 자체를 없애고 싶다. 여기서는 CPTAC을 아예 참조하지
+    않는다 — 외부(비-TCGA/CPTAC) 검증 하나(pdac_consistency)와 TCGA 자체 신호 하나만 결합한다.
+
+    internal(TCGA 5-fold CV) 관점에서는 이것도 fold-safe는 아니다(Cox 랭킹이 fold 분할 전
+    TCGA 전체로 계산됨) — 다만 external(CPTAC) 평가에는 전혀 영향이 없고(CPTAC 데이터가
+    이 유전자 선택 과정 어디에도 등장하지 않음), literature_1500_intersection처럼 "CPTAC
+    라벨이 유전자 선택에 섞여 있다"는 종류의 leakage는 없다.
+    """
+    ranking_path = Path("data/rna_gene_selection_tcgaonly/gene_cox_ranking.csv")
+    if not ranking_path.exists():
+        raise FileNotFoundError(f"{ranking_path} 없음")
+    ranking = pd.read_csv(ranking_path)
+    cox_genes = set(ranking.loc[ranking["tcga_cox_p"] < p_threshold, "gene_id"])
+    consistency_genes = set(pdac_consistency_gene_ids(top_n))
+    gene_ids = sorted(cox_genes & consistency_genes)
+    if not gene_ids:
+        raise RuntimeError(
+            f"pdac_consistency_{top_n}과 TCGA-only Cox(p<{p_threshold}) 교집합이 0개 — "
+            "gene_id 포맷(ENSG 버전 suffix 등)이 서로 다른지 확인 필요"
+        )
+    return gene_ids
+
+
+@lru_cache(maxsize=None)
 def pdac_consistency_gene_ids(top_n: int) -> list[str]:
     """
     data/select_rnaseq_genes_pdac_consistency.py 산출물 로더 — porpoise_sig(암종 무관 범용
