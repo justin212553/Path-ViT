@@ -161,11 +161,16 @@ def porpoise_official_gene_ids() -> list[str]:
 
 
 @lru_cache(maxsize=None)
-def pdac_consistency_cox_intersection_gene_ids(top_n: int = 1500, p_threshold: float = 0.01) -> list[str]:
+def pdac_consistency_cox_union_gene_ids(top_n: int = 1500, p_threshold: float = 0.01) -> list[str]:
     """
     2026-09-06: pdac_consistency_gene_ids()(외부 5개 PDAC 마이크로어레이 데이터셋 교차분석,
     우리 코호트/라벨 전혀 미참조)와 TCGA-only Cox 회귀(data/rna_gene_selection_tcgaonly/
-    gene_cox_ranking.csv::tcga_cox_p, nominal p<{p_threshold}, BH 보정 안 함)의 교집합.
+    gene_cox_ranking.csv::tcga_cox_p, nominal p<{p_threshold}, BH 보정 안 함)의 합집합.
+
+    교집합(147개, top_n=1500/p_threshold=0.01 기준)으로 먼저 시도했으나 기존에 써오던
+    ~1500개 대비 너무 급격히 줄어들어(사용자 판단, 2026-09-06) 합집합으로 전환 — 둘 중
+    하나라도 통과하면 포함하므로 pdac_consistency_1500 단독보다 항상 크거나 같다(최대
+    top_n + cox 통과 유전자 수 - 교집합, 실측 약 2072개).
 
     literature_guided_gene_ids_intersection()의 leakage는 "TCGA-only 순위와 CPTAC-only 순위의
     교집합"이라면서도 그 각각의 순위 자체가 반대 코호트 정보 없이도 우리 코호트(TCGA 또는
@@ -185,13 +190,7 @@ def pdac_consistency_cox_intersection_gene_ids(top_n: int = 1500, p_threshold: f
     ranking = pd.read_csv(ranking_path)
     cox_genes = set(ranking.loc[ranking["tcga_cox_p"] < p_threshold, "gene_id"])
     consistency_genes = set(pdac_consistency_gene_ids(top_n))
-    gene_ids = sorted(cox_genes & consistency_genes)
-    if not gene_ids:
-        raise RuntimeError(
-            f"pdac_consistency_{top_n}과 TCGA-only Cox(p<{p_threshold}) 교집합이 0개 — "
-            "gene_id 포맷(ENSG 버전 suffix 등)이 서로 다른지 확인 필요"
-        )
-    return gene_ids
+    return sorted(cox_genes | consistency_genes)
 
 
 @lru_cache(maxsize=None)

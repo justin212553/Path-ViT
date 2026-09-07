@@ -47,7 +47,7 @@ from config import Config
 from data.dataset import (
     WSISurvivalDataset, CLINICAL_PATHS, pdac_subtype_gene_ids, literature_guided_gene_ids,
     resolve_tcga_only_rna_genes, pathway_category_gene_ids, literature_guided_gene_ids_intersection,
-    pdac_consistency_gene_ids, pdac_consistency_cox_intersection_gene_ids,
+    pdac_consistency_gene_ids, pdac_consistency_cox_union_gene_ids,
 )
 from data.patch_utils import (
     FEATURES_AUG_FILENAME, PATCH_TRANSFORM, PATCH_TRANSFORM_AUGMENTED,
@@ -824,7 +824,7 @@ def _parse_args() -> argparse.Namespace:
             "literature_1500_tcga_only", "literature_fdr0.1_tcga_only",
             "literature_fdr0.1_cptac_only", "literature_1500_intersection",
             "pdac_consistency_500", "pdac_consistency_1000", "pdac_consistency_1500",
-            "pdac_consistency_2000", "pdac_consistency_cox_intersect_tcga",
+            "pdac_consistency_2000", "pdac_consistency_cox_union_tcga",
         ],
         help="RNA 브랜치(--M4/--M4A/--M4B/--PM4/--PMA/--M6/--M6X) 입력 유전자셋 선택. "
              "subtype(기본): pdac_subtype_gene_ids(), Bailey/Moffitt subtype 분류용 ~340개. "
@@ -2217,12 +2217,13 @@ def main():
         elif args.rna_genes.endswith("_intersection"):
             rna_gene_ids  = literature_guided_gene_ids_intersection(int(args.rna_genes.split("_")[1]))
             rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
-        elif args.rna_genes == "pdac_consistency_cox_intersect_tcga":
+        elif args.rna_genes == "pdac_consistency_cox_union_tcga":
             # 2026-09-06: pdac_consistency_1500(외부 5개 PDAC 데이터셋 교차분석, leakage 없음)과
-            # TCGA-only Cox 회귀(nominal p<0.01, CPTAC 전혀 미참조)의 교집합 — 사용자 요청,
-            # data/dataset.py::pdac_consistency_cox_intersection_gene_ids 참조. "pdac_consistency_"
+            # TCGA-only Cox 회귀(nominal p<0.01, CPTAC 전혀 미참조)의 합집합(약 2072개, 교집합
+            # 147개는 기존 ~1500개 대비 너무 급격히 줄어 사용자 판단으로 합집합 채택) —
+            # data/dataset.py::pdac_consistency_cox_union_gene_ids 참조. "pdac_consistency_"
             # 접두사 일반 분기(아래)보다 먼저 걸러야 한다(그쪽은 마지막 토큰을 정수로 파싱 시도).
-            rna_gene_ids  = pdac_consistency_cox_intersection_gene_ids(1500, 0.01)
+            rna_gene_ids  = pdac_consistency_cox_union_gene_ids(1500, 0.01)
             rna_input_dim = len(rna_gene_ids) + (8 if args.use_cnv else 0)
         elif args.rna_genes.startswith("pdac_consistency_"):
             # 2026-09-03: train_light.py --rna-genes pdac_consistency_{500,1000,1500,2000}과
@@ -2305,10 +2306,10 @@ def main():
     elif args.rna_genes.endswith("_intersection"):
         # _INT{n} = TCGA-only/CPTAC-only 순위 교집합(양방향 leakage-free) 사용 표시.
         model_prefix += f"_INT{args.rna_genes.split('_')[1]}"
-    elif args.rna_genes == "pdac_consistency_cox_intersect_tcga":
-        # _PDACCOXINT = pdac_consistency_1500 ∩ TCGA-only Cox(p<0.01) — pdac_consistency_*
+    elif args.rna_genes == "pdac_consistency_cox_union_tcga":
+        # _PDACCOXUNION = pdac_consistency_1500 ∪ TCGA-only Cox(p<0.01) — pdac_consistency_*
         # 일반 분기보다 먼저 걸러야 한다(아래 분기는 마지막 토큰을 N으로 오인).
-        model_prefix += "_PDACCOXINT"
+        model_prefix += "_PDACCOXUNION"
     elif args.rna_genes.startswith("pdac_consistency_"):
         # _PDACCONS{N} = train_light.py와 동일 관례(JCI Insight 2025 5-데이터셋 교차분석
         # 일관성 순위 top-N, 2026-09-03 이식) — literature_*(_EX) 계열과 절대 안 섞이게 별도 태그.
@@ -3232,8 +3233,8 @@ def main():
         tag += f"_EXT{args.rna_genes.split('_')[1]}CPTAC"
     elif args.rna_genes.endswith("_intersection"):
         tag += f"_INT{args.rna_genes.split('_')[1]}"
-    elif args.rna_genes == "pdac_consistency_cox_intersect_tcga":
-        tag += "_PDACCOXINT"
+    elif args.rna_genes == "pdac_consistency_cox_union_tcga":
+        tag += "_PDACCOXUNION"
     elif args.rna_genes.startswith("pdac_consistency_"):
         tag += f"_PDACCONS{args.rna_genes.rsplit('_', 1)[1]}"
     elif args.rna_genes != "subtype":
