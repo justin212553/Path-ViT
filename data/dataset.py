@@ -161,6 +161,32 @@ def porpoise_official_gene_ids() -> list[str]:
 
 
 @lru_cache(maxsize=None)
+def tcga_cox_nominal_gene_ids(p_threshold: float = 0.01) -> list[str]:
+    """
+    2026-09-07: TCGA-only Cox 회귀(data/rna_gene_selection_tcgaonly/gene_cox_ranking.csv::
+    tcga_cox_p, nominal p<{p_threshold}, BH 보정 안 함) 단독 유전자셋 — CPTAC 라벨은 전혀
+    참조하지 않는다(literature_1500_intersection의 leakage 원인이던 "CPTAC-only 순위와의
+    교집합"과 무관). p_threshold=0.01 기준 719개.
+
+    지금까지는 이 유전자셋을 pdac_consistency_1500과 합쳐서(pdac_consistency_cox_union_gene_ids)
+    한 모델에 같이 넣는 용도로만 썼는데(external 유의하게 악화 — 아마 차원이 1500을 넘어가서),
+    "domain-specific(TCGA에 맞춰진) 모델"과 "generalist(pdac_consistency, 코호트 라벨 전혀
+    미참조) 모델"을 따로 학습시켜 예측만 나중에 앙상블하자는 목적으로는 아직 단독으로 학습해본
+    적이 없다(사용자 요청, 2026-09-07) — literature_1500_intersection을 domain-specific
+    구성요소로 쓰면 그 자체의 CPTAC leakage가 앙상블에도 그대로 섞여 방어가 안 되는 문제를
+    피하기 위함.
+    """
+    ranking_path = Path("data/rna_gene_selection_tcgaonly/gene_cox_ranking.csv")
+    if not ranking_path.exists():
+        raise FileNotFoundError(f"{ranking_path} 없음")
+    ranking = pd.read_csv(ranking_path)
+    gene_ids = sorted(ranking.loc[ranking["tcga_cox_p"] < p_threshold, "gene_id"])
+    if not gene_ids:
+        raise RuntimeError(f"TCGA-only Cox p<{p_threshold} 통과 유전자가 0개")
+    return gene_ids
+
+
+@lru_cache(maxsize=None)
 def pdac_consistency_cox_union_gene_ids(top_n: int = 1500, p_threshold: float = 0.01) -> list[str]:
     """
     2026-09-06: pdac_consistency_gene_ids()(외부 5개 PDAC 마이크로어레이 데이터셋 교차분석,
