@@ -37,6 +37,7 @@ from train_light import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
 )
 from train import _branch_param_groups
+from utils.losses import fit_survival_bins
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_case_table_kfold,
@@ -96,6 +97,14 @@ def main():
                               "M4(scripts/train_brca_m4.py)와 반드시 동일 --seed/--fold/--n-folds로 "
                               "비교해야 같은 데이터 분할이 된다.")
     parser.add_argument("--n-folds", type=int, default=5)
+    parser.add_argument(
+        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
+        help="2026-09-07: train.py --surv-loss 이식(train_light.py에 새로 포팅) — PAAD 최종 "
+             "레시피가 'both'로 확정된 뒤에도 M7은 범위 밖이라 빠져 있었다. PORPOISE/ClusterPool과 "
+             "loss를 맞춰야 공정한 비교가 되어 이제 포팅한다(사용자 지적).",
+    )
+    parser.add_argument("--nll-n-bins", type=int, default=4)
+    parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     parser.add_argument(
         "--external-tss", type=str, default=EXTERNAL_TSS,
         help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
@@ -191,12 +200,17 @@ def main():
     model = ClinicalRNAOnly(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         use_staging=args.clinical_staging, stage_stats=stage_stats,
+        surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
     ).to(device)
     model_prefix = f"BRCA_M7_{gene_tag}"
     if args.gene_selection == "cox":
         model_prefix += "_COXGENE"
     if args.clinical_staging:
         model_prefix += "_STG"
+    if args.surv_loss in ("nll_surv", "both"):
+        model_prefix += f"_NLLSURV{args.nll_n_bins}"
+    if args.surv_loss == "both":
+        model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     if args.clinical_lr_mult != 1.0:
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     # M4(scripts/train_brca_m4.py)와 동일 관례 — model_prefix 자체는 fold와 무관하게 유지하고
@@ -256,10 +270,25 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
+    # train.py::fit_survival_bins 호출부와 동일 관례 — 이 fold의 train split만으로 시간-구간
+    # 경계를 fit한다.
+    nll_bin_edges = None
+    if args.surv_loss in ("nll_surv", "both"):
+        _train_labels = cases[cases["split"] == "train"]
+        nll_bin_edges = fit_survival_bins(
+            _train_labels["OS_time"].to_numpy(), _train_labels["OS_event"].to_numpy(),
+            n_bins=args.nll_n_bins,
+        )
+        print(f"[nll_surv] train split {len(_train_labels)}명 기준 시간-구간 경계({args.nll_n_bins}bins): "
+              f"{nll_bin_edges}")
+
     best_score, best_metrics, epochs_since_improvement = -1.0, {}, 0
     for epoch in range(cfg.light.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
-        loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size)
+        loss = train_one_epoch(
+            model, train_loader, optimizer, device, cfg.light.cox_batch_size,
+            surv_loss=args.surv_loss, nll_bin_edges=nll_bin_edges, nll_cox_weight=args.nll_cox_weight,
+        )
         train_metrics = evaluate(model, train_eval_loader, device)
         metrics = evaluate(model, val_loader, device)
         val_td_auc = compute_time_dependent_auc(

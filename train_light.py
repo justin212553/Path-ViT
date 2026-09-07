@@ -50,7 +50,7 @@ from models.clinical_encoder import (
     mutation_stats_from_csv, mutation_stats_from_df, MUTATION_FIELDS,
 )
 from utils import load_env, send_slack
-from utils.losses import cox_ph_loss
+from utils.losses import cox_ph_loss, nll_surv_loss, hazard_to_risk, digitize_survival_time
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
 
 
@@ -198,7 +198,8 @@ def _identity_collate(batch: list) -> list:
     return batch[0]
 
 
-def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | None = None) -> torch.Tensor:
+def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | None = None,
+                   branch_risk_out: dict | None = None) -> torch.Tensor:
     """WSI 없이 환자 단위 메타데이터(age/sex 및/또는 rna, --HDP면 군집 히스토그램까지)만으로
     risk score를 계산한다.
 
@@ -223,14 +224,14 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
             hdp_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         case_id = p["case_id"]
         cluster_hist = cluster_hist_lookup[case_id].to(device, non_blocking=True)
-        return model(
+        risk = model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
             p["rna"].to(device, non_blocking=True),
             cluster_hist,
             **hdp_clinical_kwargs,
         )
-    if is_m7:
+    elif is_m7:
         m7_clinical_kwargs = {}
         # 2026-08-05: use_margin은 이제 combine_mode 무관하게 model 자체에 있다(film/cox_add도
         # margin 지원) — model.clinical_encoder(concat 전용, film/cox_add엔 없음)가 아니라
@@ -242,32 +243,50 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
             m7_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
         if getattr(model, "use_mutation", False):
             m7_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
-        return model(
+        risk = model(
             p["age_years"].to(device, non_blocking=True),
             p["sex_idx"].to(device, non_blocking=True),
             p["rna"].to(device, non_blocking=True),
             **m7_clinical_kwargs,
         )
-    if has_rna:
-        return model(p["rna"].to(device, non_blocking=True))
-    # 2026-08-21: ClinicalOnly(M5)의 raw_linear=True 버전은 clinical_encoder 자체가 없다
-    # (models/clinical_only.py) — M7과 동일하게 model 자체의 use_margin/use_staging을 본다.
-    margin_kwargs = {}
-    if getattr(model, "use_margin", False):
-        margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
-    if getattr(model, "use_staging", False):
-        margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
-    if getattr(model, "use_mutation", False):
-        margin_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
-    return model(
-        p["age_years"].to(device, non_blocking=True),
-        p["sex_idx"].to(device, non_blocking=True),
-        **margin_kwargs,
-    )
+    elif has_rna:
+        risk = model(p["rna"].to(device, non_blocking=True))
+    else:
+        # 2026-08-21: ClinicalOnly(M5)의 raw_linear=True 버전은 clinical_encoder 자체가 없다
+        # (models/clinical_only.py) — M7과 동일하게 model 자체의 use_margin/use_staging을 본다.
+        margin_kwargs = {}
+        if getattr(model, "use_margin", False):
+            margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
+        if getattr(model, "use_staging", False):
+            margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+        if getattr(model, "use_mutation", False):
+            margin_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
+        risk = model(
+            p["age_years"].to(device, non_blocking=True),
+            p["sex_idx"].to(device, non_blocking=True),
+            **margin_kwargs,
+        )
+
+    # 2026-09-07: train.py::_patient_risk와 동일한 패턴 — surv_n_classes>1(--surv-loss nll_surv/
+    # both)이면 model(...)이 (n_bins,) raw hazard logit을 뱉는다. branch_risk_out이 주어졌을 때만
+    # (train_one_epoch가 학습 loss용으로 넘김) 그 raw logit을 그대로 빼돌리고, 반환값 자체는
+    # 항상 hazard_to_risk()로 변환한 스칼라로 통일한다 — evaluate()의 13개 호출부는 전혀 안 바뀜.
+    if risk.numel() > 1:
+        if branch_risk_out is not None:
+            branch_risk_out["hazard_logits"] = risk
+        risk = hazard_to_risk(risk).view(1)
+    return risk
 
 
 def train_one_epoch(model, loader, optimizer, device, batch_size: int,
-                     cluster_hist_lookup: dict | None = None) -> float:
+                     cluster_hist_lookup: dict | None = None,
+                     surv_loss: str = "cox", nll_bin_edges: np.ndarray | None = None,
+                     nll_cox_weight: float = 1.0) -> float:
+    """2026-09-07: train.py --surv-loss(nll_surv/both) 이식 — scripts/train_brca_m7.py에서
+    쓸 수 있게. surv_loss="cox"(기본)면 기존 동작과 완전히 동일(risks 리스트에 스칼라를 그대로
+    쌓아 cox_ph_loss 한 번). nll_surv/both면 _patient_risk가 branch_risk_out으로 빼준 raw
+    (n_bins,) hazard logit을 대신 쌓아 torch.stack으로 (B,n_bins)를 만들고, train.py::
+    train_one_epoch의 _compute_loss와 동일한 방식으로 손실을 계산한다."""
     model.train()
     total_loss, total_batches = 0.0, 0
     risks, times, events = [], [], []
@@ -276,7 +295,17 @@ def train_one_epoch(model, loader, optimizer, device, batch_size: int,
         nonlocal risks, times, events, total_loss, total_batches
         if not risks:
             return
-        loss = cox_ph_loss(torch.cat(risks), torch.cat(times).to(device), torch.cat(events).to(device))
+        time_t = torch.cat(times).to(device)
+        event_t = torch.cat(events).to(device)
+        if surv_loss in ("nll_surv", "both"):
+            h = torch.stack(risks)  # (B, n_bins)
+            y_np = digitize_survival_time(time_t.detach().cpu().numpy(), nll_bin_edges)
+            y = torch.from_numpy(y_np).to(h.device)
+            loss = nll_surv_loss(h, y, event_t)
+            if surv_loss == "both":
+                loss = loss + nll_cox_weight * cox_ph_loss(hazard_to_risk(h), time_t, event_t)
+        else:
+            loss = cox_ph_loss(torch.cat(risks), time_t, event_t)
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -288,7 +317,12 @@ def train_one_epoch(model, loader, optimizer, device, batch_size: int,
     for patient_slides in loader:
         if len(patient_slides) == 0:
             continue
-        risks.append(_patient_risk(model, patient_slides, device, cluster_hist_lookup))
+        if surv_loss in ("nll_surv", "both"):
+            branch_risk_out = {}
+            _patient_risk(model, patient_slides, device, cluster_hist_lookup, branch_risk_out=branch_risk_out)
+            risks.append(branch_risk_out["hazard_logits"])
+        else:
+            risks.append(_patient_risk(model, patient_slides, device, cluster_hist_lookup))
         times.append(patient_slides[0]["OS_time"])
         events.append(patient_slides[0]["OS_event"])
         if len(risks) >= batch_size:

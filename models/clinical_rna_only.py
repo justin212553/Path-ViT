@@ -90,8 +90,10 @@ class ClinicalRNAOnly(nn.Module):
                  use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
                  use_age_sex: bool = True,
                  use_staging: bool = False, stage_stats: dict[str, tuple[float, float]] | None = None,
-                 use_mutation: bool = False, mutation_stats: dict[str, tuple[float, float]] | None = None):
+                 use_mutation: bool = False, mutation_stats: dict[str, tuple[float, float]] | None = None,
+                 surv_n_classes: int = 1):
         super().__init__()
+        self.surv_n_classes = surv_n_classes
         if combine_mode not in ("concat", "film", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         if use_margin and margin_stats is None:
@@ -130,7 +132,7 @@ class ClinicalRNAOnly(nn.Module):
             if risk_hidden_dim is None:
                 self.risk_head = nn.Sequential(
                     nn.LayerNorm(fused_dim),
-                    nn.Linear(fused_dim, 1),
+                    nn.Linear(fused_dim, surv_n_classes),
                 )
             else:
                 # 2026-07-29: 레퍼런스(tabular_survival.py::ClinicalRNASeqSurvivalModel.classifier)
@@ -146,12 +148,12 @@ class ClinicalRNAOnly(nn.Module):
                     nn.Linear(fused_dim, risk_hidden_dim),
                     nn.GELU(),
                     nn.Dropout(risk_dropout),
-                    nn.Linear(risk_hidden_dim, 1),
+                    nn.Linear(risk_hidden_dim, surv_n_classes),
                 )
         else:
             self.risk_head = nn.Sequential(
                 nn.LayerNorm(rna_dim),
-                nn.Linear(rna_dim, 1),
+                nn.Linear(rna_dim, surv_n_classes),
             )
             if combine_mode == "cox_add":
                 # raw z-score feature를 clinical_linear(bias 없음, zero-init)에 직접 넣는다 —
@@ -277,7 +279,7 @@ class ClinicalRNAOnly(nn.Module):
                 age_years.unsqueeze(0), sex_idx.unsqueeze(0), **clinical_kwargs
             ).squeeze(0)  # (D,)
             fused = torch.cat([z_c, z_r], dim=-1)                                                  # (2D,)
-            return self.risk_head(fused.unsqueeze(0)).view(1)
+            return self.risk_head(fused.unsqueeze(0)).view(-1)
 
         clin_embed = self._clinical_embed(age_years, sex_idx, margin_ord, stage_ord=stage_ord,
                                            mutation_ord=mutation_ord)  # (1, D)
@@ -285,10 +287,10 @@ class ClinicalRNAOnly(nn.Module):
             gamma = self.film_gamma(clin_embed).view(1)  # (1,)
             beta = self.film_beta(clin_embed).view(1)    # (1,)
             z_r_mod = gamma * z_r + beta                # (D,) — 전 차원에 균일 스케일/이동
-            return self.risk_head(z_r_mod.unsqueeze(0)).view(1)
+            return self.risk_head(z_r_mod.unsqueeze(0)).view(-1)
 
         # cox_add
-        risk_rna = self.risk_head(z_r.unsqueeze(0)).view(1)
+        risk_rna = self.risk_head(z_r.unsqueeze(0)).view(-1)
         risk_clin = self.clinical_linear(clin_embed).view(1)
         if return_components:
             return {"rna": risk_rna, "clin": risk_clin}
