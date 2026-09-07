@@ -33,6 +33,12 @@
 # 선행 조건: sbatch/extract_porpoise_style_features_hpc.sh(uni2native 타일 재사용 버전) 완료
 # 확인됨(data/porpoise_style_features/tcga/pt_files/*.pt).
 #
+# 2026-09-06 수정: 이전 실행(TCGA 성분추출이 아직 덜 끝난 상태, 152->124케이스로 줄어든 CSV로
+# 돌아간 버전 — 폐기하기로 함)이 같은 exp_code로 이미 summary_latest.csv를 남겨놔서, main.py가
+# "Exp Code <...> already exists! Exiting script."로 바로 종료해버렸다(porpoise/main.py:242-243,
+# args.overwrite 기본 False). rm 없이 --overwrite만 추가해서 그 이전 결과를 덮어쓰게 한다
+# (per-fold pkl 재생성 스킵 로직도 같은 플래그로 풀림, porpoise/main.py:54).
+#
 # 완료 후: porpoise/results_true_resnet50_mmf/5foldcv/.../summary_latest.csv 5-fold val
 # c-index. 논문 MMF 0.653, 지금까지 나온 AMIL 재현치(run_porpoise_official_paad_amil_hpc.sh)와
 # 비교.
@@ -61,5 +67,5 @@ python -u main.py \
     --which_splits 5foldcv --split_dir tcga_paad \
     --mode pathomic --model_type porpoise_mmf --bag_loss nll_surv --reg_type pathomic \
     --fusion bilinear --gate_path --gate_omic --skip --dropinput 0.10 \
-    --results_dir ./results_true_resnet50_mmf --seed 1
+    --results_dir ./results_true_resnet50_mmf --seed 1 --overwrite
 echo "=== PORPOISE 공식 코드, 진짜 ResNet50(1024d) feature, MMF Complete: $(date) ==="
