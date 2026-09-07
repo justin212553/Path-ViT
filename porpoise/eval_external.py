@@ -122,8 +122,13 @@ def main():
         skip=args.skip, dropinput=args.dropinput,
         path_input_dim=args.path_input_dim, use_mlp=args.use_mlp,
     )
+    # models/model_porpoise.py::PorpoiseMMF.relocate()가 GPU가 하나라도 있으면(device_count>=1)
+    # attention_net을 nn.DataParallel로 감싼다 — 학습 때도 이걸 거쳐서 체크포인트의 attention_net
+    # 관련 키가 전부 "attention_net.module.*"로 저장돼 있다(실측 RuntimeError로 확인, 2026-09-06).
+    # load_state_dict보다 반드시 먼저 호출해야 한다(감싸기 전엔 키 이름이 안 맞음).
+    model.relocate()
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
-    model = model.to(device).eval()
+    model.eval()
 
     # 5) 전체 CPTAC 환자에 forward pass — 원본 utils/core_utils.py::summary_survival을 그대로
     #    재사용(위험도 계산 로직 원본과 100% 동일, 새 코드 없음).
