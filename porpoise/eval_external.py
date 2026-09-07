@@ -141,11 +141,12 @@ def main():
         rows.append({
             "case_id": case_id,
             "risk": float(r["risk"]),
-            # 2026-09-07: *30.44 "수정"을 되돌림 — 실측 진단 결과 CSV의 survival_months 필드가
-            # 이미 raw day count와 거의 일치하는 값을 담고 있어서(원인 미확인, 아래 검증 필요),
-            # 곱하기를 추가하면 오히려 이미 맞던 값을 틀리게 만들었다. 원인 확정 전까지는
-            # 원본(무변환) 상태로 되돌린다.
-            "OS_time": float(r["survival"]),
+            # 2026-09-07: survival_months(개월) -> 일(day) 변환. C3L-00881로 직접 검증 완료 —
+            # porpoise/datasets_csv/cptac_paad_external_clean.csv.zip의 survival_months 필드가
+            # 0.098555이고, 0.098555*30.44=3.0으로 data/clinical_cptac.csv/os_labels_cptac.csv의
+            # OS_time(둘 다 3.0, 서로 일치)과 정확히 맞는다 — *30.44가 맞는 변환이다(한 번
+            # 되돌렸다가 재확인 후 다시 적용, 2026-09-07).
+            "OS_time": float(r["survival"]) * 30.44,
 
             # PORPOISE 관례(censorship<1==event) -> 우리 관례(1=사망)로 뒤집음. int로 캐스팅—
             # float으로 두면 CSV에 "0.0"으로 찍혀 다른 pooling 스크립트의 int(row["OS_event"])가
