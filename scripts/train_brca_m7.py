@@ -36,6 +36,7 @@ from models.clinical_encoder import age_stats_from_csv, stage_stats_from_csv
 from train_light import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
 )
+from train import _branch_param_groups
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_case_table_kfold,
@@ -78,6 +79,12 @@ def main():
                               "BRCA는 tumor_grade가 GDC에 항상 결측이라 그 필드는 always "
                               "known_flag=0으로 안전하게 무시된다(scripts/extract_brca_labels.py "
                               "참조). margin(residual_disease)은 BRCA 전체 0/1098 결측이라 지원 안 함.")
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="2026-09-07: scripts/train_brca_porpoise.py --clinical-lr-mult 이식 — "
+                              "clinical_encoder/clinical_linear 파라미터 그룹만 lr을 이 배수로 올린다"
+                              "(train.py::_branch_param_groups 공용 재사용). BRCA_PORPOISE_CONS882_"
+                              "SS_DISP_STG_CLR100과 정확히 같은 레시피(consistency RNA + staging + "
+                              "CLR100)로 M7을 돌려 제대로 된 대조군을 만들기 위함(사용자 지시).")
     parser.add_argument("--epochs", type=int, default=100, help="레퍼런스 M7 레시피 기본값.")
     parser.add_argument("--patience", type=int, default=20, help="레퍼런스 M7 레시피 기본값.")
     parser.add_argument("--lr", type=float, default=None)
@@ -190,6 +197,8 @@ def main():
         model_prefix += "_COXGENE"
     if args.clinical_staging:
         model_prefix += "_STG"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     # M4(scripts/train_brca_m4.py)와 동일 관례 — model_prefix 자체는 fold와 무관하게 유지하고
     # fold_suffix를 파일명 끝에 붙인다(ext_tag가 model_prefix 뒤/_seed 앞에 끼므로 train_light.py
     # 식 "_FOLD{f}OF{n}을 model_prefix에 바로 붙이는" 관례는 못 씀).
@@ -227,7 +236,20 @@ def main():
             },
         )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.light.lr, weight_decay=cfg.light.weight_decay)
+    if args.clinical_lr_mult != 1.0:
+        groups = _branch_param_groups(model)
+        param_groups = []
+        if groups["clinical"]:
+            param_groups.append({"params": groups["clinical"], "lr": cfg.light.lr * args.clinical_lr_mult})
+        if groups["rna"]:
+            param_groups.append({"params": groups["rna"], "lr": cfg.light.lr})
+        if groups["other"]:
+            param_groups.append({"params": groups["other"], "lr": cfg.light.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.light.weight_decay)
+        print(f"branch-lr-mult 적용: clinical={args.clinical_lr_mult}x({len(groups['clinical'])}개 텐서), "
+              f"other=1x({len(groups['other']) + len(groups['rna'])}개 텐서)")
+    else:
+        optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.light.lr, weight_decay=cfg.light.weight_decay)
     scheduler = _build_scheduler(optimizer, cfg)
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"
