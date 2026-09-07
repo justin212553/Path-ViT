@@ -141,12 +141,11 @@ def main():
         rows.append({
             "case_id": case_id,
             "risk": float(r["risk"]),
-            # 2026-09-07 버그 수정: survival_months(개월)을 그대로 썼더니, 이 프로젝트의 다른 모든
-            # OS_time(일 단위) CSV와 직접 비교(scripts/paired_bootstrap_delta.py)할 때 같은 환자의
-            # OS_time이 서로 달라 "라벨 불일치" 경고가 135/136명에서 떴다(실측). PORPOISE CSV
-            # 빌드 시 썼던 것과 동일한 변환(scripts/prepare_porpoise_paad_data_ownrna.py:
-            # OS_time/30.44)의 역변환으로 일 단위로 되돌린다.
-            "OS_time": float(r["survival"]) * 30.44,
+            # 2026-09-07: *30.44 "수정"을 되돌림 — 실측 진단 결과 CSV의 survival_months 필드가
+            # 이미 raw day count와 거의 일치하는 값을 담고 있어서(원인 미확인, 아래 검증 필요),
+            # 곱하기를 추가하면 오히려 이미 맞던 값을 틀리게 만들었다. 원인 확정 전까지는
+            # 원본(무변환) 상태로 되돌린다.
+            "OS_time": float(r["survival"]),
 
             # PORPOISE 관례(censorship<1==event) -> 우리 관례(1=사망)로 뒤집음. int로 캐스팅—
             # float으로 두면 CSV에 "0.0"으로 찍혀 다른 pooling 스크립트의 int(row["OS_event"])가
