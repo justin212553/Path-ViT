@@ -1,6 +1,6 @@
 """
-PORPOISE 공식 아키텍처를 "PORPOISE 원본 CSV"가 아니라 우리 자체 RNA 파이프라인
-(data/extract_rna_clinical.py::extract_dataset)으로 재학습하기 위한 TCGA-PAAD genomic CSV
+PORPOISE 공식 아키텍처를 "PORPOISE 원본 CSV"가 아니라 우리 자체 RNA 파이프라인 산출물
+(data/rna_tcga.csv, data/clinical_tcga.csv)으로 재학습하기 위한 TCGA-PAAD genomic CSV
 재구성 스크립트.
 
 [왜 필요한가] scripts/prepare_porpoise_paad_data.py(2026-09-05)/기존 seed1,84 MMF 재현은
@@ -49,27 +49,34 @@ import numpy as np
 import pandas as pd
 import torch
 
-from data.extract_rna_clinical import extract_dataset
 from data.dataset import pdac_consistency_gene_ids
 
 PORPOISE_ROOT = Path("porpoise")
 TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/tcga/pt_files")
+# 2026-09-06: data.extract_rna_clinical.extract_dataset()는 원본 GDC RNA tsv 폴더
+# (data/raw/TCGA_RNA)를 읽는데, 이 폴더가 HPC에 더 이상 없다(1회성 추출 후 정리된 것으로 추정,
+# FileNotFoundError 실측). 대신 이미 산출된 캐시 CSV(data/rna_tcga.csv, data/clinical_tcga.csv)를
+# 직접 읽는다 — 다만 data/rna_tcga.csv는 이미 코호트 내부 z-score가 적용된 값이라(raw log2 아님)
+# PORPOISE가 학습 시 fold-train 기준으로 다시 StandardScaler를 적용하는 것과 합쳐지면 "두 번
+# 정규화"가 되는데, 정보 손실 없이 재중심화/재척도화만 반복되는 것이라 무해하다.
+RNA_CSV_PATH = Path("data/rna_tcga.csv")
+CLINICAL_CSV_PATH = Path("data/clinical_tcga.csv")
 N_FOLDS = 5
 SPLIT_DIR_NAME = "tcga_paad_ownrna"
 N_GENES = 1500
 
 
 def main():
-    print("1) 자체 RNA 파이프라인에서 raw log2(FPKM-UQ+1) TCGA RNA-seq 추출 중"
-          "(캐시 재사용, PORPOISE 원본 CSV는 전혀 안 씀)...")
-    raw_log2, clinical_final, _name_map = extract_dataset("tcga")
-    print(f"   raw RNA-seq(전체): {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+    print(f"1) 캐시된 자체 RNA({RNA_CSV_PATH}, 이미 cohort-내부 z-score됨) + clinical({CLINICAL_CSV_PATH}) 로드 중...")
+    rna_df = pd.read_csv(RNA_CSV_PATH).set_index("case_id")
+    clinical_final = pd.read_csv(CLINICAL_CSV_PATH)
+    print(f"   RNA(전체): {rna_df.shape[0]} cases x {rna_df.shape[1]} genes")
 
     gene_ids = pdac_consistency_gene_ids(top_n=N_GENES)
-    missing = [g for g in gene_ids if g not in raw_log2.columns]
+    missing = [g for g in gene_ids if g not in rna_df.columns]
     if missing:
-        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 raw RNA 컬럼에 없음(앞 10개: {missing[:10]})")
-    raw_log2 = raw_log2[gene_ids]
+        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 RNA 컬럼에 없음(앞 10개: {missing[:10]})")
+    raw_log2 = rna_df[gene_ids]  # 변수명은 유지하지만 실제로는 이미 z-scored 값(위 주석 참조)
     print(f"   pdac_consistency_{N_GENES}로 서브셋: {raw_log2.shape[1]} genes")
 
     print("2) true-ResNet50(PORPOISE 스펙) pt_files 스캔 중...")

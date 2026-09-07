@@ -3,8 +3,8 @@ PORPOISE 아키텍처(자체 RNA로 재학습한 버전, scripts/prepare_porpois
 external validation cohort로 쓸 CPTAC-PDA genomic CSV를 만든다.
 
 PORPOISE 공식 데이터엔 CPTAC이 아예 없어서(data/extract_rna_porpoise_official.py) 원래
-불가능했던 평가인데, TCGA 쪽을 PORPOISE 원본 CSV 대신 우리 자체 RNA 파이프라인
-(data/extract_rna_clinical.py)으로 재학습하기로 했으므로 — TCGA/CPTAC이 완전히 동일한
+불가능했던 평가인데, TCGA 쪽을 PORPOISE 원본 CSV 대신 우리 자체 RNA 파이프라인 산출물
+(data/rna_tcga.csv/data/rna_cptac.csv)로 재학습하기로 했으므로 — TCGA/CPTAC이 완전히 동일한
 파이프라인(log2(FPKM-UQ+1), protein-coding, 헤더 완전 일치 확인됨)을 쓰는 한 CPTAC도 같은
 방식으로 만들 수 있다. 유전자는 전체 19,962개가 아니라 scripts/prepare_porpoise_paad_data_
 ownrna.py와 동일하게 pdac_consistency_1500(data/dataset.py::pdac_consistency_gene_ids)으로
@@ -36,7 +36,6 @@ import zipfile
 
 import pandas as pd
 
-from data.extract_rna_clinical import extract_dataset
 from data.dataset import _load_slide_index, pdac_consistency_gene_ids
 
 PORPOISE_ROOT = Path("porpoise")
@@ -44,18 +43,24 @@ TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/cptac/pt_files")
 CPTAC_PATCHES_ROOT = Path("data/patches_cptac_uni2native")
 OUT_NAME = "cptac_paad_external_clean.csv.zip"
 N_GENES = 1500
+# 2026-09-06: data.extract_rna_clinical.extract_dataset()가 읽는 원본 GDC RNA tsv 폴더
+# (data/raw/CPTAC_RNA)가 HPC에 더 이상 없다(FileNotFoundError 실측) — scripts/prepare_
+# porpoise_paad_data_ownrna.py와 동일하게 이미 산출된 캐시 CSV를 직접 읽는다.
+RNA_CSV_PATH = Path("data/rna_cptac.csv")
+CLINICAL_CSV_PATH = Path("data/clinical_cptac.csv")
 
 
 def main():
-    print("1) 자체 RNA 파이프라인에서 raw log2(FPKM-UQ+1) CPTAC RNA-seq 추출 중...")
-    raw_log2, clinical_final, _name_map = extract_dataset("cptac")
-    print(f"   raw RNA-seq(전체): {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+    print(f"1) 캐시된 자체 RNA({RNA_CSV_PATH}, 이미 cohort-내부 z-score됨) + clinical({CLINICAL_CSV_PATH}) 로드 중...")
+    rna_df = pd.read_csv(RNA_CSV_PATH).set_index("case_id")
+    clinical_final = pd.read_csv(CLINICAL_CSV_PATH)
+    print(f"   RNA(전체): {rna_df.shape[0]} cases x {rna_df.shape[1]} genes")
 
     gene_ids = pdac_consistency_gene_ids(top_n=N_GENES)
-    missing = [g for g in gene_ids if g not in raw_log2.columns]
+    missing = [g for g in gene_ids if g not in rna_df.columns]
     if missing:
-        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 raw RNA 컬럼에 없음(앞 10개: {missing[:10]})")
-    raw_log2 = raw_log2[gene_ids]
+        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 RNA 컬럼에 없음(앞 10개: {missing[:10]})")
+    raw_log2 = rna_df[gene_ids]  # 변수명은 유지하지만 실제로는 이미 z-scored 값(위 주석 참조)
     print(f"   pdac_consistency_{N_GENES}로 서브셋: {raw_log2.shape[1]} genes (TCGA 쪽과 동일 함수로 뽑아 순서까지 동일)")
 
     print("2) true-ResNet50(PORPOISE 스펙) pt_files 스캔 중...")
