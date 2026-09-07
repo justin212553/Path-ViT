@@ -27,6 +27,8 @@ BOOTSTRAP=2000
 PORPOISE_TAG="PORPOISE_uni2native_INT1500_CNV_SS_STG_R_MUT_DISP_CLR100_NLLSURV4"
 PMA_TAG="PMA_uni2native_INT1500_CNV_SS_AUX_STG_R_MUT_DISP_COX_ADD_CLR100_NLLSURV4"
 PMA_CLUSTERPOOL_TAG="PMA_uni2native_INT1500_CNV_SS_AUX_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4"
+# --surv-loss both(nll_surv+cox 혼합, sbatch/porpoise_both_loss_10fold_array_hpc.sh) — 2026-09-06 추가.
+PORPOISE_BOTH_TAG="PORPOISE_uni2native_INT1500_CNV_SS_STG_R_MUT_DISP_CLR100_NLLSURV4_NLLCOX1"
 
 run_internal() {
     local label="$1" tag="$2"
@@ -44,7 +46,7 @@ run_external() {
         --model "${tag}" --seeds "${SEEDS}" --n-folds "${N_FOLDS}" --bootstrap "${BOOTSTRAP}"
 }
 
-for tag_pair in "PORPOISE:${PORPOISE_TAG}" "PMA:${PMA_TAG}" "PMA+ClusterPool:${PMA_CLUSTERPOOL_TAG}"; do
+for tag_pair in "PORPOISE:${PORPOISE_TAG}" "PMA:${PMA_TAG}" "PMA+ClusterPool:${PMA_CLUSTERPOOL_TAG}" "PORPOISE+both-loss:${PORPOISE_BOTH_TAG}"; do
     label="${tag_pair%%:*}"
     tag="${tag_pair#*:}"
     run_internal "${label}" "${tag}"
