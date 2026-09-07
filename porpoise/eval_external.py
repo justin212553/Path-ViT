@@ -141,7 +141,13 @@ def main():
         rows.append({
             "case_id": case_id,
             "risk": float(r["risk"]),
-            "OS_time": float(r["survival"]),  # 단위: 개월(survival_months) — 우리 프로젝트의 다른 OS_time(일 단위)과 단위가 다름, 이 eval 파이프라인 내부에서만 일관되게 쓰면 c-index/HR 계산엔 무관
+            # 2026-09-07 버그 수정: survival_months(개월)을 그대로 썼더니, 이 프로젝트의 다른 모든
+            # OS_time(일 단위) CSV와 직접 비교(scripts/paired_bootstrap_delta.py)할 때 같은 환자의
+            # OS_time이 서로 달라 "라벨 불일치" 경고가 135/136명에서 떴다(실측). PORPOISE CSV
+            # 빌드 시 썼던 것과 동일한 변환(scripts/prepare_porpoise_paad_data_ownrna.py:
+            # OS_time/30.44)의 역변환으로 일 단위로 되돌린다.
+            "OS_time": float(r["survival"]) * 30.44,
+
             # PORPOISE 관례(censorship<1==event) -> 우리 관례(1=사망)로 뒤집음. int로 캐스팅—
             # float으로 두면 CSV에 "0.0"으로 찍혀 다른 pooling 스크립트의 int(row["OS_event"])가
             # ValueError로 죽는다(실측, 2026-09-07).
