@@ -11,20 +11,28 @@ PAAD에서 M7(WSI 없음) 대비 paired bootstrap으로 완전히 비유의(seed
 풀릴 것"이라는 원래 가설(2026-07-22 최상위 발견 — PMA가 BRCA 스케일에서 M7 대비 +0.0535)이
 PORPOISE에는 아직 한 번도 테스트된 적이 없다는 뜻이라, 이 스크립트로 그 빈 칸을 채운다.
 
-PAAD의 no_aux 최종 레시피(--porpoise-meanpool/--porpoise-coattn 없이 기본 gated-ABMIL,
-attn-dispersion 켬, rna-aux-weight 뜸)와 동일하게 유지:
+[2026-09-06 확장] PAAD에서 --cluster-pool 대신 PORPOISE(ABMIL+Kronecker) 아키텍처가 최종
+레시피로 자리잡음에 따라, BRCA도 train_brca_m4.py의 --cluster-pool+CLR100 조합(M7을 처음
+이긴 기록, test_c_index=0.7539 vs M7 0.7367)과 apple-to-apple 비교가 되도록 gene-selection/
+clinical-staging/clinical-lr-mult/k-fold(--fold/--n-folds)를 train_brca_m4.py와 동일하게
+포팅했다. CNV/mutation은 BRCA 쪽 데이터/코드 자체가 아직 없어(PDAC 전용, 2026-09-05 확인)
+포함하지 않는다 — --surv-loss(nll_surv/both)도 이 스크립트엔 아직 이식 안 함(사용자가 요청한
+범위는 "cluster_pool 대신 PORPOISE 아키텍처"까지).
+
+PAAD의 no_aux 최종 레시피와 동일하게 유지:
     ViT_PORPOISE(models/vit_porpoise.py), BilinearFusion(Kronecker product), 기본 gated-ABMIL
     (RNA 무관 pooling), combine_mode는 내부적으로 항상 cox_add
     --attn-dispersion 켬(PAAD ablation에서 PORPOISE 성능에 크게 기여한 것으로 확인됨)
-    --patch-keep-frac 0.8, backbone=uni(embed_dim=64, num_heads=2, num_landmarks=128 — Config 기본값)
-BRCA라서 train_brca_m4.py와 동일하게 바꾼 것:
-    rna-genes: scripts/select_brca_rna_genes.py(고분산 top-N), literature curation 아님
-    case 목록/split: scripts/brca_common.py
-    rna_aux_head/staging/margin: train_brca_m4.py도 안 씀 — 그대로 생략(BRCA clinical 추출이
-    age뿐이라 staging/margin 필드 자체가 없음, scripts/extract_brca_labels.py 참조)
+    --patch-keep-frac 0.8, backbone=uni(embed_dim=64, num_heads=2, num_landmarks=128 — BRCA
+    쪽엔 uni2native 리타일링이 아직 없어 train_brca_m4.py와 동일하게 uni 그대로 유지)
+BRCA라서 train_brca_m4.py와 동일하게 맞춘 것:
+    --gene-selection {variance,cox,literature,literature_categorized,consistency}
+    --clinical-staging, --clinical-lr-mult, --fold/--n-folds(k-fold, brca_common.py)
+    rna_aux_head: 안 씀(PAAD ablation에서 소폭 해로운 것으로 확인, PORPOISE no_aux 레시피 그대로)
 
 사용법:
-    python -m scripts.train_brca_porpoise --seed 84
+    python -m scripts.train_brca_porpoise --seed 84 --gene-selection consistency --clinical-staging \\
+        --clinical-lr-mult 100 --external-tss none --fold 0 --n-folds 5
 """
 import argparse
 import math
@@ -43,14 +51,15 @@ if str(_ROOT) not in sys.path:
 
 from config import Config
 from models.vit_porpoise import ViT_PORPOISE
-from models.clinical_encoder import age_stats_from_csv
+from models.clinical_encoder import age_stats_from_csv, stage_stats_from_csv
 from train import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
+    _branch_param_groups,
 )
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
-    CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_rna_matrix,
-    MANIFEST_PATH, EXTERNAL_TSS,
+    CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_case_table_kfold,
+    load_rna_matrix, load_rna_matrix_categorized, load_literature_categories, MANIFEST_PATH, EXTERNAL_TSS,
 )
 
 if WANDB_AVAILABLE:
@@ -69,9 +78,26 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=84)
     parser.add_argument("--n-genes", type=int, default=1500)
+    parser.add_argument("--gene-selection", type=str, default="variance",
+                         choices=["variance", "cox", "literature", "literature_categorized", "consistency"],
+                         help="train_brca_m4.py --gene-selection과 동일 관례.")
+    parser.add_argument("--fdr-threshold", type=float, default=None,
+                         help="--gene-selection cox 전용 — BH-FDR q값 컷오프.")
+    parser.add_argument("--clinical-staging", action="store_true",
+                         help="train_brca_m4.py --clinical-staging 이식 — ClinicalEncoder 대신 "
+                              "ViT_PORPOISE의 cox_add raw-feature staging 입력(models/vit_porpoise.py).")
+    parser.add_argument("--clinical-lr-mult", type=float, default=1.0,
+                         help="train_brca_m4.py --clinical-lr-mult 이식 — clinical_linear(cox_add "
+                              "가산항) 브랜치 lr 배율.")
     parser.add_argument("--patch-keep-frac", type=float, default=0.8)
     parser.add_argument("--epochs", type=int, default=None, help="cfg.train.epochs(기본 30) 덮어쓰기.")
+    parser.add_argument("--early-stop-patience", type=int, default=None,
+                         help="train_brca_m4.py --early-stop-patience 이식.")
     parser.add_argument("--group-ts", type=str, default=None)
+    parser.add_argument("--fold", type=int, default=None,
+                         help="train_brca_m4.py --fold 이식 — 주어지면(0-based) 기존 단일 6:2:2 "
+                              "대신 K-fold(scripts/brca_common.py::load_case_table_kfold)를 쓴다.")
+    parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument(
         "--external-tss", type=str, default=EXTERNAL_TSS,
         help="train_brca_m4.py --external-tss와 동일 — institution-level external holdout. "
@@ -90,29 +116,74 @@ def main():
     amp_ctx = _make_amp_ctx(device)
     start_time = datetime.now()
 
-    gene_path = OUT_DIR / f"selected_genes_top_{args.n_genes}.csv"
-    if not gene_path.exists():
-        raise FileNotFoundError(
-            f"{gene_path} 없음 — 먼저 실행: python -m scripts.select_brca_rna_genes "
-            f"--seed {args.seed} --n-genes {args.n_genes}"
-        )
-    gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
-    rna_input_dim = len(gene_ids)
+    # --- RNA 유전자셋 선택(train_brca_m4.py와 동일 관례) ---
+    gene_ids = None
+    if args.gene_selection == "literature_categorized":
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+    elif args.gene_selection == "literature":
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_path = Path("data/brca_rna_gene_selection_literature/selected_genes.csv")
+        select_hint = "python -m scripts.select_brca_rna_genes_literature"
+    elif args.gene_selection == "consistency":
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_path = Path("data/brca_rna_gene_selection_consistency/selected_genes.csv")
+        select_hint = "python -m scripts.select_brca_rna_genes_consistency"
+    else:
+        gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
+        if args.fdr_threshold is not None:
+            if args.gene_selection != "cox":
+                raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+            gene_path = gene_dir / f"selected_genes_fdr{args.fdr_threshold:g}.csv"
+            select_hint = f"python -m scripts.select_brca_rna_genes_cox --seed {args.seed} --fdr-threshold {args.fdr_threshold:g}"
+        else:
+            gene_path = gene_dir / f"selected_genes_top_{args.n_genes}.csv"
+            select_module = "select_brca_rna_genes" if args.gene_selection == "variance" else "select_brca_rna_genes_cox"
+            select_hint = f"python -m scripts.{select_module} --seed {args.seed} --n-genes {args.n_genes}"
 
-    cases = load_case_table(args.seed, external_tss=external_tss)
-    rna_df = load_rna_matrix(gene_ids)
+    if args.gene_selection == "literature_categorized":
+        literature_categories = load_literature_categories()
+        rna_input_dim = len(literature_categories)
+    else:
+        if not gene_path.exists():
+            raise FileNotFoundError(f"{gene_path} 없음 — 먼저 실행: {select_hint}")
+        gene_ids = pd.read_csv(gene_path)["gene_id"].tolist()
+        rna_input_dim = len(gene_ids)
+    stage_stats = stage_stats_from_csv(CLINICAL_PATH) if args.clinical_staging else None
+
+    if args.fold is not None:
+        cases = load_case_table_kfold(args.seed, args.fold, args.n_folds, external_tss=external_tss)
+    else:
+        cases = load_case_table(args.seed, external_tss=external_tss)
+    if args.gene_selection == "literature_categorized":
+        rna_df = load_rna_matrix_categorized(literature_categories)
+    else:
+        rna_df = load_rna_matrix(gene_ids)
     manifest = pd.read_csv(MANIFEST_PATH)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
-    print(f"RNA 유전자 수: {rna_input_dim} (top{args.n_genes}, 고분산 기준, seed={args.seed})")
+    if args.gene_selection == "literature_categorized":
+        gene_tag = f"LITCAT{rna_input_dim}"
+    elif args.gene_selection == "literature":
+        gene_tag = f"LIT{rna_input_dim}"
+    elif args.gene_selection == "consistency":
+        gene_tag = f"CONS{rna_input_dim}"
+    elif args.fdr_threshold is not None:
+        gene_tag = f"FDR{args.fdr_threshold:g}"
+    else:
+        gene_tag = f"TOP{args.n_genes}"
+    print(f"RNA 유전자 수: {rna_input_dim} ({gene_tag}, {args.gene_selection} 기준, seed={args.seed})")
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
-    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest)
-    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest)
-    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest)
-    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest) if external_tss else None
+    stg = args.clinical_staging
+    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest, with_staging=stg)
+    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest, with_staging=stg)
+    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest, with_staging=stg)
+    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest, with_staging=stg) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
@@ -124,9 +195,19 @@ def main():
     model = ViT_PORPOISE(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         precomputed=True, backbone="uni", use_attn_dispersion=True,
+        use_staging=args.clinical_staging, stage_stats=stage_stats,
     ).to(device)
 
-    model_prefix = f"BRCA_PORPOISE_TOP{args.n_genes}_SS_DISP"
+    model_prefix = f"BRCA_PORPOISE_{gene_tag}_SS_DISP"
+    if args.gene_selection == "cox":
+        model_prefix += "_COXGENE"
+    if args.clinical_staging:
+        model_prefix += "_STG"
+    if args.early_stop_patience is not None:
+        model_prefix += f"_ES{args.early_stop_patience}"
+    if args.clinical_lr_mult != 1.0:
+        model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    fold_suffix = f"_fold{args.fold}of{args.n_folds}" if args.fold is not None else ""
     print(f"Model: ViT_PORPOISE (uni backbone, gated-ABMIL+BilinearFusion, "
           f"use_attn_dispersion=True) | params={sum(p.numel() for p in model.parameters()):,}")
     print(f"lr={cfg.train.lr:.1e} | weight_decay={cfg.train.weight_decay:.1e} | epochs={cfg.train.epochs} | "
@@ -138,27 +219,43 @@ def main():
     if WANDB_AVAILABLE:
         wandb.init(
             project="Path-ViT",
-            name=f"BRCA_{model_prefix}_seed{cfg.train.seed}_{run_ts}",
+            name=f"BRCA_{model_prefix}_seed{cfg.train.seed}{fold_suffix}_{run_ts}",
             group=wandb_group,
             config={
                 "epochs": cfg.train.epochs, "lr": cfg.train.lr, "weight_decay": cfg.train.weight_decay,
                 "seed": cfg.train.seed, "n_genes": args.n_genes, "rna_input_dim": rna_input_dim,
                 "patch_keep_frac": args.patch_keep_frac, "embed_dim": cfg.model.embed_dim,
+                "clinical_lr_mult": args.clinical_lr_mult,
+                "fold": args.fold, "n_folds": args.n_folds,
                 "model": model_prefix, "dataset": "brca",
             },
         )
 
-    optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
-    )
+    if args.clinical_lr_mult != 1.0:
+        groups = _branch_param_groups(model)
+        param_groups = []
+        if groups["clinical"]:
+            param_groups.append({"params": groups["clinical"], "lr": cfg.train.lr * args.clinical_lr_mult})
+        if groups["rna"]:
+            param_groups.append({"params": groups["rna"], "lr": cfg.train.lr})
+        if groups["other"]:
+            param_groups.append({"params": groups["other"], "lr": cfg.train.lr})
+        optimizer = torch.optim.AdamW(param_groups, weight_decay=cfg.train.weight_decay)
+        print(f"branch-lr-mult 적용: clinical={args.clinical_lr_mult}x({len(groups['clinical'])}개 텐서), "
+              f"other=1x({len(groups['other']) + len(groups['rna'])}개 텐서)")
+    else:
+        optimizer = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=cfg.train.lr, weight_decay=cfg.train.weight_decay,
+        )
     scheduler = _build_scheduler(optimizer, cfg)
 
     ckpt_dir = Path(__file__).parent.parent / "models" / "checkpoint"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}.pt"
+    ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
     best_score, best_metrics = -1.0, {}
+    epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
         loss = train_one_epoch(
@@ -188,12 +285,20 @@ def main():
         if score > best_score:
             best_score = score
             best_metrics = {**metrics, "epoch": epoch + 1}
+            epochs_since_improve = 0
             torch.save({"model_state_dict": model.state_dict(), "epoch": epoch + 1, "val_c_index": best_score}, ckpt_path)
             print(f"  -> checkpoint saved (c_index={best_score:.4f}, HR={metrics['hr']:.3f}, "
                   f"log-rank p={metrics['log_rank_p']:.4f})")
             if WANDB_AVAILABLE:
                 wandb.run.summary["best_val_c_index"] = best_score
                 wandb.run.summary["best_epoch"] = epoch + 1
+        else:
+            epochs_since_improve += 1
+            if (args.early_stop_patience is not None
+                    and epochs_since_improve >= args.early_stop_patience):
+                print(f"  -> early stop: 최근 {epochs_since_improve} epoch 동안 val c_index 갱신 없음 "
+                      f"(best epoch {best_metrics.get('epoch', '-')}, best c_index={best_score:.4f})")
+                break
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -208,7 +313,7 @@ def main():
     import csv
     pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
     pred_dir.mkdir(parents=True, exist_ok=True)
-    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+    pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
     with open(pred_path, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
@@ -233,7 +338,7 @@ def main():
         import csv
         pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
         pred_dir.mkdir(parents=True, exist_ok=True)
-        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}.csv"
+        pred_path = pred_dir / f"brca_{model_prefix}{ext_tag}_seed{args.seed}{fold_suffix}.csv"
         with open(pred_path, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
