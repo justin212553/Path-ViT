@@ -29,12 +29,21 @@ if str(_ROOT) not in sys.path:
 from utils.metrics import compute_survival_metrics
 
 
+# scripts/pool_multiseed_kfold_preds.py::_SPECIAL_INFIXES와 동일 — 진단용 변형(FINALEPOCH/
+# SOUP/FULLTRAIN)은 --model이 명시적으로 요청하지 않는 한 매칭에서 제외한다.
+_SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN")
+
+
 def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> dict:
     # 2026-09-06: model_prefix를 손으로 완벽히 재현해야 하는 두 개 하드코딩 패턴(with/without
     # "_FOLD{fold}OF{n_folds}") 대신 글롭으로 찾는다 — scripts/pool_multiseed_kfold_preds.py::
     # _find_pred_path와 동일한 이유/관례.
     suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
     matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    matches = [
+        p for p in matches
+        if all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
+    ]
     if len(matches) > 1:
         raise ValueError(
             f"seed={seed} fold={fold}: '{dataset}_{model}*{suffix}' 패턴에 여러 파일이 걸림 — "

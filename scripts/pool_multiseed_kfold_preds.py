@@ -27,13 +27,26 @@ if str(_ROOT) not in sys.path:
 from utils.metrics import compute_survival_metrics
 
 
+#  train.py가 "best checkpoint"(기본, 항상 저장)와 별개로 진단용 변형 예측을 같은 model_prefix
+#  기반 파일명에 이 태그들만 끼워 추가로 저장하는 경우가 있다(예: --report-final-epoch-metrics의
+#  "_FINALEPOCH_", SWA soup의 "_SOUP_", --full-train의 "_FULLTRAIN") — 와일드카드 매칭이 이걸
+#  같이 주워서 "여러 파일이 걸림" 모호성 에러를 내거나(2026-09-06 실사용 중 발견) 잘못 섞여
+#  풀링될 수 있다. --model 문자열 자체가 그 태그를 명시적으로 포함하지 않는 한 기본적으로 제외한다.
+_SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN")
+
+
 def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> Path:
     """model_prefix에 _FOLD{f}OF{n} 접미사가 붙는지 여부(train.py의 여러 조건부 접미사 순서를
     손으로 재현하다 보면 붙는 자리를 놓치기 쉽다)와 무관하게, 접두사/접미사만 고정하고 그
     사이는 와일드카드로 찾는다 — 정확한 model_prefix 문자열을 매번 손으로 완벽히 재현해야
-    하는 취약함을 없앤다."""
+    하는 취약함을 없앤다. 단 _SPECIAL_INFIXES(진단용 변형 태그)는 --model이 명시적으로
+    요청하지 않는 한 매칭에서 제외한다."""
     suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
     matches = sorted(pred_dir.glob(f"{dataset}_{model}*{suffix}"))
+    matches = [
+        p for p in matches
+        if all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
+    ]
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
