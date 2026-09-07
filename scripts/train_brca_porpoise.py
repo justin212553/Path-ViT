@@ -56,6 +56,7 @@ from train import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
     _branch_param_groups,
 )
+from utils.losses import fit_survival_bins
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_case_table_kfold,
@@ -103,6 +104,14 @@ def main():
         help="train_brca_m4.py --external-tss와 동일 — institution-level external holdout. "
              "'none'이면 external 없이 전부 internal 6:2:2.",
     )
+    parser.add_argument(
+        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
+        help="2026-09-07: train.py --surv-loss 이식 — PAAD 최종 레시피가 'both'(nll_surv+cox "
+             "동등가중)로 확정된 뒤에도 이 스크립트는 만들 때(2026-09-06) 범위 밖이라 빠져 있었다. "
+             "M7/ClusterPool과 loss를 맞춰야 공정한 비교가 되어 이제 포팅한다(사용자 지적).",
+    )
+    parser.add_argument("--nll-n-bins", type=int, default=4)
+    parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     args = parser.parse_args()
     external_tss = None if args.external_tss.lower() == "none" else args.external_tss
     ext_tag = f"_EXTTSS{external_tss}" if external_tss else ""
@@ -196,6 +205,7 @@ def main():
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         precomputed=True, backbone="uni", use_attn_dispersion=True,
         use_staging=args.clinical_staging, stage_stats=stage_stats,
+        surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
     ).to(device)
 
     model_prefix = f"BRCA_PORPOISE_{gene_tag}_SS_DISP"
@@ -207,6 +217,10 @@ def main():
         model_prefix += f"_ES{args.early_stop_patience}"
     if args.clinical_lr_mult != 1.0:
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
+    if args.surv_loss in ("nll_surv", "both"):
+        model_prefix += f"_NLLSURV{args.nll_n_bins}"
+    if args.surv_loss == "both":
+        model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     fold_suffix = f"_fold{args.fold}of{args.n_folds}" if args.fold is not None else ""
     print(f"Model: ViT_PORPOISE (uni backbone, gated-ABMIL+BilinearFusion, "
           f"use_attn_dispersion=True) | params={sum(p.numel() for p in model.parameters()):,}")
@@ -254,6 +268,19 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
+    # train.py::fit_survival_bins 호출부와 동일 관례 — 이 fold의 train split(cases 자체가 이미
+    # case당 1행)만으로 시간-구간 경계를 fit한다(전체 코호트로 fit하면 RNA 유전자 선정 때와
+    # 같은 leakage가 생김).
+    nll_bin_edges = None
+    if args.surv_loss in ("nll_surv", "both"):
+        _train_labels = cases[cases["split"] == "train"]
+        nll_bin_edges = fit_survival_bins(
+            _train_labels["OS_time"].to_numpy(), _train_labels["OS_event"].to_numpy(),
+            n_bins=args.nll_n_bins,
+        )
+        print(f"[nll_surv] train split {len(_train_labels)}명 기준 시간-구간 경계({args.nll_n_bins}bins): "
+              f"{nll_bin_edges}")
+
     best_score, best_metrics = -1.0, {}
     epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
@@ -261,6 +288,7 @@ def main():
         loss = train_one_epoch(
             model, train_loader, optimizer, cfg, device, amp_ctx, None,
             patch_keep_frac=args.patch_keep_frac, rna_aux_weight=0.0,
+            surv_loss=args.surv_loss, nll_bin_edges=nll_bin_edges, nll_cox_weight=args.nll_cox_weight,
         )
         train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, None)
         metrics = evaluate(model, val_loader, cfg, device, amp_ctx, None)

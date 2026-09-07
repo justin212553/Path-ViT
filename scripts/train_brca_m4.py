@@ -51,6 +51,7 @@ from train import (
     set_seed, _build_scheduler, _log_line, train_one_epoch, evaluate, WANDB_AVAILABLE,
     _branch_param_groups,
 )
+from utils.losses import fit_survival_bins
 from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_case_table_kfold,
@@ -196,6 +197,14 @@ def main():
              "'none'이면 external 없이 기존 동작(전부 internal 6:2:2)으로 되돌아간다. "
              "M7과 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
     )
+    parser.add_argument(
+        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
+        help="2026-09-07: train.py --surv-loss 이식 — PAAD 최종 레시피가 'both'(nll_surv+cox "
+             "동등가중)로 확정된 뒤에도 이 스크립트는 범위 밖이라 빠져 있었다. M7/PORPOISE와 "
+             "loss를 맞춰야 공정한 비교가 되어 이제 포팅한다(사용자 지적).",
+    )
+    parser.add_argument("--nll-n-bins", type=int, default=4)
+    parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     args = parser.parse_args()
     external_tss = None if args.external_tss.lower() == "none" else args.external_tss
     ext_tag = f"_EXTTSS{external_tss}" if external_tss else ""  # None이면 파일명에 접미사 없음
@@ -318,6 +327,7 @@ def main():
         cluster_pool=args.cluster_pool, cluster_pool_after_vit=args.cluster_pool_after_vit,
         cluster_pool_temperature=args.cluster_pool_temperature,
         cluster_centroids_path=args.cluster_centroids_path if args.cluster_pool else None,
+        surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
     ).to(device)
     if args.rna_aux_weight > 0:
         model.rna_aux_head = RNAPredictionHead(cfg.model.embed_dim, rna_input_dim).to(device)
@@ -359,6 +369,10 @@ def main():
         model_prefix += f"_CLR{args.clinical_lr_mult:g}"
     if args.rna_lr_mult != 1.0:
         model_prefix += f"_RLR{args.rna_lr_mult:g}"
+    if args.surv_loss in ("nll_surv", "both"):
+        model_prefix += f"_NLLSURV{args.nll_n_bins}"
+    if args.surv_loss == "both":
+        model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     # 2026-09-01: PAAD(train_light.py)와 달리 _FOLD{f}OF{n}을 model_prefix 자체엔 안 붙인다
     # (BRCA는 ext_tag가 항상 model_prefix 뒤/_seed 앞에 끼어들어 pool_multiseed_kfold_preds.py의
     # 기본 조회 패턴과 어긋나므로) — 대신 fold_suffix를 파일명 끝(ckpt/pred_path 전부)에
@@ -422,6 +436,18 @@ def main():
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     ckpt_path = ckpt_dir / f"survival_brca_best_{model_prefix.lower()}{ext_tag.lower()}_seed{args.seed}{fold_suffix}.pt"
 
+    # train.py::fit_survival_bins 호출부와 동일 관례 — 이 fold의 train split(cases 자체가 이미
+    # case당 1행)만으로 시간-구간 경계를 fit한다.
+    nll_bin_edges = None
+    if args.surv_loss in ("nll_surv", "both"):
+        _train_labels = cases[cases["split"] == "train"]
+        nll_bin_edges = fit_survival_bins(
+            _train_labels["OS_time"].to_numpy(), _train_labels["OS_event"].to_numpy(),
+            n_bins=args.nll_n_bins,
+        )
+        print(f"[nll_surv] train split {len(_train_labels)}명 기준 시간-구간 경계({args.nll_n_bins}bins): "
+              f"{nll_bin_edges}")
+
     best_score, best_metrics = -1.0, {}
     epochs_since_improve = 0
     for epoch in range(cfg.train.epochs):
@@ -429,6 +455,7 @@ def main():
         loss = train_one_epoch(
             model, train_loader, optimizer, cfg, device, amp_ctx, None,
             patch_keep_frac=args.patch_keep_frac, rna_aux_weight=args.rna_aux_weight,
+            surv_loss=args.surv_loss, nll_bin_edges=nll_bin_edges, nll_cox_weight=args.nll_cox_weight,
         )
         train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, None)
         metrics = evaluate(model, val_loader, cfg, device, amp_ctx, None)
