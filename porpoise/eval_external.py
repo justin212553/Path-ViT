@@ -142,7 +142,10 @@ def main():
             "case_id": case_id,
             "risk": float(r["risk"]),
             "OS_time": float(r["survival"]),  # 단위: 개월(survival_months) — 우리 프로젝트의 다른 OS_time(일 단위)과 단위가 다름, 이 eval 파이프라인 내부에서만 일관되게 쓰면 c-index/HR 계산엔 무관
-            "OS_event": 1.0 - float(r["censorship"]),  # PORPOISE 관례(censorship<1==event) -> 우리 관례(1=사망) 로 뒤집음
+            # PORPOISE 관례(censorship<1==event) -> 우리 관례(1=사망)로 뒤집음. int로 캐스팅—
+            # float으로 두면 CSV에 "0.0"으로 찍혀 다른 pooling 스크립트의 int(row["OS_event"])가
+            # ValueError로 죽는다(실측, 2026-09-07).
+            "OS_event": int(round(1.0 - float(r["censorship"]))),
         })
     out_df = pd.DataFrame(rows)
     os.makedirs(os.path.dirname(args.out_csv), exist_ok=True)
