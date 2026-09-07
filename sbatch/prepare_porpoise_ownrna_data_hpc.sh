@@ -12,10 +12,13 @@
 #
 # PORPOISE 공식 원본 CSV(porpoise/datasets_csv/tcga_paad_all_clean.csv.zip, RNA 전처리 비공개)엔
 # CPTAC이 아예 없어서(data/extract_rna_porpoise_official.py 참조), TCGA 쪽도 우리 자체 RNA
-# 파이프라인(data/extract_rna_clinical.py — log2(FPKM-UQ+1), protein-coding 19,962유전자,
-# TCGA/CPTAC 헤더 완전 일치 확인됨)으로 다시 만들어서 두 코호트가 항상 같은 유전자
-# ID/전처리를 쓰도록 한다(사용자 결정 — 유전자 ID/스케일 불일치로 인한 배치 이펙트가
-# "일반화 실패"처럼 보이는 걸 방지).
+# 파이프라인(data/extract_rna_clinical.py — log2(FPKM-UQ+1), protein-coding, TCGA/CPTAC 헤더
+# 완전 일치 확인됨)으로 다시 만들어서 두 코호트가 항상 같은 유전자 ID/전처리를 쓰도록 한다
+# (사용자 결정 — 유전자 ID/스케일 불일치로 인한 배치 이펙트가 "일반화 실패"처럼 보이는 걸
+# 방지). 유전자는 전체가 아니라 이 프로젝트의 최종 후보 유전자셋 pdac_consistency_1500으로
+# 서브셋(사용자 지적, 2026-09-06: "지금 쓰는게 PDAC consistency니까 그거 그냥 쓰면 되지 않음?")
+# — 이러면 PORPOISE 아키텍처와 우리 자체 --PORPOISE 레시피가 정확히 같은 RNA 입력을 써서
+# 비교가 아키텍처 차이만 순수하게 반영한다(RNA 세트/차원 차이로 오염 안 됨).
 #
 # 주의: porpoise/datasets_csv/tcga_paad_all_clean.csv.zip을 실제로 덮어쓴다(원본은
 # tcga_paad_all_clean.official_backup.csv.zip으로 자동 백업) — 기존 seed1/84

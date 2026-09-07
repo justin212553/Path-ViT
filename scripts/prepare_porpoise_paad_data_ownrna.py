@@ -11,10 +11,16 @@ PORPOISE 공식 데이터엔 CPTAC이 아예 없어서(data/extract_rna_porpoise
 이펙트가 "일반화 실패"처럼 보일 위험이 있다(사용자 결정, 2026-09-06: "자체 RNA로 하되 시드도
 우리 프로젝트와 동일하게 5개로").
 
-그래서 PORPOISE 아키텍처를 처음부터 우리 자체 RNA(TCGA/CPTAC 완전히 동일한 파이프라인 —
-log2(FPKM-UQ+1), protein-coding, 19,962유전자, 헤더 완전 일치 확인됨)로 재학습한다. WSI
-feature(true-ResNet50, data/porpoise_style_features/tcga/pt_files)는 그대로 재사용 —
-genomic 쪽만 바뀐다.
+그래서 PORPOISE 아키텍처를 처음부터 우리 자체 RNA로 재학습한다 — 그것도 전체 19,962개 raw
+유전자가 아니라, 지금 이 프로젝트의 최종 후보 유전자셋인 pdac_consistency_1500(JCI Insight
+2025 5-데이터셋 교차분석, 우리 코호트 라벨 전혀 미참조라 leakage 없음, data/dataset.py::
+pdac_consistency_gene_ids)을 그대로 쓴다(사용자 지적, 2026-09-06: "지금 쓰는게 PDAC
+consistency니까 그거 그냥 그대로 쓰면 되지 않음?" — 전체 유전자셋을 새로 만들 이유가 없었다).
+이러면 (1) TCGA/CPTAC RNA를 이미 정확히 같은 유전자·같은 전처리로 갖고 있어 새 추출이
+필요 없고, (2) PORPOISE 아키텍처와 우리 자체 레시피(--PORPOISE, train.py)가 정확히 같은
+RNA 입력을 쓰게 되어 "PORPOISE vs 우리 모델" 비교가 RNA 차이에 오염되지 않고 아키텍처
+차이만 순수하게 비교된다. WSI feature(true-ResNet50, data/porpoise_style_features/tcga/
+pt_files)는 그대로 재사용 — genomic 쪽만 바뀐다.
 
 [주의 — 기존 산출물 덮어쓰기] porpoise/main.py는 study(=csv 파일명)를 split_dir 앞 2토큰에서만
 뽑기 때문에(utils/utils.py::get_custom_exp_code, main.py 둘 다 '_'.join(split_dir.split('_')[:2])
@@ -44,18 +50,27 @@ import pandas as pd
 import torch
 
 from data.extract_rna_clinical import extract_dataset
+from data.dataset import pdac_consistency_gene_ids
 
 PORPOISE_ROOT = Path("porpoise")
 TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/tcga/pt_files")
 N_FOLDS = 5
 SPLIT_DIR_NAME = "tcga_paad_ownrna"
+N_GENES = 1500
 
 
 def main():
     print("1) 자체 RNA 파이프라인에서 raw log2(FPKM-UQ+1) TCGA RNA-seq 추출 중"
           "(캐시 재사용, PORPOISE 원본 CSV는 전혀 안 씀)...")
     raw_log2, clinical_final, _name_map = extract_dataset("tcga")
-    print(f"   raw RNA-seq: {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+    print(f"   raw RNA-seq(전체): {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+
+    gene_ids = pdac_consistency_gene_ids(top_n=N_GENES)
+    missing = [g for g in gene_ids if g not in raw_log2.columns]
+    if missing:
+        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 raw RNA 컬럼에 없음(앞 10개: {missing[:10]})")
+    raw_log2 = raw_log2[gene_ids]
+    print(f"   pdac_consistency_{N_GENES}로 서브셋: {raw_log2.shape[1]} genes")
 
     print("2) true-ResNet50(PORPOISE 스펙) pt_files 스캔 중...")
     if not TRUE_RESNET50_PT_DIR.is_dir():

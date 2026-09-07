@@ -5,8 +5,12 @@ external validation cohort로 쓸 CPTAC-PDA genomic CSV를 만든다.
 PORPOISE 공식 데이터엔 CPTAC이 아예 없어서(data/extract_rna_porpoise_official.py) 원래
 불가능했던 평가인데, TCGA 쪽을 PORPOISE 원본 CSV 대신 우리 자체 RNA 파이프라인
 (data/extract_rna_clinical.py)으로 재학습하기로 했으므로 — TCGA/CPTAC이 완전히 동일한
-파이프라인(log2(FPKM-UQ+1), protein-coding 19,962유전자, 헤더 완전 일치 확인됨, data/rna_tcga.csv
-vs data/rna_cptac.csv 헤더 diff 없음)을 쓰는 한 CPTAC도 같은 방식으로 만들 수 있다.
+파이프라인(log2(FPKM-UQ+1), protein-coding, 헤더 완전 일치 확인됨)을 쓰는 한 CPTAC도 같은
+방식으로 만들 수 있다. 유전자는 전체 19,962개가 아니라 scripts/prepare_porpoise_paad_data_
+ownrna.py와 동일하게 pdac_consistency_1500(data/dataset.py::pdac_consistency_gene_ids)으로
+서브셋 — 사용자 지적(2026-09-06): 이미 이 프로젝트의 최종 후보 유전자셋이 있는데 새로
+전체 유전자셋을 만들 이유가 없다. 이러면 PORPOISE 아키텍처와 우리 자체 --PORPOISE 레시피가
+정확히 같은 RNA 입력을 쓰게 돼 아키텍처 차이만 순수하게 비교된다.
 
 main.py는 안 거친다(study가 항상 "tcga_paad"로 고정돼 다른 CSV를 못 가리킴) — 이 CSV는
 porpoise/eval_external.py가 직접 csv_path로 읽는다. train/val 구분이 없는 순수 external
@@ -33,18 +37,26 @@ import zipfile
 import pandas as pd
 
 from data.extract_rna_clinical import extract_dataset
-from data.dataset import _load_slide_index
+from data.dataset import _load_slide_index, pdac_consistency_gene_ids
 
 PORPOISE_ROOT = Path("porpoise")
 TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/cptac/pt_files")
 CPTAC_PATCHES_ROOT = Path("data/patches_cptac_uni2native")
 OUT_NAME = "cptac_paad_external_clean.csv.zip"
+N_GENES = 1500
 
 
 def main():
     print("1) 자체 RNA 파이프라인에서 raw log2(FPKM-UQ+1) CPTAC RNA-seq 추출 중...")
     raw_log2, clinical_final, _name_map = extract_dataset("cptac")
-    print(f"   raw RNA-seq: {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+    print(f"   raw RNA-seq(전체): {raw_log2.shape[0]} cases x {raw_log2.shape[1]} genes")
+
+    gene_ids = pdac_consistency_gene_ids(top_n=N_GENES)
+    missing = [g for g in gene_ids if g not in raw_log2.columns]
+    if missing:
+        raise ValueError(f"pdac_consistency_1500 유전자 {len(missing)}개가 raw RNA 컬럼에 없음(앞 10개: {missing[:10]})")
+    raw_log2 = raw_log2[gene_ids]
+    print(f"   pdac_consistency_{N_GENES}로 서브셋: {raw_log2.shape[1]} genes (TCGA 쪽과 동일 함수로 뽑아 순서까지 동일)")
 
     print("2) true-ResNet50(PORPOISE 스펙) pt_files 스캔 중...")
     if not TRUE_RESNET50_PT_DIR.is_dir():
