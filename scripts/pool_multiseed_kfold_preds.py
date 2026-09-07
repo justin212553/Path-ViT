@@ -92,10 +92,21 @@ def _load_seed_predictions(
         path = _find_pred_path(pred_dir, dataset, model, seed, fold, n_folds)
         fold_preds = _read_pred_csv(path)
         if include_final_epoch:
-            fe_path = pred_dir / f"{dataset}_{model}_FINALEPOCH_seed{seed}_fold{fold}of{n_folds}.csv"
-            if not fe_path.exists():
-                raise FileNotFoundError(f"--include-final-epoch 지정했지만 {fe_path} 없음")
-            fe_preds = _read_pred_csv(fe_path)
+            # model_prefix 자체에 이미 "_FOLD{f}OF{n}"이 끼어 있어(학습 시점에 붙음) FINALEPOCH
+            # 파일명이 "{model}_FOLD{f}OF{n}_FINALEPOCH_seed..." 형태다 — _find_pred_path와 동일하게
+            # 와일드카드로 찾는다(정확한 접두사를 손으로 재현하지 않음, 2026-09-07 실사용 중 발견).
+            fe_suffix = f"_FINALEPOCH_seed{seed}_fold{fold}of{n_folds}.csv"
+            fe_prefix = f"{dataset}_{model}"
+            fe_matches = [
+                p for p in sorted(pred_dir.glob(f"{fe_prefix}*{fe_suffix}"))
+                if not p.name[len(fe_prefix):len(fe_prefix) + 1].isdigit()
+            ]
+            if len(fe_matches) != 1:
+                raise FileNotFoundError(
+                    f"--include-final-epoch: seed={seed} fold={fold} FINALEPOCH 파일 매칭 "
+                    f"{len(fe_matches)}개(1개여야 함) — {fe_prefix}*{fe_suffix} — {[p.name for p in fe_matches]}"
+                )
+            fe_preds = _read_pred_csv(fe_matches[0])
             merged = {}
             for cid, (risk, t, e) in fold_preds.items():
                 if cid not in fe_preds:
