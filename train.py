@@ -3579,6 +3579,23 @@ def main():
             wandb.run.summary["final_epoch_external_hr"]         = final_external_metrics["hr"]
             wandb.run.summary["final_epoch_external_log_rank_p"] = final_external_metrics["log_rank_p"]
             wandb.run.summary["final_epoch_external_auc_mean"]   = final_external_td_auc["auc_mean"]
+        # 2026-09-07: internal쪽(위 final_test_metrics)엔 이미 _FINALEPOCH_ CSV 저장이 있었는데
+        # external쪽엔 없었다 — wandb summary로만 남기고 CSV로는 저장 안 해서 scripts/
+        # pool_multiseed_external_preds.py --include-final-epoch(checkpoint 앙상블, best-val
+        # 선택이 작은 val set 노이즈에 흔들리는 문제를 완화하려는 시도)를 external에 쓸 수 있는
+        # 데이터가 아예 없었다(사용자 지적). internal과 동일한 포맷/명명 규칙으로 새로 저장한다.
+        if args.fold is not None:
+            import csv
+            ext_pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            ext_pred_dir.mkdir(parents=True, exist_ok=True)
+            ext_pred_path = ext_pred_dir / f"{external_dataset}_{model_prefix}_FINALEPOCH_seed{cfg.train.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(ext_pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(final_external_metrics["case_ids"], final_external_metrics["risks"],
+                                            final_external_metrics["times"], final_external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> final-epoch external predictions saved: {ext_pred_path}")
 
     # [SWA] 평균 모델(swa_model.module)을 별도로 internal/external test에 평가 — 기존 best-val/
     # 마지막-epoch 리포트와 나란히, 세 번째 관점으로만 추가한다(다른 로직에 영향 없음).

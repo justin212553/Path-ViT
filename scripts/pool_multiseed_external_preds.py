@@ -34,7 +34,18 @@ from utils.metrics import compute_survival_metrics
 _SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN")
 
 
-def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> dict:
+def _read_pred_csv(path: Path) -> dict:
+    preds = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            preds[row["case_id"]] = (float(row["risk"]), float(row["OS_time"]), int(row["OS_event"]))
+    return preds
+
+
+def _load_run_predictions(
+    pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int,
+    include_final_epoch: bool = False,
+) -> dict:
     # 2026-09-06: model_prefix를 손으로 완벽히 재현해야 하는 두 개 하드코딩 패턴(with/without
     # "_FOLD{fold}OF{n_folds}") 대신 글롭으로 찾는다 — scripts/pool_multiseed_kfold_preds.py::
     # _find_pred_path와 동일한 이유/관례.
@@ -57,11 +68,32 @@ def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, f
         nearby = sorted(pred_dir.glob(f"{dataset}_*{suffix}"))
         hint = f" (같은 seed/fold의 다른 태그 후보: {[p.name for p in nearby]})" if nearby else " (같은 seed/fold 파일 자체가 없음 — 그 실행이 아직 안 끝났거나 실패했을 가능성)"
         raise FileNotFoundError(f"seed={seed} fold={fold} external 예측 파일을 못 찾음: {pred_dir}/{dataset}_{model}*{suffix}{hint}")
-    path = matches[0]
-    preds = {}
-    with open(path, newline="") as f:
-        for row in csv.DictReader(f):
-            preds[row["case_id"]] = (float(row["risk"]), float(row["OS_time"]), int(row["OS_event"]))
+    preds = _read_pred_csv(matches[0])
+    if include_final_epoch:
+        # 2026-09-07: train.py가 이제 external에도 _FINALEPOCH_ CSV를 저장한다(internal과
+        # 동일한 checkpoint 앙상블 시도 — best-val 선택이 노이즈에 흔들리는 문제 완화, 사용자
+        # 제안). model_prefix에 이미 "_FOLD{f}OF{n}"이 끼어 있어 와일드카드로 찾는다.
+        fe_suffix = f"_FINALEPOCH_seed{seed}_fold{fold}of{n_folds}.csv"
+        fe_matches = [
+            p for p in sorted(pred_dir.glob(f"{prefix}*{fe_suffix}"))
+            if not p.name[len(prefix):len(prefix) + 1].isdigit()
+        ]
+        if len(fe_matches) != 1:
+            raise FileNotFoundError(
+                f"--include-final-epoch: seed={seed} fold={fold} FINALEPOCH 파일 매칭 "
+                f"{len(fe_matches)}개(1개여야 함) — {prefix}*{fe_suffix} — {[p.name for p in fe_matches]}"
+            )
+        fe_preds = _read_pred_csv(fe_matches[0])
+        merged = {}
+        for cid, (risk, t, e) in preds.items():
+            if cid not in fe_preds:
+                raise ValueError(f"seed={seed} fold={fold}: case_id={cid}가 FINALEPOCH 파일엔 없음")
+            fe_risk, fe_t, fe_e = fe_preds[cid]
+            if abs(t - fe_t) > 1e-6 or e != fe_e:
+                raise ValueError(f"seed={seed} fold={fold}: case_id={cid}의 OS_time/OS_event가 "
+                                  "best-checkpoint와 FINALEPOCH 파일 간에 다름 — 라벨 불일치 의심")
+            merged[cid] = ((risk + fe_risk) / 2.0, t, e)
+        preds = merged
     return preds
 
 
@@ -84,6 +116,13 @@ def main():
         help="주어지면(예: 2000) 최종 앙상블 지표에 환자 단위 resample bootstrap 95%% CI를 추가로 "
              "계산한다. 0(기본)이면 생략.",
     )
+    parser.add_argument(
+        "--include-final-epoch", action="store_true",
+        help="2026-09-07: (seed,fold)마다 best-checkpoint 예측과 _FINALEPOCH_ 예측(early stopping "
+             "없이 끝까지 학습한 가중치, train.py가 이제 external에도 저장함)을 환자 단위로 평균 "
+             "낸 뒤 그 실행의 예측으로 쓴다 — scripts/pool_multiseed_kfold_preds.py의 동일 옵션과 "
+             "같은 취지(checkpoint 앙상블, 사용자 제안).",
+    )
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -93,10 +132,14 @@ def main():
     patient_risks: dict[str, list[float]] = defaultdict(list)
     patient_label: dict[str, tuple[float, int]] = {}
 
-    print(f"=== 실행별(seed x fold) external — {args.dataset} {args.model} ===")
+    fe_tag = " + FINALEPOCH 체크포인트 앙상블" if args.include_final_epoch else ""
+    print(f"=== 실행별(seed x fold) external{fe_tag} — {args.dataset} {args.model} ===")
     for seed in seeds:
         for fold in range(args.n_folds):
-            preds = _load_run_predictions(pred_dir, args.dataset, args.model, seed, fold, args.n_folds)
+            preds = _load_run_predictions(
+                pred_dir, args.dataset, args.model, seed, fold, args.n_folds,
+                include_final_epoch=args.include_final_epoch,
+            )
             case_ids = list(preds.keys())
             risks  = np.array([preds[c][0] for c in case_ids])
             times  = np.array([preds[c][1] for c in case_ids])
