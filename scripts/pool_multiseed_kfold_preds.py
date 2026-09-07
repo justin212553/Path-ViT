@@ -66,17 +66,50 @@ def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: i
     raise FileNotFoundError(f"seed={seed} fold={fold} 예측 파일을 못 찾음: {pred_dir}/{dataset}_{model}*{suffix}{hint}")
 
 
-def _load_seed_predictions(pred_dir: Path, dataset: str, model: str, seed: int, n_folds: int) -> dict:
-    """seed 하나의 n_folds개 fold CSV를 모아 {case_id: (risk, OS_time, OS_event)}로 반환한다."""
+def _read_pred_csv(path: Path) -> dict:
+    """CSV 하나를 {case_id: (risk, OS_time, OS_event)}로 읽는다."""
+    rows = {}
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            rows[row["case_id"]] = (float(row["risk"]), float(row["OS_time"]), int(row["OS_event"]))
+    return rows
+
+
+def _load_seed_predictions(
+    pred_dir: Path, dataset: str, model: str, seed: int, n_folds: int,
+    include_final_epoch: bool = False,
+) -> dict:
+    """seed 하나의 n_folds개 fold CSV를 모아 {case_id: (risk, OS_time, OS_event)}로 반환한다.
+
+    include_final_epoch=True면 (2026-09-07 추가) fold마다 best-checkpoint 예측과
+    "_FINALEPOCH_" 예측(early stopping 없이 마지막 epoch까지 학습한 가중치 — train.py가
+    --fold 학습마다 무조건 같이 저장함, k-fold라 validation set이 작아 early stopping 시점
+    자체가 노이즈에 좌우될 수 있다는 문제의식에서 이 둘을 checkpoint 앙상블로 합친다 — 사용자
+    제안, 2026-09-07)을 환자 단위로 평균 낸 뒤 그 fold의 예측으로 쓴다.
+    """
     preds = {}
     for fold in range(n_folds):
         path = _find_pred_path(pred_dir, dataset, model, seed, fold, n_folds)
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                cid = row["case_id"]
-                if cid in preds:
-                    raise ValueError(f"seed={seed} 내에서 case_id 중복: {cid} — fold 분할이 겹쳤을 가능성")
-                preds[cid] = (float(row["risk"]), float(row["OS_time"]), int(row["OS_event"]))
+        fold_preds = _read_pred_csv(path)
+        if include_final_epoch:
+            fe_path = pred_dir / f"{dataset}_{model}_FINALEPOCH_seed{seed}_fold{fold}of{n_folds}.csv"
+            if not fe_path.exists():
+                raise FileNotFoundError(f"--include-final-epoch 지정했지만 {fe_path} 없음")
+            fe_preds = _read_pred_csv(fe_path)
+            merged = {}
+            for cid, (risk, t, e) in fold_preds.items():
+                if cid not in fe_preds:
+                    raise ValueError(f"seed={seed} fold={fold}: case_id={cid}가 FINALEPOCH 파일엔 없음")
+                fe_risk, fe_t, fe_e = fe_preds[cid]
+                if abs(t - fe_t) > 1e-6 or e != fe_e:
+                    raise ValueError(f"seed={seed} fold={fold}: case_id={cid}의 OS_time/OS_event가 "
+                                      "best-checkpoint와 FINALEPOCH 파일 간에 다름 — 라벨 불일치 의심")
+                merged[cid] = ((risk + fe_risk) / 2.0, t, e)
+            fold_preds = merged
+        for cid, val in fold_preds.items():
+            if cid in preds:
+                raise ValueError(f"seed={seed} 내에서 case_id 중복: {cid} — fold 분할이 겹쳤을 가능성")
+            preds[cid] = val
     return preds
 
 
@@ -93,6 +126,13 @@ def main():
         help="주어지면(예: 2000) 최종 앙상블 지표에 환자 단위 resample bootstrap 95%% CI를 추가로 "
              "계산한다. 0(기본)이면 생략.",
     )
+    parser.add_argument(
+        "--include-final-epoch", action="store_true",
+        help="2026-09-07: fold마다 best-checkpoint 예측과 _FINALEPOCH_ 예측(early stopping 없이 "
+             "끝까지 학습한 가중치)을 환자 단위로 평균 낸 뒤 그 fold의 예측으로 쓴다 — k-fold라 "
+             "validation set이 작아 early stopping 시점이 노이즈에 좌우될 수 있다는 문제의식에서 "
+             "나온 checkpoint 앙상블(사용자 제안). 새 학습 불필요 — 두 CSV 다 이미 저장돼 있다.",
+    )
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -100,9 +140,13 @@ def main():
 
     per_seed_preds = {}
     per_seed_c = []
-    print(f"=== seed별 pooled out-of-fold internal — {args.dataset} {args.model} ({args.n_folds}-fold) ===")
+    fe_tag = " + FINALEPOCH 체크포인트 앙상블" if args.include_final_epoch else ""
+    print(f"=== seed별 pooled out-of-fold internal{fe_tag} — {args.dataset} {args.model} ({args.n_folds}-fold) ===")
     for seed in seeds:
-        preds = _load_seed_predictions(pred_dir, args.dataset, args.model, seed, args.n_folds)
+        preds = _load_seed_predictions(
+            pred_dir, args.dataset, args.model, seed, args.n_folds,
+            include_final_epoch=args.include_final_epoch,
+        )
         per_seed_preds[seed] = preds
         case_ids = list(preds.keys())
         risks  = np.array([preds[c][0] for c in case_ids])
