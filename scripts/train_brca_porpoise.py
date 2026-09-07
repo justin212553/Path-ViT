@@ -328,6 +328,28 @@ def main():
                       f"(best epoch {best_metrics.get('epoch', '-')}, best c_index={best_score:.4f})")
                 break
 
+    # 2026-09-07: train.py::_FINALEPOCH_ 저장과 동일 관례(PAAD 쪽 이식, 사용자 지적) — best-val
+    # 체크포인트를 리로드하기 *전에*(메모리 상의 model이 곧 마지막 epoch 가중치), early stopping
+    # 선택 없이 마지막 epoch 그대로 평가한 예측도 별도 CSV로 남긴다(scripts/
+    # pool_multiseed_kfold_preds.py --include-final-epoch로 checkpoint 앙상블 가능).
+    final_train_metrics = evaluate(model, train_eval_loader, cfg, device, amp_ctx, None)
+    final_test_metrics = evaluate(model, test_loader, cfg, device, amp_ctx, None)
+    print(f"\n=== BRCA Internal Test (마지막 epoch {epoch + 1} 모델, best-val 선택 없음) ===")
+    print(_log_line("final_test", final_test_metrics))
+    import csv as _csv
+    fe_pred_dir = Path(__file__).parent.parent / ".logs" / "kfold_preds"
+    fe_pred_dir.mkdir(parents=True, exist_ok=True)
+    fe_pred_path = fe_pred_dir / f"brca_{model_prefix}{ext_tag}_FINALEPOCH_seed{args.seed}{fold_suffix}.csv"
+    with open(fe_pred_path, "w", newline="") as f:
+        writer = _csv.writer(f)
+        writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+        for cid, risk, t, e in zip(final_test_metrics["case_ids"], final_test_metrics["risks"],
+                                    final_test_metrics["times"], final_test_metrics["events"]):
+            writer.writerow([cid, risk, t, e])
+    print(f"  -> final-epoch predictions saved: {fe_pred_path}")
+    if WANDB_AVAILABLE:
+        wandb.run.summary["final_epoch_test_c_index"] = final_test_metrics["c_index"]
+
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     train_metrics_final = evaluate(model, train_eval_loader, cfg, device, amp_ctx, None)
