@@ -1170,6 +1170,38 @@ def main():
                       f"best epoch {best_metrics.get('epoch', '-')} c_index={best_score:.4f})")
                 break
 
+    # 2026-09-09: train.py의 FINALEPOCH 저장(3565행 부근)을 train_light.py(M5/M6/M7)에 이식 —
+    # best-val 체크포인트 선택이 작은 val set 노이즈에 흔들리는 문제를 완화하기 위해 early
+    # stopping 없이 마지막 epoch까지 학습한 모델의 예측도 별도 저장한다(_FINALEPOCH_ 접미사).
+    # 아래 best-checkpoint 리로드 *이전*(메모리 상의 model이 아직 마지막 epoch 가중치일 때) 평가해야
+    # 한다 — --full-train은 애초에 리로드 자체가 없어(비교 대상인 "early-stopped 버전"이 없음)
+    # 해당 없음.
+    if args.fold is not None and not args.full_train:
+        import csv
+        final_epoch_test_metrics = evaluate(model, test_loader, device, cluster_hist_lookup)
+        pred_dir = Path(__file__).parent / ".logs" / "kfold_preds"
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        fe_pred_path = pred_dir / f"{args.dataset}_{model_prefix}_FINALEPOCH_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+        with open(fe_pred_path, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(final_epoch_test_metrics["case_ids"], final_epoch_test_metrics["risks"],
+                                        final_epoch_test_metrics["times"], final_epoch_test_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> final-epoch fold predictions saved: {fe_pred_path}")
+        if external_ds is not None:
+            final_epoch_external_metrics = evaluate(model, external_loader, device, cluster_hist_lookup)
+            ext_pred_dir = Path(__file__).parent / ".logs" / "external_preds"
+            ext_pred_dir.mkdir(parents=True, exist_ok=True)
+            fe_ext_pred_path = ext_pred_dir / f"{external_dataset}_{model_prefix}_FINALEPOCH_seed{cfg.light.seed}_fold{args.fold}of{args.n_folds}.csv"
+            with open(fe_ext_pred_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+                for cid, risk, t, e in zip(final_epoch_external_metrics["case_ids"], final_epoch_external_metrics["risks"],
+                                            final_epoch_external_metrics["times"], final_epoch_external_metrics["events"]):
+                    writer.writerow([cid, risk, t, e])
+            print(f"  -> final-epoch external predictions saved: {fe_ext_pred_path}")
+
     if not args.full_train:
         ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
