@@ -56,7 +56,7 @@ class ViT_M2(ViT_M1):
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
         cluster_pool: bool = False, cluster_centroids_path: str | None = None,
-        cluster_pool_temperature: float | None = None,
+        cluster_pool_temperature: float | None = None, surv_n_classes: int = 1,
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
                           skip_patch_vit=skip_patch_vit, use_coord_embed=use_coord_embed,
@@ -65,7 +65,8 @@ class ViT_M2(ViT_M1):
                           coord_embed_shuffle=coord_embed_shuffle,
                           use_wsi_extra_mlp=use_wsi_extra_mlp,
                           cluster_pool=cluster_pool, cluster_centroids_path=cluster_centroids_path,
-                          cluster_pool_temperature=cluster_pool_temperature)
+                          cluster_pool_temperature=cluster_pool_temperature,
+                          surv_n_classes=surv_n_classes)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         self.combine_mode = combine_mode
@@ -95,10 +96,13 @@ class ViT_M2(ViT_M1):
             # cox_add는 risk_head에 clinical을 넣지 않는다 — z_wsi(+dispersion)만.
             risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
 
-        # ViT_M1이 만든 risk_head를 위 차원으로 교체한다.
+        # ViT_M1이 만든 risk_head를 위 차원으로 교체한다. surv_n_classes>1(--surv-loss nll_surv/
+        # both)이면 (n_bins,) hazard logit을 뱉는다 — clinical_linear(cox_add 가산항)는 이와
+        # 무관하게 항상 1차원 그대로 둔다(스칼라 가산항이 전 구간에 동일하게 브로드캐스팅됨,
+        # train.py::_patient_risk 참조).
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
-            nn.Linear(risk_input_dim, 1),
+            nn.Linear(risk_input_dim, surv_n_classes),
         )
 
     def combine_with_clinical(

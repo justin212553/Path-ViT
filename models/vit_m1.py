@@ -134,7 +134,7 @@ class ViT_M1(nn.Module):
                  coord_embed_concat: bool = False, coord_embed_learnable_scale: bool = False,
                  coord_embed_shuffle: bool = False, use_wsi_extra_mlp: bool = False,
                  cluster_pool: bool = False, cluster_centroids_path: str | None = None,
-                 cluster_pool_temperature: float | None = None):
+                 cluster_pool_temperature: float | None = None, surv_n_classes: int = 1):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -281,10 +281,14 @@ class ViT_M1(nn.Module):
                                   use_tumor_type_embed=use_tumor_type_embed)
         self.attn_pool = AttentionPooling(cfg.embed_dim)
 
+        # surv_n_classes>1: train.py --surv-loss nll_surv/both 전용(models/vit_porpoise.py::
+        # ViT_PORPOISE와 동일 관례, 2026-09-09 M1/M2 ClusterPool 이식과 함께 추가). 기본값 1이면
+        # 기존 Cox 레시피와 완전히 동일.
+        self.surv_n_classes = surv_n_classes
         risk_input_dim = cfg.embed_dim + (1 if use_attn_dispersion else 0)
         self.risk_head = nn.Sequential(
             nn.LayerNorm(risk_input_dim),
-            nn.Linear(risk_input_dim, 1),
+            nn.Linear(risk_input_dim, surv_n_classes),
         )
 
     def _patch_tokens(

@@ -2091,10 +2091,14 @@ def main():
             "카테고리 평균으로 뭉갠 8차원 입력이라 GeneGroupRNAEncoder가 다시 카테고리로 나눌 "
             "개별 유전자 z-score가 없습니다."
         )
-    if args.surv_loss in ("nll_surv", "both") and not (args.PORPOISE or args.PMA):
-        raise ValueError("--surv-loss nll_surv는 --PORPOISE/--PMA에서만 사용 가능합니다(risk_head "
-                          "출력 차원 변경을 이 두 클래스만 지원 — models/vit_porpoise.py, "
-                          "models/vit_pma.py).")
+    is_m1_default = not (args.M2 or args.M2_POOL or args.M4 or args.M4A or args.M4B or args.PM4 or args.PMA
+                          or args.M4A_FF or args.M2_FF or args.PMA_FF or args.M5 or args.M6 or args.M6X
+                          or args.M1_POOL or args.fusion or args.avgpool or args.MCAT or args.PORPOISE)
+    if args.surv_loss in ("nll_surv", "both") and not (args.PORPOISE or args.PMA or args.M2 or is_m1_default):
+        raise ValueError("--surv-loss nll_surv는 --PORPOISE/--PMA/--M1/--M2에서만 사용 가능합니다(risk_head "
+                          "출력 차원 변경을 이 클래스들만 지원 — models/vit_porpoise.py, "
+                          "models/vit_pma.py, models/vit_m1.py(2026-09-09, M1/M2 ClusterPool 이식과 "
+                          "함께 surv_n_classes 추가).")
     if args.no_clinical and not (args.PMA or args.M4):
         raise ValueError("--no-clinical은 --PMA/--M4에서만 사용 가능합니다.")
     if args.no_clinical and args.M4 and args.combine_mode == "cox_add":
@@ -2902,6 +2906,7 @@ def main():
                         use_wsi_extra_mlp=args.wsi_extra_mlp,
                         cluster_pool=args.cluster_pool, cluster_centroids_path=args.cluster_centroids_path,
                         cluster_pool_temperature=args.cluster_pool_temperature,
+                        surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
                         **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
@@ -2921,7 +2926,8 @@ def main():
                         coord_embed_shuffle=args.coord_embed_shuffle,
                         use_wsi_extra_mlp=args.wsi_extra_mlp,
                         cluster_pool=args.cluster_pool, cluster_centroids_path=args.cluster_centroids_path,
-                        cluster_pool_temperature=args.cluster_pool_temperature).to(device)
+                        cluster_pool_temperature=args.cluster_pool_temperature,
+                        surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1)).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
