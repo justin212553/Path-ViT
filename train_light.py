@@ -50,7 +50,7 @@ from models.clinical_encoder import (
     mutation_stats_from_csv, mutation_stats_from_df, MUTATION_FIELDS,
 )
 from utils import load_env, send_slack
-from utils.losses import cox_ph_loss, nll_surv_loss, hazard_to_risk, digitize_survival_time
+from utils.losses import cox_ph_loss, nll_surv_loss, hazard_to_risk, digitize_survival_time, fit_survival_bins
 from utils.metrics import compute_survival_metrics, compute_time_dependent_auc
 
 
@@ -401,6 +401,16 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-folds", type=int, default=5, help="--fold와 함께 쓰는 전체 fold 개수.")
     parser.add_argument(
+        "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
+        help="2026-09-09: train.py --surv-loss 이식 — PAAD 최종 레시피('both')가 M4/PORPOISE/"
+             "ClusterPool까지 확정된 뒤에도 M5/M6/M7(WSI 없는 baseline)은 범위 밖이라 빠져 있었다. "
+             "이 셋도 같은 loss로 맞춰야 M1~M7 전체 ablation 테이블이 공정한 비교가 된다. 계산 "
+             "로직 자체(train_one_epoch/_patient_risk)는 2026-09-07 이미 이식돼 있었고 이번엔 CLI "
+             "플래그와 모델 생성 시 surv_n_classes 배선만 추가한다.",
+    )
+    parser.add_argument("--nll-n-bins", type=int, default=4)
+    parser.add_argument("--nll-cox-weight", type=float, default=1.0)
+    parser.add_argument(
         "--full-train", action="store_true",
         help="2026-08-16: train.py --full-train와 동일 관례 — 6:2:2/k-fold split 없이 코호트 "
              "전체를 train으로 쓴다(val/internal test 자체가 없음). val이 없어 best-val "
@@ -670,6 +680,12 @@ def main():
     if args.raw_linear and not args.M5:
         raise ValueError("--raw-linear는 --M5 전용입니다.")
 
+    if args.surv_loss in ("nll_surv", "both") and (args.M6X or args.HDP or args.HDP_PRETRAIN):
+        raise ValueError(
+            "--surv-loss nll_surv/both는 --M5/--M6/--M7에서만 지원합니다 — RNAOnlyExtend(M6X)/HDP는 "
+            "아직 surv_n_classes를 받지 않습니다(models/rna_only.py::RNAOnlyExtend, models/hdp.py::HDP)."
+        )
+
     if args.use_cnv and args.rna_genes in ("purist", "purist_top20_tcga_only", "purist_pathway8"):
         raise ValueError(
             "--use-cnv는 PurIST 계열(purist/purist_top20_tcga_only/purist_pathway8)과는 아직 "
@@ -928,6 +944,10 @@ def main():
         model_prefix += f"_RISKDIM{args.risk_hidden_dim}"
     if args.risk_dropout != 0.0:
         model_prefix += f"_RISKDROP{args.risk_dropout:g}"
+    if args.surv_loss in ("nll_surv", "both"):
+        model_prefix += f"_NLLSURV{args.nll_n_bins}"
+    if args.surv_loss == "both":
+        model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -943,14 +963,15 @@ def main():
 
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
+    surv_n_classes = args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1
     if args.M5:
         model = ClinicalOnly(cfg.model, age_mean=age_mean, age_std=age_std,
                               use_margin=args.clinical_margin, margin_stats=margin_stats,
                               use_age_sex=not args.no_age_sex,
                               use_staging=args.clinical_staging, stage_stats=stage_stats,
-                              raw_linear=args.raw_linear).to(device)
+                              raw_linear=args.raw_linear, surv_n_classes=surv_n_classes).to(device)
     elif args.M6:
-        model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim).to(device)
+        model = RNAOnly(cfg.model, rna_input_dim=rna_input_dim, surv_n_classes=surv_n_classes).to(device)
     elif args.M6X:
         model = RNAOnlyExtend(cfg.model, rna_input_dim=rna_input_dim).to(device)
     elif args.HDP or args.HDP_PRETRAIN:
@@ -966,7 +987,8 @@ def main():
                                  risk_dropout=args.risk_dropout, use_margin=args.clinical_margin,
                                  margin_stats=margin_stats, use_age_sex=not args.no_age_sex,
                                  use_staging=args.clinical_staging, stage_stats=stage_stats,
-                                 use_mutation=args.clinical_mutation, mutation_stats=mutation_stats).to(device)
+                                 use_mutation=args.clinical_mutation, mutation_stats=mutation_stats,
+                                 surv_n_classes=surv_n_classes).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.light.seed)
 
@@ -1013,6 +1035,18 @@ def main():
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
     )
+
+    # train.py::fit_survival_bins 호출부와 동일 관례(2026-09-09 이식) — 이 fold의 train split만으로
+    # 시간-구간 경계를 fit한다(전체 코호트로 fit하면 RNA 유전자 선정에서 겪은 것과 같은 leakage).
+    nll_bin_edges = None
+    if args.surv_loss in ("nll_surv", "both"):
+        _train_labels = train_ds.items.drop_duplicates("case_id")
+        nll_bin_edges = fit_survival_bins(
+            _train_labels["OS_time"].to_numpy(), _train_labels["OS_event"].to_numpy(),
+            n_bins=args.nll_n_bins,
+        )
+        print(f"[nll_surv] train split {len(_train_labels)}명 기준 시간-구간 경계({args.nll_n_bins}bins): "
+              f"{nll_bin_edges}")
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
@@ -1086,7 +1120,8 @@ def main():
     epochs_since_improvement = 0
     for epoch in range(cfg.light.epochs):
         lr_now = optimizer.param_groups[0]["lr"]
-        loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size, cluster_hist_lookup)
+        loss = train_one_epoch(model, train_loader, optimizer, device, cfg.light.cox_batch_size, cluster_hist_lookup,
+                                surv_loss=args.surv_loss, nll_bin_edges=nll_bin_edges, nll_cox_weight=args.nll_cox_weight)
         train_metrics = evaluate(model, train_eval_loader, device, cluster_hist_lookup)
         scheduler.step()
 

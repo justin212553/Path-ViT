@@ -20,6 +20,7 @@ import torch.nn as nn
 from PIL import Image
 
 from .cnn_encoder import CNNEncoder
+from .self_attention_pooling import SelfAttentionPooling
 from .spatial_features import attention_dispersion
 from .uni_encoder import UNIEncoder
 from .uni2_encoder import UNI2hEncoder
@@ -131,7 +132,9 @@ class ViT_M1(nn.Module):
                  use_attn_dispersion: bool = False, skip_patch_vit: bool = False,
                  use_tumor_type_embed: bool = False, use_coord_embed: bool = False,
                  coord_embed_concat: bool = False, coord_embed_learnable_scale: bool = False,
-                 coord_embed_shuffle: bool = False, use_wsi_extra_mlp: bool = False):
+                 coord_embed_shuffle: bool = False, use_wsi_extra_mlp: bool = False,
+                 cluster_pool: bool = False, cluster_centroids_path: str | None = None,
+                 cluster_pool_temperature: float | None = None):
         """
         Args:
             precomputed: True면 tile encoder backbone을 생성하지 않는다 — 항상 사전 추출된
@@ -221,6 +224,27 @@ class ViT_M1(nn.Module):
                 nn.GELU(),
             )
         self.tile_decode_workers = getattr(cfg, "tile_decode_workers", 4)
+        # 2026-09-09: models/vit_pma.py::ViT_PMA의 cluster_pool(패치 N개를 사전계산된 K개
+        # 군집 중심 raw feature 공간 최근접 배정으로 요약)을 M1/M2에 이식 — PMA는 이 K개
+        # 성분을 RNA-query co-attention(component_coattn)으로 가중합하지만, M1/M2엔 RNA가
+        # 없어 그 쿼리를 만들 수 없다. 대신 query 없는 표준 self-attention block
+        # (SelfAttentionPooling)으로 K개 성분이 서로를 참조하게 한 뒤 평균 풀링한다 —
+        # PMA/M4 계열에서 ABMIL이 dead module로 확인된 것과 같은 문제(N->1 집계 실패)를
+        # RNA 유무와 무관하게 동일한 방식(비지도 군집화로 검색 공간을 N에서 K로 줄임)으로
+        # 우회한다. PMA와 달리 cluster_pool_after_vit/tumor_content_head는 이식하지 않았다 —
+        # 최종 확정 레시피(2026-09 ClusterPool 아키텍처 통합)에 쓰인 조합이 아니었기 때문.
+        self.cluster_pool = cluster_pool
+        self.cluster_pool_temperature = cluster_pool_temperature
+        if cluster_pool:
+            if use_attn_dispersion:
+                raise ValueError(
+                    "cluster_pool=True는 use_attn_dispersion과 함께 쓸 수 없습니다 "
+                    "(patch-level attn_weights가 없어 attention_dispersion을 계산할 수 없음)."
+                )
+            path = cluster_centroids_path or f"data/cluster_centroids_{backbone}.pt"
+            centroids = torch.load(path, weights_only=True)
+            self.register_buffer("cluster_centroids", centroids.float())
+            self.self_attn_pool = SelfAttentionPooling(cfg.embed_dim, num_heads=cfg.num_heads, dropout=cfg.dropout)
         if use_attn_dispersion:
             # 2026-07-30: attention_dispersion 원값이 좌표 grid 인덱스 스케일(TCGA 실측 평균
             # ~5.0, 범위 ~3.7~6.5)이라, LayerNorm/GELU를 거쳐 대체로 O(1) 스케일인 나머지
@@ -343,6 +367,28 @@ class ViT_M1(nn.Module):
             embed:        (D,) — WSI 임베딩
             attn_weights: (N_patches,)
         """
+        if self.cluster_pool:
+            if features is None:
+                raise ValueError("cluster_pool=True는 precomputed features 모드에서만 지원합니다.")
+            raw = features.to(coords.device, non_blocking=True).float()  # (N, raw_dim) — 투영 이전
+            centroids = self.cluster_centroids.to(raw.device)             # (K, raw_dim)
+            dist = torch.cdist(raw, centroids)                            # (N, K) — raw 공간 기준(고정)
+            if self.cluster_pool_temperature is not None:
+                weights = torch.softmax(-dist / self.cluster_pool_temperature, dim=1)  # (N, K)
+            else:
+                assign = dist.argmin(dim=1)
+                weights = torch.zeros_like(dist).scatter_(1, assign.unsqueeze(1), 1.0)  # (N, K) one-hot
+            wsum = weights.sum(dim=0)                                      # (K,) — 군집별 유효 가중치 총합
+            empty = wsum < 1e-6                                            # 이 배치에 사실상 배정 안 된 군집
+            cluster_raw = (weights.T @ raw) / wsum.clamp(min=1e-8).unsqueeze(1)  # (K, raw_dim)
+            cluster_raw[empty] = centroids[empty]
+            components = self.cnn.forward_pooled(cluster_raw)              # (K, D)
+            # PMA의 cluster_pool과 달리(K개 성분을 슬라이드 간 평균 이후 pooling), M1/M2는 기존
+            # 관례(슬라이드 단위로 먼저 (D,)까지 풀링한 뒤 환자 단위로 평균, train.py::_patient_risk)를
+            # 그대로 유지 — 여기서 self_attn_pool로 K->1까지 끝낸다. PAAD/BRCA 모두 환자당 슬라이드
+            # 1장이 절대다수라 두 순서의 실질적 차이는 미미하다.
+            wsi_embed = self.self_attn_pool(components)  # (D,)
+            return {"embed": wsi_embed, "meanpool_embed": components.mean(dim=0)}
         patch_tokens = self._patch_tokens(coords, patch_paths, features, transform, chunk_size, tile_cache)
         if self.use_coord_embed:
             coord_input = coords[torch.randperm(coords.shape[0], device=coords.device)] if self.coord_embed_shuffle else coords

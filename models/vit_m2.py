@@ -55,13 +55,17 @@ class ViT_M2(ViT_M1):
         coord_embed_learnable_scale: bool = False,
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
+        cluster_pool: bool = False, cluster_centroids_path: str | None = None,
+        cluster_pool_temperature: float | None = None,
     ):
         super().__init__(cfg, precomputed, backbone, use_attn_dispersion=use_attn_dispersion,
                           skip_patch_vit=skip_patch_vit, use_coord_embed=use_coord_embed,
                           coord_embed_concat=coord_embed_concat,
                           coord_embed_learnable_scale=coord_embed_learnable_scale,
                           coord_embed_shuffle=coord_embed_shuffle,
-                          use_wsi_extra_mlp=use_wsi_extra_mlp)
+                          use_wsi_extra_mlp=use_wsi_extra_mlp,
+                          cluster_pool=cluster_pool, cluster_centroids_path=cluster_centroids_path,
+                          cluster_pool_temperature=cluster_pool_temperature)
         if combine_mode not in ("concat", "cox_add"):
             raise ValueError(f"알 수 없는 combine_mode: {combine_mode}")
         self.combine_mode = combine_mode

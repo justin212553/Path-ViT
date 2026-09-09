@@ -27,12 +27,16 @@ class ClinicalOnly(nn.Module):
         use_margin: bool = False, margin_stats: tuple[float, float] | None = None,
         use_age_sex: bool = True,
         raw_linear: bool = False,
+        surv_n_classes: int = 1,
     ):
         super().__init__()
         self.raw_linear = raw_linear
         self.use_staging = use_staging
         self.use_margin = use_margin
         self.use_age_sex = use_age_sex
+        # surv_n_classes>1: train_light.py --surv-loss nll_surv/both 전용(models/clinical_rna_only.py::
+        # ClinicalRNAOnly와 동일 관례, 2026-09-09 이식). 기본값 1이면 기존 Cox 레시피와 동일.
+        self.surv_n_classes = surv_n_classes
         if raw_linear:
             # ClinicalEncoder(MLP) 없이 raw z-score feature -> Linear(1) 직결(고전적 Cox 회귀).
             # models/clinical_rna_only.py::ClinicalRNAOnly의 cox_add raw feature 계산과 동일 관례.
@@ -53,7 +57,7 @@ class ClinicalOnly(nn.Module):
             raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
             if raw_dim == 0:
                 raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
-            self.risk_head = nn.Linear(raw_dim, 1)
+            self.risk_head = nn.Linear(raw_dim, surv_n_classes)
         else:
             self.clinical_encoder = ClinicalEncoder(
                 cfg.embed_dim, age_mean, age_std, use_staging=use_staging, stage_stats=stage_stats,
@@ -61,7 +65,7 @@ class ClinicalOnly(nn.Module):
             )
             self.risk_head = nn.Sequential(
                 nn.LayerNorm(cfg.embed_dim),
-                nn.Linear(cfg.embed_dim, 1),
+                nn.Linear(cfg.embed_dim, surv_n_classes),
             )
 
     def _raw_feat(self, age_years: torch.Tensor, sex_idx: torch.Tensor,
@@ -102,11 +106,11 @@ class ClinicalOnly(nn.Module):
             margin_ord: self.use_margin=True(--clinical-margin, M5_R)일 때만
                         필요. () 스칼라 long — encode_margin_value() 규약.
         Returns:
-            risk: (1,)
+            risk: (1,) — surv_n_classes=1(기본). surv_n_classes>1이면 (surv_n_classes,) hazard logits.
         """
         if self.raw_linear:
             feats = self._raw_feat(age_years, sex_idx, margin_ord, stage_ord)  # (raw_dim,)
-            return self.risk_head(feats.unsqueeze(0)).view(1)
+            return self.risk_head(feats.unsqueeze(0)).view(-1)
         extra_kwargs = {}
         if stage_ord is not None:
             extra_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
@@ -115,4 +119,4 @@ class ClinicalOnly(nn.Module):
         z = self.clinical_encoder(
             age_years.unsqueeze(0), sex_idx.unsqueeze(0), **extra_kwargs
         ).squeeze(0)  # (D,)
-        return self.risk_head(z.unsqueeze(0)).view(1)
+        return self.risk_head(z.unsqueeze(0)).view(-1)

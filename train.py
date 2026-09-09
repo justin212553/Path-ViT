@@ -1693,13 +1693,15 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--cluster-pool", action="store_true",
-        help="2026-09-05: --PMA 전용 — Nystrom(oversmoothing 무죄로 확인)과 ABMIL(gradient가 "
+        help="2026-09-05: --PMA/--M1/--M2 지원 — Nystrom(oversmoothing 무죄로 확인)과 ABMIL(gradient가 "
              "weight_decay 유무와 무관하게 전혀 안 닿는 dead module로 확인, scripts/"
              "diagnose_abmil_attn_training.py) 둘 다 우회하는 대안. 학습 파라미터 없는 사전계산 "
              "군집 중심(data/cluster_centroids_{backbone}.pt, K=10, raw feature 공간)으로 패치 "
-             "N개를 K개의 '슬라이드 내 실존 조직 유형' 대표값으로 미리 요약해, 기존 4-component "
-             "(mean/std/attn/top) 자리에 그대로 꽂아 RNA co-attention에 넘긴다(models/vit_pma.py "
-             "ViT_PMA.forward cluster_pool 분기). self.vit/self.attn_pool(MultiComponentPooling)은 "
+             "N개를 K개의 '슬라이드 내 실존 조직 유형' 대표값으로 미리 요약한다. --PMA에서는 이 "
+             "K개를 기존 4-component(mean/std/attn/top) 자리에 그대로 꽂아 RNA co-attention에 "
+             "넘기고(models/vit_pma.py ViT_PMA.forward cluster_pool 분기), --M1/--M2는 RNA가 없어 "
+             "그 자리에 query 없는 self-attention pooling(models/self_attention_pooling.py, "
+             "2026-09-09 이식)을 대신 쓴다. self.vit/self.attn_pool(MultiComponentPooling/ABMIL)은 "
              "생성은 되지만 forward에서 안 쓰인다(파라미터 낭비는 있지만 나머지 코드 경로 호환 "
              "유지). 켜면 wandb/checkpoint에 _CLUSTERPOOL 접미사가 자동으로 붙는다.",
     )
@@ -2898,6 +2900,8 @@ def main():
                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                         coord_embed_shuffle=args.coord_embed_shuffle,
                         use_wsi_extra_mlp=args.wsi_extra_mlp,
+                        cluster_pool=args.cluster_pool, cluster_centroids_path=args.cluster_centroids_path,
+                        cluster_pool_temperature=args.cluster_pool_temperature,
                         **stage_kwargs).to(device)
     elif args.fusion:
         model = LateFusionViT(cfg.model, cluster_centroids, precomputed=cfg.data.precomputed).to(device)
@@ -2915,7 +2919,9 @@ def main():
                         coord_embed_concat=args.coord_embed_concat,
                         coord_embed_learnable_scale=args.coord_embed_learnable_scale,
                         coord_embed_shuffle=args.coord_embed_shuffle,
-                        use_wsi_extra_mlp=args.wsi_extra_mlp).to(device)
+                        use_wsi_extra_mlp=args.wsi_extra_mlp,
+                        cluster_pool=args.cluster_pool, cluster_centroids_path=args.cluster_centroids_path,
+                        cluster_pool_temperature=args.cluster_pool_temperature).to(device)
     if args.init_seed is not None:
         torch.manual_seed(cfg.train.seed)
     if hasattr(model, "cnn") and model.cnn.backbone is not None:
