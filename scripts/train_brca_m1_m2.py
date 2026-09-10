@@ -118,11 +118,12 @@ def main():
         model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
     fold_suffix = f"_fold{args.fold}of{args.n_folds}" if args.fold is not None else ""
 
+    stg = bool(args.clinical and args.clinical_staging)
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
-    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest)
-    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest)
-    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest)
-    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest) if external_tss else None
+    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest, with_staging=stg)
+    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest, with_staging=stg)
+    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest, with_staging=stg)
+    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest, with_staging=stg) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
