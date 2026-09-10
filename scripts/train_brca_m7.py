@@ -345,6 +345,22 @@ def main():
     print(f"  -> final-epoch predictions saved: {fe_pred_path}")
     if WANDB_AVAILABLE:
         wandb.run.summary["final_epoch_test_c_index"] = final_test_metrics["c_index"]
+    if external_loader is not None:
+        # 2026-09-10: train_brca_m4.py와 동일한 gap(internal만 FINALEPOCH 저장, external은 빠짐) —
+        # paper/brca_final 파일 개수 확인 중 발견(사용자 지적).
+        final_external_metrics = evaluate(model, external_loader, device)
+        fe_ext_pred_dir = Path(__file__).parent.parent / ".logs" / "external_preds"
+        fe_ext_pred_dir.mkdir(parents=True, exist_ok=True)
+        fe_ext_pred_path = fe_ext_pred_dir / f"brca_{model_prefix}{ext_tag}_FINALEPOCH_seed{args.seed}{fold_suffix}.csv"
+        with open(fe_ext_pred_path, "w", newline="") as f:
+            writer = _csv.writer(f)
+            writer.writerow(["case_id", "risk", "OS_time", "OS_event"])
+            for cid, risk, t, e in zip(final_external_metrics["case_ids"], final_external_metrics["risks"],
+                                        final_external_metrics["times"], final_external_metrics["events"]):
+                writer.writerow([cid, risk, t, e])
+        print(f"  -> final-epoch external predictions saved: {fe_ext_pred_path}")
+        if WANDB_AVAILABLE:
+            wandb.run.summary["final_epoch_external_c_index"] = final_external_metrics["c_index"]
 
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
