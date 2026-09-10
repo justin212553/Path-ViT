@@ -56,6 +56,7 @@ from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCASlideDataset, _identity_collate, load_case_table, load_case_table_kfold,
     load_rna_matrix, load_rna_matrix_categorized, load_literature_categories, MANIFEST_PATH, EXTERNAL_TSS,
+    resolve_external_tss,
 )
 
 if WANDB_AVAILABLE:
@@ -191,12 +192,16 @@ def main():
                               "바뀐다(PAAD paper-spec 프로토콜과 동일 관례).")
     parser.add_argument("--n-folds", type=int, default=5)
     parser.add_argument(
-        "--external-tss", type=str, default=EXTERNAL_TSS,
-        help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
-             f"{EXTERNAL_TSS!r} — 공통 case 1058명 중 가장 큰 단일 기관 142명). "
-             "'none'이면 external 없이 기존 동작(전부 internal 6:2:2)으로 되돌아간다. "
-             "M7과 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
+        "--external-tss", type=str, default="multi",
+        help="institution-level external holdout. 'multi'(기본, 2026-09-10)면 "
+             "scripts/brca_common.py::EXTERNAL_TSS_MULTI(A2+AR+E9, N=230, event rate 13.9% — "
+             "전체 코호트 13.8%와 거의 일치) 3개 기관을 합쳐서 뺀다. 단일 기관 코드(예: 'BH')를 "
+             "주면 그 기관 하나만. 'none'이면 external 없이 기존 동작(전부 internal 6:2:2). "
+             "M1~M7 전부 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
     )
+    parser.add_argument("--no-clinical", action="store_true",
+                         help="2026-09-10: M3 슬롯(WSI+RNA, clinical 제외) — ViT_PMA(models/vit_pma.py) "
+                              "use_clinical=False 그대로 이식.")
     parser.add_argument(
         "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
         help="2026-09-07: train.py --surv-loss 이식 — PAAD 최종 레시피가 'both'(nll_surv+cox "
@@ -206,8 +211,7 @@ def main():
     parser.add_argument("--nll-n-bins", type=int, default=4)
     parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     args = parser.parse_args()
-    external_tss = None if args.external_tss.lower() == "none" else args.external_tss
-    ext_tag = f"_EXTTSS{external_tss}" if external_tss else ""  # None이면 파일명에 접미사 없음
+    external_tss, ext_tag = resolve_external_tss(args.external_tss)
 
     cfg = Config()
     cfg.data.seed = cfg.train.seed = args.seed
@@ -323,6 +327,7 @@ def main():
     model = ViT_PMA(
         cfg.model, age_mean=age_mean, age_std=age_std, rna_input_dim=rna_input_dim,
         precomputed=True, backbone="uni", use_wsi_extra_mlp=args.wsi_extra_mlp,
+        use_clinical=not args.no_clinical,
         use_staging=args.clinical_staging, stage_stats=stage_stats,
         cluster_pool=args.cluster_pool, cluster_pool_after_vit=args.cluster_pool_after_vit,
         cluster_pool_temperature=args.cluster_pool_temperature,
@@ -335,6 +340,8 @@ def main():
     model_prefix = f"BRCA_PMA_{gene_tag}"
     if args.gene_selection == "cox":
         model_prefix += "_COXGENE"
+    if args.no_clinical:
+        model_prefix += "_NOCLINICAL"
     if args.clinical_staging:
         model_prefix += "_STG"
     if args.patch_keep_frac < 1.0:

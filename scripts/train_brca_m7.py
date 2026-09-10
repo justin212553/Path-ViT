@@ -42,6 +42,7 @@ from utils.metrics import compute_time_dependent_auc
 from scripts.brca_common import (
     CLINICAL_PATH, BRCACaseDataset, _identity_collate, load_case_table, load_case_table_kfold,
     load_rna_matrix, load_rna_matrix_categorized, load_literature_categories, EXTERNAL_TSS,
+    resolve_external_tss,
 )
 
 if WANDB_AVAILABLE:
@@ -106,14 +107,13 @@ def main():
     parser.add_argument("--nll-n-bins", type=int, default=4)
     parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     parser.add_argument(
-        "--external-tss", type=str, default=EXTERNAL_TSS,
-        help=f"institution-level external holdout(TCGA barcode 2번째 세그먼트, 기본 "
-             f"{EXTERNAL_TSS!r}). 'none'이면 external 없이 기존 동작. M4와 반드시 동일 값을 "
-             "써야 비교가 성립한다(scripts/brca_common.py 참조).",
+        "--external-tss", type=str, default="multi",
+        help="institution-level external holdout. 'multi'(기본, 2026-09-10)면 A2+AR+E9(N=230, "
+             "event rate 13.9%) 3개 기관. 단일 기관 코드도 가능. 'none'이면 external 없음. "
+             "M1~M7 전부 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
     )
     args = parser.parse_args()
-    external_tss = None if args.external_tss.lower() == "none" else args.external_tss
-    ext_tag = f"_EXTTSS{external_tss}" if external_tss else ""  # None이면 파일명에 접미사 없음
+    external_tss, ext_tag = resolve_external_tss(args.external_tss)
 
     cfg = Config()
     cfg.data.seed = cfg.light.seed = args.seed

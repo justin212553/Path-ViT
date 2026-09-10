@@ -35,6 +35,21 @@ TRAIN_FRAC = 0.6
 VAL_FRAC = 0.2  # 나머지 0.2는 test
 
 EXTERNAL_TSS = "BH"  # 2026-08-30: institution-level external holdout 기본값(사용자 결정)
+# 2026-09-10: BH 단독(142명, event rate 31.7% — 전체 13.8%의 ~2.3배로 스큐)이 걸려 8/31에
+# --external-tss none으로 후퇴했던 것을, "기관 하나 대신 여러 개를 합쳐서 event rate를
+# 맞추자"는 사용자 결정으로 재시도. A2(100명,15.0%)+AR(69명,15.9%)+E9(61명,9.8%) 조합 —
+# 합쳐서 N=230, event rate=13.9%로 전체 코호트(13.8%)와 거의 정확히 일치(직접 실측 확인).
+EXTERNAL_TSS_MULTI = ("A2", "AR", "E9")
+
+
+def resolve_external_tss(raw: str) -> tuple[str | tuple[str, ...] | None, str]:
+    """--external-tss CLI 값(문자열) -> (split_by_institution에 넘길 값, 파일명 태그) 변환.
+    'none' -> (None, ""). 'multi' -> (EXTERNAL_TSS_MULTI, "_EXTTSSA2-AR-E9"류). 그 외 -> 그 문자열 그대로."""
+    if raw.lower() == "none":
+        return None, ""
+    if raw.lower() == "multi":
+        return EXTERNAL_TSS_MULTI, f"_EXTTSS{'-'.join(EXTERNAL_TSS_MULTI)}"
+    return raw, f"_EXTTSS{raw}"
 
 
 def _tss(case_id: str) -> str:
@@ -51,15 +66,20 @@ def common_case_ids() -> list[str]:
     return sorted(common)
 
 
-def split_by_institution(case_ids: list[str], external_tss: str | None) -> tuple[list[str], list[str]]:
+def split_by_institution(
+    case_ids: list[str], external_tss: str | tuple[str, ...] | None,
+) -> tuple[list[str], list[str]]:
     """case_ids를 기관(TSS) 기준으로 (internal_case_ids, external_case_ids)로 나눈다.
 
-    external_tss=None이면 전부 internal(기존 동작 그대로, external 없음).
+    external_tss=None이면 전부 internal(기존 동작 그대로, external 없음). 문자열 하나(단일
+    기관, 예: "BH") 또는 문자열 튜플/리스트(여러 기관을 합쳐서 external, 예: EXTERNAL_TSS_MULTI)
+    둘 다 받는다.
     """
     if external_tss is None:
         return case_ids, []
-    external = [c for c in case_ids if _tss(c) == external_tss]
-    internal = [c for c in case_ids if _tss(c) != external_tss]
+    tss_set = {external_tss} if isinstance(external_tss, str) else set(external_tss)
+    external = [c for c in case_ids if _tss(c) in tss_set]
+    internal = [c for c in case_ids if _tss(c) not in tss_set]
     return internal, external
 
 
