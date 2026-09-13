@@ -11,13 +11,16 @@
 #SBATCH --requeue
 #SBATCH --output=/pub/wonseukl/Path-ViT/.logs/eval_porpoise_official_paad_mmf_external_cptac_array_%a.log
 
-# 2026-09-12: 순정 PORPOISE 공식 레시피(run_porpoise_official_paad_mmf_hpc.sh /
-# run_porpoise_official_paad_mmf_seed84_hpc.sh, results_true_resnet50_mmf)를 CPTAC-PDAC에
-# 평가하는 스크립트 — 지금까지 porpoise/eval_external.py는 own-RNA 재학습 체크포인트
-# (results_ownrna_mmf, porpoise_ownrna_mmf_eval_cptac_5seed_array_hpc.sh)에만 배선돼 있었고,
-# 순정 공식 레시피용 external 평가는 존재하지 않았다(2026-09-12 리포지토리 재조사로 확인된
-# 공백). eval_external.py 자체는 건드리지 않는다 — 순정 레시피가 own-RNA 기본값과 다른 부분은
-# --results-dir과 --tcga-split-dir 두 개뿐이라 CLI 인자로 오버라이드하는 것으로 충분하다.
+# 2026-09-12: 순정 PORPOISE 공식 레시피(run_porpoise_official_paad_mmf_2seed_array_hpc.sh,
+# results_true_resnet50_mmf)를 CPTAC-PDAC에 평가하는 스크립트 — 지금까지
+# porpoise/eval_external.py는 own-RNA 재학습 체크포인트(results_ownrna_mmf,
+# porpoise_ownrna_mmf_eval_cptac_5seed_array_hpc.sh)에만 배선돼 있었고, 순정 공식 레시피용
+# external 평가는 존재하지 않았다(2026-09-12 리포지토리 재조사로 확인된 공백). eval_external.py
+# 자체는 건드리지 않는다 — 순정 레시피가 own-RNA 기본값과 다른 부분은 --results-dir과
+# --tcga-split-dir 두 개뿐이라 CLI 인자로 오버라이드하는 것으로 충분하다.
+#
+# 시드는 84/126 — 이 프로젝트의 다른 모든 모델이 쓰는 표준 2seed 관례에 맞춘다(사용자 지시,
+# 2026-09-12). 애초에 학습했던 seed=1은 더 이상 쓰지 않는다.
 #
 # 오버라이드 근거(porpoise/main.py 직접 대조):
 #   - run_porpoise_official_paad_mmf_hpc.sh는 --split_dir tcga_paad로 학습했다. main.py:247이
@@ -43,21 +46,18 @@
 # scripts/prepare_porpoise_cptac_external_data.py를 순정 레시피의 유전자 universe로 다시
 # 돌려야 한다는 뜻이다.
 #
-# 선행 조건:
-#   1) run_porpoise_official_paad_mmf_hpc.sh(seed=1) 완료 확인
-#        ls porpoise/results_true_resnet50_mmf/5foldcv/*/tcga_paad_s1/s_*_checkpoint.pt | wc -l   # 5
-#   2) run_porpoise_official_paad_mmf_seed84_hpc.sh(seed=84, 2026-09-12 기준 아직 제출된 적
-#      없음 — 이 배열 잡보다 먼저 제출해서 완료를 기다려야 함) 완료 확인
-#        ls porpoise/results_true_resnet50_mmf/5foldcv/*/tcga_paad_s84/s_*_checkpoint.pt | wc -l  # 5
+# 선행 조건: run_porpoise_official_paad_mmf_2seed_array_hpc.sh(seed 84/126) 완료 확인
+#   ls porpoise/results_true_resnet50_mmf/5foldcv/*/tcga_paad_s84/s_*_checkpoint.pt | wc -l   # 5
+#   ls porpoise/results_true_resnet50_mmf/5foldcv/*/tcga_paad_s126/s_*_checkpoint.pt | wc -l  # 5
 #
 # 완료 후 pooling(이 프로젝트의 기존 external pooling 스크립트를 그대로 재사용, 새 스크립트
 # 불필요 — model 태그만 다르게):
 #   python scripts/pool_multiseed_external_preds.py --dataset cptac \
-#       --model PORPOISE_MMF --seeds 1,84 --n-folds 5 --bootstrap 2000
+#       --model PORPOISE_MMF --seeds 84,126 --n-folds 5 --bootstrap 2000
 #
 # internal(5fold, 2seed pooled)은 이미 있는 스크립트로:
 #   python scripts/pool_porpoise_official_kfold.py --results-dir porpoise/results_true_resnet50_mmf \
-#       --seeds 1,84 --bootstrap 2000
+#       --seeds 84,126 --bootstrap 2000
 #
 # 제출(두 학습 array 완료 확인 후): sbatch sbatch/eval_porpoise_official_paad_mmf_external_cptac_hpc.sh
 
@@ -66,7 +66,7 @@ cd /pub/wonseukl/Path-ViT/porpoise
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate Path-ViT
 
-SEEDS=(1 84)
+SEEDS=(84 126)
 N_FOLDS=5
 IDX=$SLURM_ARRAY_TASK_ID
 SEED_IDX=$((IDX / N_FOLDS))
