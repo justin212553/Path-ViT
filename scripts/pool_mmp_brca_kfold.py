@@ -40,10 +40,18 @@ from utils.metrics import compute_survival_metrics
 
 
 def _load_dump(results_root: Path, exp_prefix: str, feat: str, seed: int, fold: int, split: str) -> dict:
-    run_dir = results_root / f"{exp_prefix}_seed{seed}_k{fold}::PANTHER_default::{feat}"
-    pkl_path = run_dir / f"{split}_results.pkl"
-    if not pkl_path.exists():
-        raise FileNotFoundError(f"{pkl_path} 없음 — 이 (seed={seed}, fold={fold}) 런이 아직 안 끝났을 수 있음")
+    # main_survival.py는 우리가 준 --results_dir 밑에 {task}/k={fold}/{exp_code}/
+    # {exp_code}::{실행시각타임스탬프}/를 추가로 더 만든다(코드 직접 대조로 확인, main_survival.py
+    # 297-303행) — 타임스탬프는 미리 알 수 없으므로 고정 경로 대신 재귀 탐색으로 찾는다.
+    # 같은 (seed, fold)를 여러 번 돌렸으면 타임스탬프 문자열이 그대로 사전순 정렬되므로
+    # (예: 26-09-15-09-36-38 < 26-09-15-10-18-05) 가장 최근 것을 쓴다.
+    top_dir = results_root / f"{exp_prefix}_seed{seed}_k{fold}::PANTHER_default::{feat}"
+    matches = sorted(top_dir.glob(f"**/{split}_results.pkl"))
+    if not matches:
+        raise FileNotFoundError(f"{top_dir} 아래 어디에도 {split}_results.pkl 없음 — 이 (seed={seed}, fold={fold}) 런이 아직 안 끝났을 수 있음")
+    pkl_path = matches[-1]
+    if len(matches) > 1:
+        print(f"  [참고] seed={seed} fold={fold} split={split}: {len(matches)}개 실행 기록 중 최신 것 사용 ({pkl_path})")
     with open(pkl_path, "rb") as f:
         dump = pickle.load(f)
     ids = dump["sample_ids"]
