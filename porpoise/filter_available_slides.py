@@ -13,6 +13,13 @@ main.py/dataset_survival.py는 전혀 안 건드리고(원본 알고리즘 코�
 
 사용법(sbatch 스크립트에서 main.py 실행 직전에 호출):
     python filter_available_slides.py --pt-files-dir <추출된 pt_files 경로>
+    python filter_available_slides.py --pt-files-dir <경로> --csv-path datasets_csv_mutsig/tcga_paad_all_clean.csv.zip
+
+2026-09-14: --csv-path 인자 추가. 원래 datasets_csv/tcga_paad_all_clean.csv.zip 하나만
+하드코딩돼 있었는데, PORPOISE 공식 유전자 세트 재현이 쓰는 datasets_csv_mutsig/tcga_paad_
+all_clean.csv.zip은 이 필터를 안 거쳐서 없는 슬라이드에서 DataLoader가 FileNotFoundError로
+죽었다 — 기본값은 기존 경로 그대로 유지(하위 호환), --csv-path로 다른 CSV도 같은 방식으로
+필터링 가능하게 일반화했다.
 """
 import argparse
 import shutil
@@ -21,16 +28,19 @@ from pathlib import Path
 
 import pandas as pd
 
-CSV_PATH = Path(__file__).parent / "datasets_csv" / "tcga_paad_all_clean.csv.zip"
-ORIG_PATH = CSV_PATH.parent / "tcga_paad_all_clean.orig.csv.zip"
-INNER_CSV_NAME = "tcga_paad_all_clean.csv"
+DEFAULT_CSV_PATH = Path(__file__).parent / "datasets_csv" / "tcga_paad_all_clean.csv.zip"
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pt-files-dir", type=str, required=True)
+    parser.add_argument("--csv-path", type=str, default=str(DEFAULT_CSV_PATH),
+                         help="필터링할 CSV(zip). 기본값은 기존 공식(비-mutsig) 경로.")
     args = parser.parse_args()
     pt_dir = Path(args.pt_files_dir)
+    CSV_PATH = Path(args.csv_path)
+    ORIG_PATH = CSV_PATH.parent / (CSV_PATH.stem.removesuffix(".csv") + ".orig.csv.zip")
+    INNER_CSV_NAME = CSV_PATH.stem  # "tcga_paad_all_clean.csv" (CSV_PATH가 "....csv.zip"이므로 stem이 ".csv" 포함)
 
     if not ORIG_PATH.exists():
         shutil.copy(CSV_PATH, ORIG_PATH)

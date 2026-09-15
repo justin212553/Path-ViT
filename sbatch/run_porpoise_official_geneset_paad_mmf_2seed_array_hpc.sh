@@ -69,7 +69,8 @@ SEEDS=(84 126)
 SEED=${SEEDS[$SLURM_ARRAY_TASK_ID]}
 
 echo "=== 슬라이드 존재 여부로 CSV 필터링: $(date) ==="
-python -u filter_available_slides.py --pt-files-dir "${PT_FILES_DIR}"
+python -u filter_available_slides.py --pt-files-dir "${PT_FILES_DIR}" \
+    --csv-path datasets_csv_mutsig/tcga_paad_all_clean.csv.zip
 
 echo "=== PORPOISE 공식 코드, 공식 유전자 세트(datasets_csv_mutsig), 진짜 ResNet50(1024d) feature, MMF, seed=${SEED} Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
 python -u main.py \
