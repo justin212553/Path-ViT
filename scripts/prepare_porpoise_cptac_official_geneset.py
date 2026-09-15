@@ -63,7 +63,7 @@ def main():
         with zf.open(zf.namelist()[0]) as f:
             official = pd.read_csv(f, nrows=1)
     all_cols = official.columns.tolist()
-    meta_cols = ['case_id', 'slide_id', 'site', 'is_female', 'oncotree_code', 'age',
+    meta_cols = ['Unnamed: 0', 'case_id', 'slide_id', 'site', 'is_female', 'oncotree_code', 'age',
                  'survival_months', 'censorship', 'train']
     rnaseq_genes = [c[:-len('_rnaseq')] for c in all_cols if c.endswith('_rnaseq')]
     cnv_genes = [c[:-len('_cnv')] for c in all_cols if c.endswith('_cnv')]
