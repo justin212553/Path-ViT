@@ -50,7 +50,10 @@ def main():
     n_before = len(df)
     cases_before = df["case_id"].nunique()
 
-    exists = df["slide_id"].apply(lambda sid: (pt_dir / f"{sid}.pt").exists())
+    # dataset_survival.py가 실제로 .pt를 찾을 때 쓰는 것과 똑같이 slide_id.rstrip('.svs')
+    # 후에 .pt를 붙인다 — 공식 mutsig CSV의 slide_id는 ".svs"가 그대로 붙어있어서
+    # (예: TCGA-2J-AAB1-...-DX1....svs), 이걸 안 떼면 전부 존재하지 않는 것으로 오판된다.
+    exists = df["slide_id"].apply(lambda sid: (pt_dir / f"{sid.rstrip('.svs')}.pt").exists())
     missing = df.loc[~exists, "slide_id"].tolist()
     df_filtered = df.loc[exists].reset_index(drop=True)
 
