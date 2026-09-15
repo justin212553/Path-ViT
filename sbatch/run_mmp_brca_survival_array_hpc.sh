@@ -66,7 +66,7 @@ FEAT='extracted-vit_large_patch16_224.dinov2.uni_mass100k'
 FEAT_DIR="${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt"
 EXP_CODE="BRCA_OWNPROTOCOL_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}"
 RESULTS_DIR="results/${EXP_CODE}"
-PROTO_PATH="splits/${SPLIT_DIR}/prototypes/prototypes_c16_extracted-${FEAT}_faiss_num_1.0e+05.pkl"
+PROTO_PATH="splits/${SPLIT_DIR}/prototypes/prototypes_c16_${FEAT}_faiss_num_1.0e+05.pkl"
 
 echo "=== MMP BRCA survival train seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}) ==="
 python -u -m training.main_survival \
