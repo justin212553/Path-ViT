@@ -63,7 +63,7 @@ SEED=${SEEDS[$SEED_IDX]}
 
 SPLIT_DIR="survival/TCGA_BRCA_k${FOLD}_seed${SEED}"
 FEAT='extracted-vit_large_patch16_224.dinov2.uni_mass100k'
-FEAT_DIR="${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_h5"
+FEAT_DIR="${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt"
 EXP_CODE="BRCA_OWNPROTOCOL_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}"
 RESULTS_DIR="results/${EXP_CODE}"
 PROTO_PATH="splits/${SPLIT_DIR}/prototypes/prototypes_c16_extracted-${FEAT}_faiss_num_1.0e+05.pkl"

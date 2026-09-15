@@ -26,8 +26,8 @@ split_dir.split('_')[1]로 유도하므로(코드 직접 확인) 'BRCA'가 나�
 폴더를 그대로 찾아간다.
 
 산출물:
-  - {MMP_DATAROOT}/extracted_mag20x_patch256_fp/extracted-vit_large_patch16_224.dinov2.uni_mass100k/feats_h5/{slide_id}.h5
-    ('features' key, UNI v1 patch feature 그대로 재포장)
+  - {MMP_DATAROOT}/extracted_mag20x_patch256_fp/extracted-vit_large_patch16_224.dinov2.uni_mass100k/feats_pt/{slide_id}.pt
+    (복제 아님, data/patches_tcga_brca/tiles/{slide_id}/features_uni.pt를 가리키는 심볼릭 링크)
   - {MMP_ROOT}/splits/survival/TCGA_BRCA_k{fold}_seed{seed}/{train,val,test,external}.csv (10개
     폴더, 폴더당 4개 csv. external.csv는 A2/AR/E9 institution holdout 230명 중 공식 RNA
     데이터가 있는 환자만.)
@@ -40,9 +40,7 @@ MMP 공식 data_csvs/rna/hallmarks/BRCA/rna_clean.csv, signatures.csv류는 전�
 import argparse
 from pathlib import Path
 
-import h5py
 import pandas as pd
-import torch
 
 from scripts.brca_common import (
     EXTERNAL_TSS_MULTI,
@@ -57,25 +55,34 @@ FEAT_NAME = "extracted-vit_large_patch16_224.dinov2.uni_mass100k"
 
 
 def convert_wsi_features(mmp_dataroot: Path) -> None:
-    print("1) UNI v1 patch feature(.pt) -> MMP 기대 h5 포맷 변환...")
-    feat_dir = mmp_dataroot / "extracted_mag20x_patch256_fp" / FEAT_NAME / "feats_h5"
+    print("1) UNI v1 patch feature(.pt)를 MMP가 인식하는 feats_pt/ 디렉터리로 심볼릭 링크 연결...")
+    # 2026-09-14: 데이터를 h5로 복제/변환할 필요가 없다는 걸 코드로 확인했다 —
+    # WSISurvivalDataset/WSIPrototypeDataset 둘 다 data_source 디렉터리 이름이 "feats_h5"면
+    # h5py로, "feats_pt"면 torch.load()로 읽도록 이미 분기가 있다(wsi_datasets/wsi_survival.py,
+    # wsi_prototype.py 둘 다 `assert os.path.basename(src) in ['feats_h5', 'feats_pt']`).
+    # 우리 features_uni.pt는 이미 (N_patches, 1024) 2D 텐서라 h5로 감쌀 이유가 전혀 없다 —
+    # Hugging Face에서 받은 원본을 심볼릭 링크로 그대로 가리키기만 하면 된다(복제 없음, 즉시
+    # 끝남). MMP 자신의 mmp.sh/clustering.sh 쉘 스크립트는 "feats_h5"를 하드코딩하지만, 우리는
+    # 그 쉘 스크립트를 안 쓰고 sbatch에서 main_prototype.py/main_survival.py를 직접 호출하므로
+    # --data_source에 feats_pt 경로를 그대로 넣으면 된다.
+    feat_dir = mmp_dataroot / "extracted_mag20x_patch256_fp" / FEAT_NAME / "feats_pt"
     feat_dir.mkdir(parents=True, exist_ok=True)
     manifest = pd.read_csv(MANIFEST_PATH)
-    n_done, n_skip = 0, 0
+    n_done, n_skip, n_missing = 0, 0, 0
     for slide_id in manifest["slide_id"]:
-        out_path = feat_dir / f"{slide_id}.h5"
-        if out_path.exists():
+        link_path = feat_dir / f"{slide_id}.pt"
+        if link_path.exists() or link_path.is_symlink():
             n_skip += 1
             continue
-        pt_path = TILES_ROOT / slide_id / "features_uni.pt"
+        pt_path = (TILES_ROOT / slide_id / "features_uni.pt").resolve()
         if not pt_path.exists():
             print(f"   경고: {pt_path} 없음, 건너뜀")
+            n_missing += 1
             continue
-        features = torch.load(pt_path, weights_only=True).numpy()
-        with h5py.File(out_path, "w") as f:
-            f.create_dataset("features", data=features)
+        link_path.symlink_to(pt_path)
         n_done += 1
-    print(f"   변환 {n_done}개, 이미 존재 {n_skip}개 (총 manifest 슬라이드 {len(manifest)}개)")
+    print(f"   심볼릭 링크 생성 {n_done}개, 이미 존재 {n_skip}개, 원본 없어서 건너뜀 {n_missing}개 "
+          f"(총 manifest 슬라이드 {len(manifest)}개)")
 
 
 def load_mmp_official_rna_patients(mmp_root: Path) -> set[str]:

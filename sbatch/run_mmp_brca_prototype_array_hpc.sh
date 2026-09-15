@@ -46,7 +46,7 @@ FEAT='extracted-vit_large_patch16_224.dinov2.uni_mass100k'
 echo "=== MMP BRCA prototype fit seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}) ==="
 python -u -m training.main_prototype \
     --mode faiss \
-    --data_source "${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_h5" \
+    --data_source "${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt" \
     --split_dir "${SPLIT_DIR}" \
     --split_names train \
     --in_dim 1024 \
