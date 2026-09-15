@@ -88,14 +88,12 @@ def convert_wsi_features(mmp_dataroot: Path) -> None:
 def load_mmp_official_rna_patients(mmp_root: Path) -> set[str]:
     """MMP 공식 BRCA RNA 데이터가 커버하는 환자(patient-level case_id) 집합.
 
-    'sample' 컬럼은 15자 TCGA sample barcode(예: TCGA-AR-A5QQ-01). -01(primary tumor)만
-    남기고 앞 12자로 잘라 case_id와 비교 가능한 형태로 만든다. -11(정상조직)/-06(전이)은
-    survival 예측에 안 쓴다(원저자 관례 그대로, 별도 확인 불필요 — 어차피 우리 case_table엔
-    없는 샘플).
+    2026-09-15: rna_clean.csv 자체를 MMP의 _read_gene()가 기대하는 모양(이름 없는 인덱스에
+    12자 case_id, -01 primary tumor만, 중복 제거)으로 이미 한 번 정리해뒀다 — 그래서 여기서는
+    'sample' 컬럼을 다시 파싱할 필요 없이 인덱스를 그대로 읽으면 된다.
     """
-    rna = pd.read_csv(mmp_root / "data_csvs" / "rna" / "hallmarks" / "BRCA" / "rna_clean.csv")
-    primary = rna[rna["sample"].str.endswith("-01")]
-    return set(primary["sample"].str[:12])
+    rna = pd.read_csv(mmp_root / "data_csvs" / "rna" / "hallmarks" / "BRCA" / "rna_clean.csv", index_col=0)
+    return set(rna.index)
 
 
 def _mmp_frame(case_table: pd.DataFrame, manifest: pd.DataFrame, split_value: str,
