@@ -33,3 +33,6 @@ uni2h_official_features
 paper
 .scratch
 release
+sota*
+.xlsx
+*.md

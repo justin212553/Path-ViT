@@ -65,31 +65,36 @@ def _fast_c_index(risk: np.ndarray, time: np.ndarray, event: np.ndarray) -> floa
     return float((concordant.sum() + 0.5 * tied_risk.sum()) / n_permissible)
 
 
-def _load_seed_predictions(pred_dir: Path, dataset: str, model: str, seed: int, n_folds: int) -> dict:
-    """internal 전용 — pool_multiseed_kfold_preds.py와 동일."""
-    preds = {}
-    for fold in range(n_folds):
-        path = pred_dir / f"{dataset}_{model}_FOLD{fold}OF{n_folds}_seed{seed}_fold{fold}of{n_folds}.csv"
-        if not path.exists():
-            path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
-        if not path.exists():
-            raise FileNotFoundError(f"seed={seed} fold={fold} 예측 파일을 못 찾음: {path}")
-        with open(path, newline="") as f:
-            for row in csv.DictReader(f):
-                cid = row["case_id"]
-                if cid in preds:
-                    raise ValueError(f"seed={seed} 내에서 case_id 중복: {cid}")
-                preds[cid] = (float(row["risk"]), float(row["OS_time"]), int(row["OS_event"]))
-    return preds
+# scripts/pool_multiseed_kfold_preds.py::_SPECIAL_INFIXES와 동일 — 진단용 변형(FINALEPOCH/
+# SOUP/FULLTRAIN)은 --model-a/--model-b가 명시적으로 요청하지 않는 한 매칭에서 제외한다.
+_SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN")
 
 
-def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> dict:
-    """external 전용 — pool_multiseed_external_preds.py와 동일."""
-    path = pred_dir / f"{dataset}_{model}_FOLD{fold}OF{n_folds}_seed{seed}_fold{fold}of{n_folds}.csv"
-    if not path.exists():
-        path = pred_dir / f"{dataset}_{model}_seed{seed}_fold{fold}of{n_folds}.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"seed={seed} fold={fold} external 예측 파일을 못 찾음: {path}")
+def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> Path:
+    """model_prefix에 ext_tag(예: BRCA의 "_EXTTSSA2-AR-E9")나 "_FOLD{f}OF{n}"이 끼는지와
+    무관하게 접두사/접미사만 고정하고 사이는 와일드카드로 찾는다 —
+    scripts/pool_multiseed_kfold_preds.py::_find_pred_path와 동일한 이유/관례."""
+    suffix = f"_seed{seed}_fold{fold}of{n_folds}.csv"
+    prefix = f"{dataset}_{model}"
+    matches = sorted(pred_dir.glob(f"{prefix}*{suffix}"))
+    matches = [
+        p for p in matches
+        if not p.name[len(prefix):len(prefix) + 1].isdigit()
+        and all(tag in model or tag not in p.name for tag in _SPECIAL_INFIXES)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"seed={seed} fold={fold}: '{dataset}_{model}*{suffix}' 패턴에 여러 파일이 걸림 — "
+            f"{[p.name for p in matches]}"
+        )
+    nearby = sorted(pred_dir.glob(f"{dataset}_*{suffix}"))
+    hint = f" (같은 seed/fold의 다른 태그 후보: {[p.name for p in nearby]})" if nearby else " (같은 seed/fold 파일 자체가 없음)"
+    raise FileNotFoundError(f"seed={seed} fold={fold} 예측 파일을 못 찾음: {pred_dir}/{dataset}_{model}*{suffix}{hint}")
+
+
+def _read_pred_csv(path: Path) -> dict:
     preds = {}
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
@@ -97,8 +102,66 @@ def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, f
     return preds
 
 
-def _ensemble_internal(pred_dir: Path, dataset: str, model: str, seeds: list[int], n_folds: int):
-    per_seed_preds = {seed: _load_seed_predictions(pred_dir, dataset, model, seed, n_folds) for seed in seeds}
+def _load_final_epoch_merged(pred_dir: Path, dataset: str, model: str, seed: int, fold: int,
+                              n_folds: int, base_preds: dict) -> dict:
+    """base_preds(best-checkpoint)와 같은 (seed,fold)의 "_FINALEPOCH_" 예측을 환자 단위로
+    평균 — pool_multiseed_kfold_preds.py/_external_preds.py의 --include-final-epoch와 동일."""
+    prefix = f"{dataset}_{model}"
+    fe_suffix = f"_FINALEPOCH_seed{seed}_fold{fold}of{n_folds}.csv"
+    fe_matches = [
+        p for p in sorted(pred_dir.glob(f"{prefix}*{fe_suffix}"))
+        if not p.name[len(prefix):len(prefix) + 1].isdigit()
+    ]
+    if len(fe_matches) != 1:
+        raise FileNotFoundError(
+            f"--include-final-epoch: seed={seed} fold={fold} FINALEPOCH 파일 매칭 "
+            f"{len(fe_matches)}개(1개여야 함) — {prefix}*{fe_suffix} — {[p.name for p in fe_matches]}"
+        )
+    fe_preds = _read_pred_csv(fe_matches[0])
+    merged = {}
+    for cid, (risk, t, e) in base_preds.items():
+        if cid not in fe_preds:
+            raise ValueError(f"seed={seed} fold={fold}: case_id={cid}가 FINALEPOCH 파일엔 없음")
+        fe_risk, fe_t, fe_e = fe_preds[cid]
+        if abs(t - fe_t) > 1e-6 or e != fe_e:
+            raise ValueError(f"seed={seed} fold={fold}: case_id={cid}의 OS_time/OS_event가 "
+                              "best-checkpoint와 FINALEPOCH 파일 간에 다름 — 라벨 불일치 의심")
+        merged[cid] = ((risk + fe_risk) / 2.0, t, e)
+    return merged
+
+
+def _load_seed_predictions(pred_dir: Path, dataset: str, model: str, seed: int, n_folds: int,
+                            include_final_epoch: bool = False) -> dict:
+    """internal 전용 — pool_multiseed_kfold_preds.py와 동일."""
+    preds = {}
+    for fold in range(n_folds):
+        path = _find_pred_path(pred_dir, dataset, model, seed, fold, n_folds)
+        fold_preds = _read_pred_csv(path)
+        if include_final_epoch:
+            fold_preds = _load_final_epoch_merged(pred_dir, dataset, model, seed, fold, n_folds, fold_preds)
+        for cid, val in fold_preds.items():
+            if cid in preds:
+                raise ValueError(f"seed={seed} 내에서 case_id 중복: {cid}")
+            preds[cid] = val
+    return preds
+
+
+def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int,
+                           include_final_epoch: bool = False) -> dict:
+    """external 전용 — pool_multiseed_external_preds.py와 동일."""
+    path = _find_pred_path(pred_dir, dataset, model, seed, fold, n_folds)
+    preds = _read_pred_csv(path)
+    if include_final_epoch:
+        preds = _load_final_epoch_merged(pred_dir, dataset, model, seed, fold, n_folds, preds)
+    return preds
+
+
+def _ensemble_internal(pred_dir: Path, dataset: str, model: str, seeds: list[int], n_folds: int,
+                        include_final_epoch: bool = False):
+    per_seed_preds = {
+        seed: _load_seed_predictions(pred_dir, dataset, model, seed, n_folds, include_final_epoch)
+        for seed in seeds
+    }
     case_sets = [set(p.keys()) for p in per_seed_preds.values()]
     common = sorted(set.intersection(*case_sets))
     risks, times, events = [], [], []
@@ -116,12 +179,13 @@ def _ensemble_internal(pred_dir: Path, dataset: str, model: str, seeds: list[int
     return common, np.array(risks), np.array(times), np.array(events)
 
 
-def _ensemble_external(pred_dir: Path, dataset: str, model: str, seeds: list[int], n_folds: int):
+def _ensemble_external(pred_dir: Path, dataset: str, model: str, seeds: list[int], n_folds: int,
+                        include_final_epoch: bool = False):
     patient_risks: dict[str, list[float]] = defaultdict(list)
     patient_label: dict[str, tuple[float, int]] = {}
     for seed in seeds:
         for fold in range(n_folds):
-            preds = _load_run_predictions(pred_dir, dataset, model, seed, fold, n_folds)
+            preds = _load_run_predictions(pred_dir, dataset, model, seed, fold, n_folds, include_final_epoch)
             for cid, (r, t, e) in preds.items():
                 patient_risks[cid].append(r)
                 patient_label[cid] = (t, e)
@@ -204,6 +268,11 @@ def main():
     parser.add_argument("--pred-root", type=str, default=None,
                          help="예측 CSV가 있는 루트 디렉터리(기본: .logs, "
                               "paper/final_preds_snapshot 스냅샷을 쓰려면 이 값으로 지정)")
+    parser.add_argument(
+        "--include-final-epoch", action="store_true",
+        help="2026-09-07: pool_multiseed_kfold_preds.py/_external_preds.py와 동일 — (seed,fold)마다 "
+             "best-checkpoint 예측과 _FINALEPOCH_ 예측을 환자 단위로 평균 낸 뒤 사용.",
+    )
     args = parser.parse_args()
 
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -215,8 +284,10 @@ def main():
         pred_dir = pred_root / "external_preds"
         ensemble_fn = _ensemble_external
 
-    cases_a, risks_a, times_a, events_a = ensemble_fn(pred_dir, args.dataset, args.model_a, seeds, args.n_folds)
-    cases_b, risks_b, times_b, events_b = ensemble_fn(pred_dir, args.dataset, args.model_b, seeds, args.n_folds)
+    cases_a, risks_a, times_a, events_a = ensemble_fn(pred_dir, args.dataset, args.model_a, seeds, args.n_folds,
+                                                        args.include_final_epoch)
+    cases_b, risks_b, times_b, events_b = ensemble_fn(pred_dir, args.dataset, args.model_b, seeds, args.n_folds,
+                                                        args.include_final_epoch)
 
     print(f"=== paired bootstrap delta ({args.split}, {args.dataset}) ===")
     print(f"  A = {args.model_a} (N={len(cases_a)})")
