@@ -100,7 +100,13 @@ def load_mmp_official_rna_patients(mmp_root: Path) -> set[str]:
 
 def _mmp_frame(case_table: pd.DataFrame, manifest: pd.DataFrame, split_value: str,
                rna_patients: set[str]) -> pd.DataFrame:
+    # TCGA-PL-A8LV는 data/brca_clinical.csv 자체에 OS_time=-7(TCGA 임상 기록 오류로 알려진
+    # 이상치)로 들어있다. 우리 자체 M1~M7 학습 코드는 이 값을 별도로 검증하지 않아 조용히
+    # 넘어가지만, MMP(wsi_survival.py::validate_survival_dataset)는 survival_time >= 0을
+    # strict하게 assert해서 죽는다. 값을 임의로 고치지 않고 이 한 명만 이 재현실험에서
+    # 제외한다(2026-09-15).
     rows = case_table[(case_table["split"] == split_value) & (case_table["case_id"].isin(rna_patients))]
+    rows = rows[rows["OS_time"] >= 0]
     # manifest에도 자체 OS_time/OS_event 컬럼이 있어서(용도가 다름), 이름 충돌을 피하려고
     # slide_id/case_id만 골라서 merge하고 라벨은 case_table(우리 프로토콜 기준) 쪽 값만 쓴다.
     merged = manifest[["case_id", "slide_id"]].merge(
