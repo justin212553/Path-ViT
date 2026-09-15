@@ -26,6 +26,14 @@ data/patches_cptac_uni2native/tiles/ 아래 존재하는 슬라이드 폴더 전
     python -m data.extract_porpoise_style_features                       # TCGA(기본)
     python -m data.extract_porpoise_style_features --dataset cptac       # CPTAC
     python -m data.extract_porpoise_style_features --slide-ids TCGA-2J-AAB1-01Z-00-DX1....
+    python -m data.extract_porpoise_style_features --csv-path porpoise/datasets_csv_mutsig/tcga_paad_all_clean.csv.zip
+
+2026-09-15: --csv-path 인자 추가. 기존엔 슬라이드 목록을 항상 porpoise/datasets_csv/
+tcga_paad_all_clean.csv.zip(사실은 PORPOISE 공식이 아니라 이 연구 자체 185명 코호트 기준
+파일)에서만 가져왔다 — 그래서 PORPOISE 진짜 공식 166명 목록(datasets_csv_mutsig)에는
+있지만 이 파일에는 없는 35명의 슬라이드가 한 번도 추출된 적이 없었다. 타일(uni2native
+retiling 산출물)은 이미 다 있고 이미 처리된 슬라이드는 건너뛰므로(line 111 근처),
+--csv-path로 공식 mutsig 파일을 가리켜서 다시 돌리면 그 35명만 추가로 채워진다.
 """
 import argparse
 import sys
@@ -80,6 +88,8 @@ def main():
     parser.add_argument("--dataset", type=str, choices=["tcga", "cptac"], default="tcga")
     parser.add_argument("--slide-ids", type=str, default=None, help="쉼표구분, 주어지면 이 슬라이드만(디버그용).")
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--csv-path", type=str, default=str(CSV_PATH),
+                         help="--dataset tcga일 때 슬라이드 목록을 가져올 CSV(zip). 기본값은 기존 경로(하위 호환).")
     args = parser.parse_args()
 
     PATCHES_ROOT = _ROOT / "data" / f"patches_{args.dataset}_uni2native" / "tiles"
@@ -90,9 +100,8 @@ def main():
     print(f"TruncatedResNet50(ImageNet, layer3 truncated, 1024-dim) 로드 완료, device={device}")
 
     if args.dataset == "tcga":
-        # PORPOISE 공식 CSV가 실제로 쓰는 슬라이드 목록 기준(377개, DX+TS/BS).
-        df = pd.read_csv(CSV_PATH, compression="zip")
-        slide_ids = df["slide_id"].tolist()
+        df = pd.read_csv(args.csv_path, compression="zip")
+        slide_ids = df["slide_id"].str.rstrip(".svs").tolist()
     else:
         # CPTAC은 PORPOISE 공식 CSV가 아예 없다(지원 안 하는 코호트) — uni2native 리타일링이
         # 이미 처리해 둔 슬라이드 폴더 전부를 그대로 쓴다(external 평가용, 나중에 별도 스크립트에서
