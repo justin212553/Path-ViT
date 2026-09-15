@@ -47,7 +47,7 @@ from data.dataset import _load_slide_index
 
 PORPOISE_ROOT = Path("porpoise")
 OFFICIAL_TRAIN_CSV = PORPOISE_ROOT / "datasets_csv_mutsig" / "tcga_paad_all_clean.csv.zip"
-TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/tcga/pt_files")
+TRUE_RESNET50_PT_DIR = Path("data/porpoise_style_features/cptac/pt_files")
 CPTAC_PATCHES_ROOT = Path("data/patches_cptac_uni2native")
 OUT_NAME = "cptac_paad_external_clean.csv.zip"
 
