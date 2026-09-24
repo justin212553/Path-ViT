@@ -12,6 +12,7 @@ import torch.nn as nn
 
 from .vit_m1 import ViT_M1
 from .vit_m4a import CoAttentionPooling
+from .self_attention_pooling import SelfAttentionPooling
 from .spatial_features import spatial_autocorr, attention_dispersion
 from .multi_component_pooling import MultiComponentPooling
 from .clinical_encoder import (
@@ -74,6 +75,7 @@ class ViT_PMA(ViT_M1):
         coord_embed_shuffle: bool = False,
         use_wsi_extra_mlp: bool = False,
         use_coattn: bool = True,
+        self_attn_fusion: bool = False,
         surv_n_classes: int = 1,
         cluster_pool: bool = False,
         cluster_centroids_path: str | None = None,
@@ -182,7 +184,15 @@ class ViT_PMA(ViT_M1):
         # 4개 관점의 단순 평균(z_wsi = patient_embed.mean(dim=0))을 쓴다 — "RNA가 4개 관점 중
         # 뭘 볼지 고르는 게" 도움이 되는지 vs 그냥 다 균등하게 보는 것과 차이가 없는지 검증.
         self.use_coattn = use_coattn
-        if use_coattn:
+        # 2026-09-24: M3/M4의 co-attention 효과와 "RNA 모달리티 자체가 있다"는 효과를 분리하는
+        # ablation(train.py --self-attn-fusion) — z_rna는 여전히 risk_head에 직결 concat되지만
+        # (아래 combine_with_clinical_rna), K개 cluster token을 모으는 방식만 component_coattn
+        # (RNA가 query)이 아니라 M1/M2와 동일한 query-free self-attention pooling으로 바꾼다.
+        # 참이면 component_coattn 자체를 안 만든다(use_coattn 값과 무관하게 self_attn_pool 우선).
+        self.self_attn_fusion = self_attn_fusion
+        if self_attn_fusion:
+            self.self_attn_pool = SelfAttentionPooling(cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout)
+        elif use_coattn:
             self.component_coattn = CoAttentionPooling(
                 cfg.embed_dim, num_heads=num_heads, dropout=cfg.dropout, context_dim=rna_dim
             )
@@ -394,7 +404,9 @@ class ViT_PMA(ViT_M1):
             clinical_kwargs["stage_ord"] = {k: v.unsqueeze(0) for k, v in stage_ord.items()}
         if margin_ord is not None:
             clinical_kwargs["margin_ord"] = margin_ord.unsqueeze(0)
-        if self.use_coattn:
+        if self.self_attn_fusion:
+            z_wsi = self.self_attn_pool(patient_embed)  # (D,) — RNA 없이 성분들끼리만 self-attention
+        elif self.use_coattn:
             z_wsi, _ = self.component_coattn(patient_embed, z_rna)  # (D,) — RNA가 4개 관점 중 골라 가중합
         else:
             z_wsi = patient_embed.mean(dim=0)  # (D,) — co-attention 없이 4개 관점 단순 평균

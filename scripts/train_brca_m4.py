@@ -203,6 +203,21 @@ def main():
                          help="2026-09-10: M3 슬롯(WSI+RNA, clinical 제외) — ViT_PMA(models/vit_pma.py) "
                               "use_clinical=False 그대로 이식.")
     parser.add_argument(
+        "--self-attn-fusion", action="store_true",
+        help="2026-09-24: train.py --self-attn-fusion 이식(models/vit_pma.py ViT_PMA "
+             "self_attn_fusion) — co-attention 효과와 'RNA 모달리티가 존재한다'는 효과를 분리하는 "
+             "ablation(paper 리뷰 피드백, M4-SA/M3-SA). z_rna는 기존과 동일하게 risk_head에 직결 "
+             "concat되지만, K개 cluster token을 모으는 방식이 RNA-query co-attention 대신 M1/M2와 "
+             "동일한 query-free self-attention pooling으로 바뀐다.",
+    )
+    parser.add_argument(
+        "--no-coattn", action="store_true",
+        help="2026-09-24: train.py --no-coattn 이식(models/vit_pma.py ViT_PMA use_coattn=False) — "
+             "co-attention/self-attn-fusion 둘 다와 다른 세 번째 fusion ablation. component_coattn "
+             "자체를 안 만들고, RNA-query 가중합 대신 K개 cluster token의 단순 평균(mean-pool)을 "
+             "쓴다. --self-attn-fusion과 동시 사용 불가(ViT_PMA가 self_attn_fusion을 항상 우선).",
+    )
+    parser.add_argument(
         "--surv-loss", type=str, default="cox", choices=["cox", "nll_surv", "both"],
         help="2026-09-07: train.py --surv-loss 이식 — PAAD 최종 레시피가 'both'(nll_surv+cox "
              "동등가중)로 확정된 뒤에도 이 스크립트는 범위 밖이라 빠져 있었다. M7/PORPOISE와 "
@@ -211,6 +226,8 @@ def main():
     parser.add_argument("--nll-n-bins", type=int, default=4)
     parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     args = parser.parse_args()
+    if args.self_attn_fusion and args.no_coattn:
+        raise ValueError("--self-attn-fusion과 --no-coattn은 서로 다른 fusion ablation이라 동시 사용을 지원하지 않습니다.")
     external_tss, ext_tag = resolve_external_tss(args.external_tss)
 
     cfg = Config()
@@ -332,6 +349,8 @@ def main():
         cluster_pool=args.cluster_pool, cluster_pool_after_vit=args.cluster_pool_after_vit,
         cluster_pool_temperature=args.cluster_pool_temperature,
         cluster_centroids_path=args.cluster_centroids_path if args.cluster_pool else None,
+        self_attn_fusion=args.self_attn_fusion,
+        use_coattn=not args.no_coattn,
         surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
     ).to(device)
     if args.rna_aux_weight > 0:
@@ -342,6 +361,10 @@ def main():
         model_prefix += "_COXGENE"
     if args.no_clinical:
         model_prefix += "_NOCLINICAL"
+    if args.self_attn_fusion:
+        model_prefix += "_SELFATTNFUSION"
+    if args.no_coattn:
+        model_prefix += "_NOCOATTN"
     if args.clinical_staging:
         model_prefix += "_STG"
     if args.patch_keep_frac < 1.0:
@@ -362,6 +385,12 @@ def main():
         model_prefix += f"_CLUSTERATTN{args.n_clusters}"
     if args.cluster_pool:
         model_prefix += "_CLUSTERPOOL"
+        if Path(args.cluster_centroids_path).stem != "cluster_centroids_brca_uni":
+            # 2026-09-24(버그 예방): train.py와 동일한 이유 — 기본 K=11 centroids가 아닌 경로로
+            # 돌리면(K 민감도 ablation의 K=5/K=20 재적합 파일 등) 태그에 반영해 기본 실행분과
+            # 파일명이 겹쳐 덮어쓰는 것을 막는다. 기본 경로일 땐 기존 태그를 그대로 유지한다
+            # (이미 완료된 BRCA M1~M7 최종 결과의 파일명과 호환성 유지).
+            model_prefix += f"_CENTROIDS{Path(args.cluster_centroids_path).stem.upper()}"
     if args.cluster_pool_after_vit:
         model_prefix += "_CLUSTERPOOLVIT"
     if args.cluster_pool_temperature is not None:

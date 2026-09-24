@@ -1692,6 +1692,18 @@ def _parse_args() -> argparse.Namespace:
              "_NOCOATTN 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--self-attn-fusion", action="store_true",
+        help="2026-09-24: --PMA 전용 — M3/M4의 co-attention 효과와 'RNA 모달리티가 존재한다'는 "
+             "효과 자체를 분리하는 ablation(paper 리뷰 피드백, M4-SA/M3-SA). z_rna는 기존과 "
+             "동일하게 risk_head에 직결 concat되지만(rna_gate_only/rna_combine_mode=cox_add가 "
+             "아닌 한), K개 cluster token을 모으는 방식이 component_coattn(RNA가 query, "
+             "models/vit_m4a.py) 대신 M1/M2와 동일한 query-free self-attention pooling"
+             "(models/self_attention_pooling.py)으로 바뀐다 — 즉 M4 대비 'WSI fusion이 RNA를 "
+             "보는지 여부'만 다르고 나머지는 M4와 동일. --no-coattn(단순 평균)과는 다른 ablation "
+             "이며 동시 사용을 지원하지 않는다. 켜면 wandb/checkpoint에 _SELFATTNFUSION 접미사가 "
+             "자동으로 붙는다.",
+    )
+    parser.add_argument(
         "--cluster-pool", action="store_true",
         help="2026-09-05: --PMA/--M1/--M2 지원 — Nystrom(oversmoothing 무죄로 확인)과 ABMIL(gradient가 "
              "weight_decay 유무와 무관하게 전혀 안 닿는 dead module로 확인, scripts/"
@@ -2070,6 +2082,10 @@ def main():
         raise ValueError("--rna-gate-only는 --PMA에서만 사용 가능합니다.")
     if args.no_coattn and not args.PMA:
         raise ValueError("--no-coattn은 --PMA에서만 사용 가능합니다.")
+    if args.self_attn_fusion and not args.PMA:
+        raise ValueError("--self-attn-fusion은 --PMA에서만 사용 가능합니다.")
+    if args.self_attn_fusion and args.no_coattn:
+        raise ValueError("--self-attn-fusion과 --no-coattn은 서로 다른 fusion ablation이라 동시 사용을 지원하지 않습니다.")
     if args.porpoise_meanpool and not args.PORPOISE:
         raise ValueError("--porpoise-meanpool은 --PORPOISE에서만 사용 가능합니다.")
     if args.porpoise_coattn and not args.PORPOISE:
@@ -2430,8 +2446,18 @@ def main():
         model_prefix += "_RNAGATE"
     if args.no_coattn:
         model_prefix += "_NOCOATTN"
+    if args.self_attn_fusion:
+        model_prefix += "_SELFATTNFUSION"
     if args.cluster_pool:
         model_prefix += "_CLUSTERPOOL"
+    if args.cluster_centroids_path is not None:
+        # 2026-09-24(버그 예방): 이 인자는 여태 model_prefix/tag 어디에도 반영되지 않았다 — K=11
+        # 기본 centroids와 다른 --cluster-centroids-path(예: K 민감도 ablation의 K=5/K=20 재적합
+        # 파일)로 돌려도 체크포인트/예측 파일명이 기본 K=11 실행과 완전히 같아져 서로 덮어쓴다
+        # (findings_backlog.md의 다른 체크포인트 충돌 사고와 동일 클래스). 경로 stem을 그대로
+        # 태그에 반영해 원천 차단 — K5/K20뿐 아니라 앞으로 바뀔 어떤 override 경로에도 일반적으로
+        # 동작한다(파일명이 곧 태그가 되므로 별도 유지보수 불필요).
+        model_prefix += f"_CENTROIDS{Path(args.cluster_centroids_path).stem.upper()}"
     if args.cluster_pool_after_vit:
         model_prefix += "_CLUSTERPOOLVIT"
     if args.cluster_pool_temperature is not None:
@@ -2859,6 +2885,7 @@ def main():
                          coord_embed_shuffle=args.coord_embed_shuffle,
                          use_wsi_extra_mlp=args.wsi_extra_mlp,
                          use_coattn=not args.no_coattn,
+                         self_attn_fusion=args.self_attn_fusion,
                          surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
                          cluster_pool=args.cluster_pool,
                          cluster_pool_after_vit=args.cluster_pool_after_vit,
@@ -3222,7 +3249,8 @@ def main():
         print(f"Model: ViT_PM4 (ViT+다성분 pooling(mean/std/attn/top-k) + RNA post-hoc gate + "
               f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
     elif args.PMA:
-        pooling_combine_desc = ("CoAttention(RNA query, 4개 관점)" if not args.no_coattn
+        pooling_combine_desc = ("Self-attention(query 없음, RNA는 risk_head concat만)" if args.self_attn_fusion
+                                 else "CoAttention(RNA query, 4개 관점)" if not args.no_coattn
                                  else "4개 관점 단순 평균(co-attention 없음)")
         print(f"Model: ViT_PMA (ViT+다성분 pooling + {pooling_combine_desc} + "
               f"Clinical age/sex MLP, age_mean={age_mean:.1f}, age_std={age_std:.1f}, rna_input_dim={rna_input_dim})")
