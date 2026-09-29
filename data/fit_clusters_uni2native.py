@@ -1,22 +1,23 @@
 """
-HDP(Human Doctor Prognosis) 모델의 1단계 — UNI2-h 공식 스펙(20x, ~0.5um/px,
-`data/uni2h_official_features/{tcga,cptac}/*.h5`) patch feature를 라벨 없이 k-means로
-군집화한다. `data/fit_clusters.py`(구버전 resnet50 2048차원, LateFusionViT 전처리용)와 같은
-아이디어를 UNI2-h 1536차원 feature에 맞게 새로 짠 것 — 파일 형식이 .pt(per-slide 디렉토리)가
-아니라 .h5(slide당 한 파일, MahmoodLab 공식 배포 그대로)라 로딩 경로가 다르다.
+ClusterPool(models/vit_pma.py) K=11 기본 centroids를 만든 것과 같은 스크립트 — TCGA-PAAD/
+CPTAC-PDAC의 uni2native 패치 feature(우리 raw WSI를 우리 파이프라인으로 재타일링한 UNI2-h
+feature, scripts/reconcile_uni2native_features.py 산출물)를 라벨 없이 k-means로 군집화한다.
 
-[배경] 2026-09-01 WSI branch 재설계 논의 — "종양 patch 어디 있는지"를 새 라벨/외부
-데이터셋 없이(사용자 결정) 알아내려면, frozen UNI2-h feature를 비지도 군집화해서 군집 대표
-patch 몇 장을 사람이 눈으로 보고 "이 군집은 종양처럼 생겼다"를 사후 판정하는 방법뿐이다.
-이 스크립트는 그 첫 단계(군집 중심 계산)만 한다 — 대표 patch 이미지 추출/시각화는 별도
-스크립트(scripts/extract_cluster_exemplars.py, 다음 단계)에서 한다.
-
-[해상도 관련 중요 사실] 이 프로젝트 자체 추출 파이프라인(--backbone uni2, 1024px@1.0MPP
-->512/224 리사이즈, 실효 2~4.57um/px)은 UNI2-h 공식 학습 스펙(256px@20x, ~0.5um/px)과
-4배 이상 어긋난다(scripts/download_uni2h_official_features.py 상단 docstring, 2026-08-12
-확인) — 개별 핵조차 구별 안 되는 해상도다. 이 스크립트가 쓰는 uni2native(공식) feature는
-그 문제가 없다 — "종양 영역처럼 보이는 patch"를 군집이 실제로 분리해낼 가능성이 우리 자체
-파이프라인보다 훨씬 높다.
+[2026-09-28 수정] 이 스크립트는 원래 MahmoodLab의 gated HuggingFace dataset에서 받은 "공식"
+UNI2-h feature(data/uni2h_official_features/{tcga,cptac}/*.h5, scripts/
+download_uni2h_official_features.py 산출물)를 읽고 있었다 — "우리 자체 추출 파이프라인이
+UNI2-h 공식 학습 스펙과 4배 이상 어긋난다"는 가설을 검증하려던 2026-08-12 대조실험용 브랜치의
+잔재다. 그 실험은 이미 끝났고 해당 h5 디렉터리도 몇 주 전에 지워졌는데(용량 정리), 이 스크립트의
+기본 로딩 경로는 그대로 남아 있어 K 민감도 재적합(--k 5/--k 20) 때 h5 파일을 하나도 못 찾고
+`ValueError: need at least one array to concatenate`로 죽었다. 실제로 지금 학습(train.py
+--backbone uni2native)이 쓰는 feature는 h5가 아니라, data/dataset.py::FEATURES_FILENAME_BY_
+BACKBONE["uni2native"] = "features_uni2native.pt"이 가리키는 슬라이드별 .pt 파일
+(patches_root_{tcga,cptac}/tiles/<slide_id>/features_uni2native.pt, config.py 기본값
+data/patches_tcga·data/patches_cptac) — data/fit_clusters.py(구버전 resnet50 2048차원)와
+정확히 같은 저장 구조다. 이 스크립트도 그 구조를 읽도록 고쳤다. 기존 K=11 centroids
+(data/cluster_centroids_uni2native.pt)는 이 수정과 무관하게 그대로 유효하다(어떤 경로로
+만들어졌든 재사용 가능한 결과물 자체는 이미 저장돼 있음) — 이번에 새로 재적합하는 K=5/K=20만
+이 수정된 경로를 탄다.
 
 사용법:
     python -m data.fit_clusters_uni2native                      # 기본: tcga+cptac 합산, K=10
@@ -29,7 +30,6 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-import h5py
 import numpy as np
 import torch
 from sklearn.cluster import MiniBatchKMeans
@@ -39,32 +39,42 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-FEATURES_ROOT = _ROOT / "data" / "uni2h_official_features"
+from config import DataConfig
+from data.dataset import PATCHES_ROOT_ATTRS
+from data.patch_utils import FEATURES_UNI2NATIVE_FILENAME
+
 OUT_PATH = _ROOT / "data" / "cluster_centroids_uni2native.pt"
 OUT_META_PATH = _ROOT / "data" / "cluster_centroids_uni2native_meta.pt"
 
 
 def _load_all_features(datasets: list[str], max_patches_per_slide: int, seed: int) -> tuple[np.ndarray, list[dict]]:
     """
-    각 h5(slide 하나)에서 features(1, N, 1536)를 읽어 슬라이드당 최대
-    max_patches_per_slide개로 서브샘플링한 뒤 합친다.
+    각 슬라이드 디렉터리의 features_uni2native.pt(N, 1536)를 읽어 슬라이드당 최대
+    max_patches_per_slide개로 서브샘플링한 뒤 합친다(data/fit_clusters.py와 동일 구조,
+    파일명/backbone만 uni2native).
 
     Returns:
         features: (N_total, 1536) float32
         slide_meta: 각 patch가 어느 slide/coord에서 왔는지(추후 exemplar 추출용) —
-            [{"dataset":..., "case_id":..., "slide_path":..., "coord_idx": np.ndarray}, ...]
+            [{"dataset":..., "slide_path":..., "coord_idx": np.ndarray}, ...]
     """
     rng = np.random.default_rng(seed)
+    cfg = DataConfig()
     chunks = []
     slide_meta = []
+    missing = 0
     n_slides = 0
 
     for ds in datasets:
-        ds_dir = FEATURES_ROOT / ds
-        h5_paths = sorted(ds_dir.glob("*.h5"))
-        for p in h5_paths:
-            with h5py.File(p, "r") as f:
-                feat = f["features"][0]  # (N, 1536)
+        patches_root = Path(getattr(cfg, PATCHES_ROOT_ATTRS[ds]))
+        tiles_root = patches_root / "tiles"
+        slide_dirs = sorted(d for d in tiles_root.iterdir() if d.is_dir())
+        for slide_dir in slide_dirs:
+            feat_path = slide_dir / FEATURES_UNI2NATIVE_FILENAME
+            if not feat_path.exists():
+                missing += 1
+                continue
+            feat = torch.load(feat_path, map_location="cpu").float().numpy()  # (N, 1536)
             n = feat.shape[0]
             if max_patches_per_slide > 0 and n > max_patches_per_slide:
                 idx = rng.choice(n, max_patches_per_slide, replace=False)
@@ -72,8 +82,18 @@ def _load_all_features(datasets: list[str], max_patches_per_slide: int, seed: in
             else:
                 idx = np.arange(n)
             chunks.append(feat[idx].astype(np.float32))
-            slide_meta.append({"dataset": ds, "slide_path": str(p), "coord_idx": idx})
+            slide_meta.append({"dataset": ds, "slide_path": str(slide_dir), "coord_idx": idx})
             n_slides += 1
+
+    if missing:
+        print(f"  경고: {FEATURES_UNI2NATIVE_FILENAME} 없는 슬라이드 {missing}개 건너뜀 — "
+              f"scripts/reconcile_uni2native_features.py 선실행 필요")
+    if not chunks:
+        raise FileNotFoundError(
+            f"{FEATURES_UNI2NATIVE_FILENAME}를 가진 슬라이드를 하나도 못 찾았습니다 "
+            f"(datasets={datasets}). patches_root_{{tcga,cptac}}(config.py) 경로와 "
+            f"scripts/reconcile_uni2native_features.py 실행 여부를 확인하세요."
+        )
 
     features = np.concatenate(chunks, axis=0)
     print(f"  로드 완료: {n_slides}개 슬라이드 / 총 {len(features):,}개 patch (슬라이드당 최대 {max_patches_per_slide or '전체'})")
