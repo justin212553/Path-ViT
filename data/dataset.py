@@ -96,6 +96,14 @@ RNA_PATHS = {
     "tcga":  Path("data/rna_tcga.csv"),
     "cptac": Path("data/rna_cptac.csv"),
 }
+# 2026-09-29: fold-safe 전처리(molecular_raw=True)용 z-score 이전 log2(FPKM-UQ+1) —
+# data/extract_rna_clinical.py 산출물. RNA_PATHS는 코호트 전체로 z-score돼 있어 fold의
+# val/test/external 정보가 정규화 통계에 섞인다(리뷰 지적) — fold-safe 모드는 이 raw 값을 읽고
+# train 환자 통계로만 정규화한다(apply_molecular_norm).
+RNA_RAW_PATHS = {
+    "tcga":  Path("data/rna_tcga_raw_log2.csv"),
+    "cptac": Path("data/rna_cptac_raw_log2.csv"),
+}
 # data/extract_rna_porpoise_official.py 산출물 — PORPOISE 공식 저장소가 배포한 TCGA-PAAD RNA-seq
 # 값(1553유전자, 이미 z-score됨) 그대로. 원 논문이 CPTAC-PDA를 다룬 적이 없어 "cptac" 키가 없다 —
 # --dataset tcga(external 아님, 내부 5-fold CV 전용)로만 쓸 수 있다.
@@ -476,6 +484,25 @@ def cnv_pathway_category_features(name: str) -> pd.DataFrame:
         cols = [g for g in categories[cat] if g in z.columns]
         out[f"cnv_{cat}"] = z[cols].mean(axis=1)
     return out
+
+
+@lru_cache(maxsize=None)
+def cnv_log_ratio_genes(name: str) -> tuple[pd.DataFrame, tuple[tuple[str, tuple[str, ...]], ...]]:
+    """cnv_pathway_category_features의 fold-safe용 짝 — z-score와 카테고리 평균 *이전*의 유전자별
+    log2-ratio(case_id x gene)와 (카테고리명, 그 카테고리 유전자들) 순서쌍을 반환한다. 정규화는
+    호출부가 train 환자 통계로 하고(apply_molecular_norm), 카테고리 평균은 그 뒤에 낸다 —
+    cnv_pathway_category_features와 정의(유전자별 z-score -> 카테고리 평균)가 같다."""
+    raw = pd.read_csv(CNV_RAW_PATHS[name]).set_index("case_id")
+    log_ratio = np.log2(raw / 2.0 + 1e-3)
+    categories = pathway_category_gene_ids()
+    # RNA 패널과 같은 ENSG id를 공유하므로 join 충돌을 피하려 CNV 컬럼엔 접두어를 붙인다.
+    cat_spec = tuple(
+        (f"cnv_{cat}", tuple(f"cnvg_{g}" for g in categories[cat] if g in log_ratio.columns))
+        for cat in sorted(categories.keys())
+    )
+    log_ratio = log_ratio.add_prefix("cnvg_")
+    used = sorted({g for _, genes in cat_spec for g in genes})
+    return log_ratio[used], cat_spec
 PATCHES_ROOT_ATTRS = {
     "tcga":  "patches_root_tcga",
     "cptac": "patches_root_cptac",
@@ -925,6 +952,7 @@ class WSISurvivalDataset(Dataset):
         exclude_normal_slides: bool = False,
         dx_only_slides: bool = False,
         feature_filename_override: str | None = None,
+        molecular_raw: bool = False,
         fold: int | None = None,
         n_folds: int = 5,
         use_stage_stratify: bool = False,
@@ -967,6 +995,14 @@ class WSISurvivalDataset(Dataset):
         self.with_cnv         = with_cnv
         self.use_stage_stratify = use_stage_stratify
         self.use_leverage_stratify = use_leverage_stratify
+        # 2026-09-29: fold-safe 전처리 — True면 RNA/CNV를 정규화 이전 raw 값으로만 들고 있고,
+        # rna_lookup은 apply_molecular_norm(train 환자 통계)이 불린 뒤에야 채워진다.
+        self.molecular_raw = molecular_raw
+        self.rna_raw_lookup: dict = {}
+        self.cnv_raw_lookup: dict = {}
+        self.cnv_cat_spec = None
+        self.cnv_gene_cols = None
+        self.molecular_normalized = not molecular_raw
 
         dataset_names = ["tcga", "cptac"] if dataset == "both" else [dataset]
         self.roots = {name: Path(getattr(cfg, PATCHES_ROOT_ATTRS[name])) for name in dataset_names}
@@ -1062,6 +1098,10 @@ class WSISurvivalDataset(Dataset):
                             "없어 --dataset tcga(external 아님, 내부 5-fold CV)로만 쓸 수 있습니다."
                         )
                     rna_df = pd.read_csv(RNA_PATHS_PORPOISE_OFFICIAL[name])
+                elif self.molecular_raw:
+                    if self.rna_pathway_categories is not None:
+                        raise ValueError("molecular_raw(fold-safe)는 개별 유전자 패널에서만 지원합니다(pathway8 불가).")
+                    rna_df = pd.read_csv(RNA_RAW_PATHS[name])
                 else:
                     rna_df = pd.read_csv(RNA_PATHS[name])
                 if self.rna_pathway_categories is not None:
@@ -1094,7 +1134,21 @@ class WSISurvivalDataset(Dataset):
                     self.rna_category_names = cat_names
 
                 rna_case_ids = rna_df["case_id"]
-                if self.with_cnv:
+                if self.molecular_raw:
+                    # 정규화 이전 값만 보관 — rna_lookup은 apply_molecular_norm이 채운다.
+                    rna_indexed = pd.DataFrame(rna_matrix, index=rna_case_ids.values, columns=gene_cols)
+                    if self.with_cnv:
+                        cnv_raw, cat_spec = cnv_log_ratio_genes(name)
+                        rna_indexed = rna_indexed.join(cnv_raw, how="inner")
+                        self.cnv_cat_spec = cat_spec
+                        self.cnv_gene_cols = list(cnv_raw.columns)
+                        self.rna_category_names = gene_cols + [c for c, _ in cat_spec]
+                    kept = rna_indexed.index
+                    self.rna_raw_lookup.update(zip(kept, rna_indexed[gene_cols].to_numpy(dtype="float64")))
+                    if self.with_cnv:
+                        self.cnv_raw_lookup.update(zip(kept, rna_indexed[self.cnv_gene_cols].to_numpy(dtype="float64")))
+                    merged = merged.merge(pd.DataFrame({"case_id": kept}), on="case_id", how="inner")
+                elif self.with_cnv:
                     # 2026-09-03 추가 — RNA 표현(pathway8 카테고리 평균 8차원이든, variance/기타
                     # 개별 유전자 flat 벡터든 상관없이) 뒤에 pathway8 8개 카테고리의 CNV 평균
                     # (cnv_pathway_category_features, log2-ratio+z-score)을 이어붙인다. CNV 자체는
@@ -1110,10 +1164,11 @@ class WSISurvivalDataset(Dataset):
                     rna_case_ids = pd.Series(combined.index, name="case_id")
                     self.rna_category_names = list(combined.columns)
 
-                # 유전자(또는 카테고리) 벡터는 case당 1번만 lookup에 저장하고(슬라이드 수만큼
-                # 중복 저장 방지), merged 테이블에는 필터링용 case_id만 inner-join한다.
-                self.rna_lookup.update(zip(rna_case_ids, rna_matrix))
-                merged = merged.merge(rna_case_ids.to_frame(name="case_id"), on="case_id", how="inner")
+                if not self.molecular_raw:
+                    # 유전자(또는 카테고리) 벡터는 case당 1번만 lookup에 저장하고(슬라이드 수만큼
+                    # 중복 저장 방지), merged 테이블에는 필터링용 case_id만 inner-join한다.
+                    self.rna_lookup.update(zip(rna_case_ids, rna_matrix))
+                    merged = merged.merge(rna_case_ids.to_frame(name="case_id"), on="case_id", how="inner")
 
             def _has_patches(slide_id: str, root=root) -> bool:
                 d = root / "tiles" / slide_id
@@ -1186,6 +1241,46 @@ class WSISurvivalDataset(Dataset):
 
         self.cases = sorted(self.items["case_id"].unique())
 
+    def molecular_norm_stats(self) -> dict:
+        """이 dataset(=train split)에 남은 case들의 raw RNA/CNV로 유전자별 mean/std(ddof=0,
+        0은 1로 대체 — data/extract_rna_clinical.py와 같은 관례)를 계산한다."""
+        if not self.molecular_raw:
+            raise RuntimeError("molecular_norm_stats는 molecular_raw=True dataset에서만 쓸 수 있습니다.")
+        stats = {}
+        rna = np.stack([self.rna_raw_lookup[c] for c in self.cases])
+        sd = rna.std(axis=0)
+        sd[sd == 0] = 1.0
+        stats["rna"] = (rna.mean(axis=0), sd)
+        if self.with_cnv:
+            # CNV엔 결측(NaN)이 있다 — 기존 cnv_pathway_category_features(pandas)처럼 NaN 무시.
+            cnv = np.stack([self.cnv_raw_lookup[c] for c in self.cases])
+            sd = np.nanstd(cnv, axis=0)
+            sd[(sd == 0) | np.isnan(sd)] = 1.0
+            stats["cnv"] = (np.nanmean(cnv, axis=0), sd)
+        return stats
+
+    def apply_molecular_norm(self, stats: dict) -> None:
+        """train split 통계(molecular_norm_stats)로 이 dataset의 모든 case를 정규화해 rna_lookup을
+        채운다 — train/val/test/external 전부 같은 stats로 호출해야 한다(external도 external
+        자신이 아니라 학습 fold 통계로 정규화: strict external validation)."""
+        mean, sd = stats["rna"]
+        if self.with_cnv:
+            col_index = {g: i for i, g in enumerate(self.cnv_gene_cols)}
+            cat_idx = [[col_index[g] for g in genes] for _, genes in self.cnv_cat_spec]
+            cmean, csd = stats["cnv"]
+        lookup = {}
+        for c, raw in self.rna_raw_lookup.items():
+            vec = ((raw - mean) / sd).astype("float32")
+            if self.with_cnv:
+                z = (self.cnv_raw_lookup[c] - cmean) / csd
+                with np.errstate(all="ignore"):
+                    cats = np.array([np.nanmean(z[idx]) if np.isfinite(z[idx]).any() else np.nan
+                                     for idx in cat_idx], dtype="float32")
+                vec = np.concatenate([vec, cats])
+            lookup[c] = vec
+        self.rna_lookup = lookup
+        self.molecular_normalized = True
+
     def __len__(self) -> int:
         return len(self.cases)
 
@@ -1236,6 +1331,8 @@ class WSISurvivalDataset(Dataset):
                     item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
 
         if self.with_rna:
+            if not self.molecular_normalized:
+                raise RuntimeError("molecular_raw=True인데 apply_molecular_norm이 호출되지 않았습니다.")
             item["rna"] = torch.from_numpy(self.rna_lookup[row["case_id"]])
 
         if self.precomputed:

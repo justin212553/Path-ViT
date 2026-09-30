@@ -16,6 +16,7 @@ holdout으로 뺀다(사용자 결정 — 여러 기관을 섞기보다 "정말 
 data/brca_rna_gene_selection/)은 이 재분할 이전 기준으로 이미 고정돼 있고 이번 실험에서는
 다시 안 만든다(사용자 지시) — 재선택 없이 그대로 재사용.
 """
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,9 @@ EXTERNAL_TSS = "BH"  # 2026-08-30: institution-level external holdout 기본값(
 # 맞추자"는 사용자 결정으로 재시도. A2(100명,15.0%)+AR(69명,15.9%)+E9(61명,9.8%) 조합 —
 # 합쳐서 N=230, event rate=13.9%로 전체 코호트(13.8%)와 거의 정확히 일치(직접 실측 확인).
 EXTERNAL_TSS_MULTI = ("A2", "AR", "E9")
+# 2026-09-29(리뷰 지적 — 위 A2+AR+E9는 사망률을 보고 고른 holdout이라 outcome 참조로 읽힘):
+# 기관 단위 교차검증(load_case_table_instcv)용 sentinel. --external-tss instcv.
+INSTCV = "__INSTCV__"
 
 
 def resolve_external_tss(raw: str) -> tuple[str | tuple[str, ...] | None, str]:
@@ -47,6 +51,9 @@ def resolve_external_tss(raw: str) -> tuple[str | tuple[str, ...] | None, str]:
     'none' -> (None, ""). 'multi' -> (EXTERNAL_TSS_MULTI, "_EXTTSSA2-AR-E9"류). 그 외 -> 그 문자열 그대로."""
     if raw.lower() == "none":
         return None, ""
+    if raw.lower() == "instcv":
+        # 2026-09-29: 기관 단위 교차검증 — fold마다 기관 그룹 하나가 external(load_case_table_instcv).
+        return INSTCV, "_INSTCV"
     if raw.lower() == "multi":
         return EXTERNAL_TSS_MULTI, f"_EXTTSS{'-'.join(EXTERNAL_TSS_MULTI)}"
     return raw, f"_EXTTSS{raw}"
@@ -57,13 +64,16 @@ def _tss(case_id: str) -> str:
     return case_id.split("-")[1]
 
 
+@lru_cache(maxsize=1)
+def _common_case_ids_cached() -> tuple:
+    clinical = pd.read_csv(CLINICAL_PATH, usecols=["case_id"])
+    rna = pd.read_csv(RNA_ZSCORED_PATH, usecols=["case_id"])
+    manifest = pd.read_csv(MANIFEST_PATH, usecols=["case_id"])
+    return tuple(sorted(set(clinical["case_id"]) & set(rna["case_id"]) & set(manifest["case_id"])))
+
+
 def common_case_ids() -> list[str]:
-    """Clinical(OS) ∩ RNA ∩ WSI(manifest) 세 데이터 모두 존재하는 case_id 목록."""
-    clinical = pd.read_csv(CLINICAL_PATH)
-    rna = pd.read_csv(RNA_ZSCORED_PATH)
-    manifest = pd.read_csv(MANIFEST_PATH)
-    common = set(clinical["case_id"]) & set(rna["case_id"]) & set(manifest["case_id"])
-    return sorted(common)
+    return list(_common_case_ids_cached())
 
 
 def split_by_institution(
@@ -165,6 +175,8 @@ def load_case_table_kfold(seed: int, fold: int, n_folds: int, external_tss: str 
 
     columns: case_id, OS_time, OS_event, age_years, sex, split
     """
+    if external_tss == INSTCV:
+        return load_case_table_instcv(seed, fold, n_folds)
     case_ids = common_case_ids()
     internal_ids, external_ids = split_by_institution(case_ids, external_tss)
     clinical = pd.read_csv(CLINICAL_PATH).set_index("case_id")
@@ -173,6 +185,59 @@ def load_case_table_kfold(seed: int, fold: int, n_folds: int, external_tss: str 
     split_of_case = kfold_case_split(internal_ids, os_event_by_case, seed, n_folds, fold)
     for cid in external_ids:
         split_of_case[cid] = "external"
+    table["split"] = table["case_id"].map(split_of_case)
+    return table
+
+
+def institution_groups(case_ids: list[str], seed: int, n_groups: int) -> dict:
+    """2026-09-29(리뷰 지적 — 사망률을 보고 holdout 기관을 고른 것은 outcome 참조): TSS(기관)를
+    outcome을 전혀 보지 않고 n_groups개 그룹에 배정한다. seed로 기관 순서를 섞은 뒤, 환자 수가
+    가장 적은 그룹에 차례로 넣는다(환자 수만 균형). 반환: {tss: group_idx}."""
+    counts = pd.Series([_tss(c) for c in case_ids]).value_counts()
+    tss_list = sorted(counts.index)
+    rng = np.random.RandomState(seed)
+    rng.shuffle(tss_list)
+    totals = [0] * n_groups
+    group_of_tss = {}
+    for tss in tss_list:
+        g = int(np.argmin(totals))
+        group_of_tss[tss] = g
+        totals[g] += int(counts[tss])
+    return group_of_tss
+
+
+def load_case_table_instcv(seed: int, fold: int, n_folds: int) -> pd.DataFrame:
+    """기관 단위 교차검증(institution-grouped CV) 버전의 case 테이블.
+
+    - external: 기관 그룹 == fold (institution_groups, outcome 미참조)
+    - test(internal): 별도로 배정한 internal fold 번호 == fold 이면서 external이 아닌 환자
+      (_stratified_kfold_assignment — 기존 k-fold와 같은 OS_event 층화)
+    - train/val: 나머지를 TRAIN_FRAC:VAL_FRAC로
+
+    fold=0..n_folds-1을 다 돌리면 seed 하나 안에서 모든 환자가 정확히 한 번 external로, 자기 기관
+    그룹과 internal fold 번호가 겹치지 않는 환자(~80%)는 정확히 한 번 internal test로 평가된다 —
+    기존 pooling 스크립트(환자당 seed마다 예측 1개)와 그대로 호환된다.
+
+    columns: case_id, OS_time, OS_event, age_years, sex, ..., split
+    """
+    case_ids = common_case_ids()
+    clinical = pd.read_csv(CLINICAL_PATH).set_index("case_id")
+    table = clinical.loc[case_ids].reset_index()
+    os_event_by_case = dict(zip(table["case_id"], table["OS_event"]))
+    group_of_tss = institution_groups(case_ids, seed, n_folds)
+    internal_fold = _stratified_kfold_assignment(case_ids, os_event_by_case, seed, n_folds)
+
+    split_of_case = {}
+    remaining = []
+    for c in case_ids:
+        if group_of_tss[_tss(c)] == fold:
+            split_of_case[c] = "external"
+        elif internal_fold[c] == fold:
+            split_of_case[c] = "test"
+        else:
+            remaining.append(c)
+    train_val_frac = TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)
+    split_of_case.update(_stratified_binary_split(remaining, os_event_by_case, seed, frac=train_val_frac))
     table["split"] = table["case_id"].map(split_of_case)
     return table
 
@@ -338,3 +403,40 @@ class BRCASlideDataset(Dataset):
             features = torch.load(slide_dir / "features_uni.pt", weights_only=True)
             slides.append({"coords": coords, "features": features, **common})
         return slides
+
+
+def brca_fold_safe(cases: pd.DataFrame, rna_df: pd.DataFrame, clinical_staging: bool):
+    """2026-09-29(리뷰 지적 — 전처리 leakage): BRCA의 RNA z-score와 clinical 정규화 통계를 이
+    seed x fold의 train split 환자만으로 다시 계산한다. PAAD의 data/fold_safe.py와 같은 원칙.
+
+    rna_df(기존: 코호트 전체로 z-score된 load_rna_matrix 결과)와 같은 컬럼을 raw log2
+    (RNA_RAW_LOG2_PATH)에서 읽어 train 통계로 다시 정규화 — val/test/external도 같은 통계.
+    반환: (rna_df, age_mean, age_std, stage_stats)"""
+    from models.clinical_encoder import stage_stats_from_df
+
+    train_ids = cases.loc[cases["split"] == "train", "case_id"].tolist()
+    raw = pd.read_csv(RNA_RAW_LOG2_PATH, usecols=["case_id", *rna_df.columns]).set_index("case_id")
+    missing = [c for c in rna_df.columns if c not in raw.columns]
+    if missing:
+        raise ValueError(f"brca_fold_safe: raw RNA에 없는 컬럼 {missing[:5]} — 카테고리 평균 패널은 미지원")
+    tr = raw.loc[train_ids]
+    sd = tr.std(ddof=0).replace(0, 1.0)
+    z = ((raw - tr.mean()) / sd).loc[rna_df.index, list(rna_df.columns)]
+
+    clinical = pd.read_csv(CLINICAL_PATH)
+    tr_clin = clinical[clinical["case_id"].isin(set(train_ids))]
+    ages = tr_clin["age_years"].astype(float)
+    age_mean, age_std = float(ages.mean()), float(ages.std(ddof=0))
+    stage_stats = stage_stats_from_df(tr_clin) if clinical_staging else None
+    print(f"[fold-safe] BRCA RNA/clinical 정규화 통계: train {len(train_ids)}명 기준 (age mean={age_mean:.2f})")
+    return z, age_mean, age_std, stage_stats
+
+
+def fit_brca_fold_safe_centroids(cases: pd.DataFrame, manifest: pd.DataFrame, k: int = 11) -> str:
+    """BRCA train split 슬라이드(features_uni.pt)로만 ClusterPool centroid 적합 — data/fold_safe.py 재사용."""
+    from data.fold_safe import fit_centroids_from_files
+
+    train_ids = cases.loc[cases["split"] == "train", "case_id"].tolist()
+    rows = manifest[manifest["case_id"].isin(set(train_ids))]
+    files = [TILES_ROOT / sid / "features_uni.pt" for sid in rows["slide_id"]]
+    return fit_centroids_from_files(files, train_ids, "uni", k=k)

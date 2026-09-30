@@ -547,6 +547,17 @@ def _parse_args() -> argparse.Namespace:
              "variant calling 파이프라인 차이 의심). 켜면 model_prefix에 _MUT 접미사가 붙는다.",
     )
     parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): train.py --fold-safe와 동일 — RNA/CNV z-score와 "
+             "clinical 정규화 통계를 이 seed x fold의 train split 환자만으로 계산(data/fold_safe.py). "
+             "external도 학습 fold 통계로 정규화. 켜면 태그에 _FS가 붙는다.",
+    )
+    parser.add_argument(
+        "--restrict-cohort-file", type=str, default=None,
+        help="train.py --restrict-cohort-file과 동일 — case_id 목록 파일로 모든 split(external 포함) "
+             "제한(예: data/cohort_n110.txt). 태그에 _COH{파일 stem}이 붙는다.",
+    )
+    parser.add_argument(
         "--use-cnv", action="store_true",
         help="2026-09-03: pathway8(--rna-genes pathway8 전용)의 8개 카테고리에 같은 카테고리의 "
              "CNV(카피수 변이) 평균 8차원을 이어붙여 16차원 genomic 벡터로 만든다"
@@ -948,6 +959,10 @@ def main():
         model_prefix += f"_NLLSURV{args.nll_n_bins}"
     if args.surv_loss == "both":
         model_prefix += f"_NLLCOX{args.nll_cox_weight:g}"
+    if args.fold_safe:
+        model_prefix += "_FS"
+    if args.restrict_cohort_file is not None:
+        model_prefix += "_COH" + Path(args.restrict_cohort_file).stem.upper().replace("COHORT_", "")
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -960,6 +975,43 @@ def main():
         cluster_hist_lookup, hist_k = _load_cluster_histograms(hist_datasets, source=hdp_source)
         print(f"--{model_prefix}: {hdp_source} feature {len(cluster_hist_lookup.lookup)}명 로드 완료 "
               f"(D={hist_k}, {hist_datasets})")
+
+    restrict_case_ids = None
+    if args.match_reference_cohort:
+        from data.reference_cohort import reference_eligible_case_ids
+        target_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+        if external_dataset:
+            target_datasets = list(set(target_datasets) | {external_dataset})
+        restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
+        print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
+
+    if args.restrict_cohort_file is not None:
+        cohort_ids = {ln.strip() for ln in open(args.restrict_cohort_file, encoding="utf-8") if ln.strip()}
+        restrict_case_ids = cohort_ids if restrict_case_ids is None else (restrict_case_ids & cohort_ids)
+        print(f"--restrict-cohort-file: {len(cohort_ids)}개 case로 제한 ({args.restrict_cohort_file})")
+
+    ds_kwargs = dict(molecular_raw=bool(args.fold_safe and with_rna), with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
+                      with_mutation=args.clinical_mutation,
+                      with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
+                      rna_pathway_categories=rna_pathway_categories, with_cnv=args.use_cnv,
+                      rna_use_porpoise_official=(args.rna_genes == "porpoise_official"),
+                      restrict_case_ids=restrict_case_ids)
+    split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
+
+    if args.fold_safe and with_clinical:
+        # 모델이 clinical 정규화 통계를 생성 시점에 받으므로, train split을 먼저 만들어 그 환자만으로 계산.
+        from data.fold_safe import fold_safe_clinical_stats
+        _fs_train = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),
+                                       **ds_kwargs, **split_kwargs)
+        _clin_names = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+        _fs = fold_safe_clinical_stats(_fs_train.cases, [CLINICAL_PATHS[n] for n in _clin_names])
+        age_mean, age_std = _fs["age"]
+        if stage_stats is not None:
+            stage_stats = _fs["stage"]
+        if margin_stats is not None:
+            margin_stats = _fs["margin"]
+        if mutation_stats is not None:
+            mutation_stats = _fs["mutation"]
 
     if args.init_seed is not None:
         torch.manual_seed(args.init_seed)
@@ -1011,22 +1063,6 @@ def main():
             },
         )
 
-    restrict_case_ids = None
-    if args.match_reference_cohort:
-        from data.reference_cohort import reference_eligible_case_ids
-        target_datasets = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
-        if external_dataset:
-            target_datasets = list(set(target_datasets) | {external_dataset})
-        restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
-        print(f"--match-reference-cohort: {len(restrict_case_ids)}개 case로 제한")
-
-    ds_kwargs = dict(with_clinical=with_clinical, with_margin=args.clinical_margin, with_staging=args.clinical_staging,
-                      with_mutation=args.clinical_mutation,
-                      with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
-                      rna_pathway_categories=rna_pathway_categories, with_cnv=args.use_cnv,
-                      rna_use_porpoise_official=(args.rna_genes == "porpoise_official"),
-                      restrict_case_ids=restrict_case_ids)
-    split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
     train_ds = WSISurvivalDataset(cfg.data, dataset=args.dataset, split=("all" if args.full_train else "train"),
                                    **ds_kwargs, **split_kwargs)
     val_ds   = None if args.full_train else WSISurvivalDataset(cfg.data, dataset=args.dataset, split="val",   **ds_kwargs, **split_kwargs)
@@ -1035,6 +1071,9 @@ def main():
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", **ds_kwargs)
         if external_dataset else None
     )
+    if args.fold_safe and with_rna:
+        from data.fold_safe import apply_fold_safe_molecular
+        apply_fold_safe_molecular(train_ds, val_ds, test_ds, external_ds)
 
     # train.py::fit_survival_bins 호출부와 동일 관례(2026-09-09 이식) — 이 fold의 train split만으로
     # 시간-구간 경계를 fit한다(전체 코호트로 fit하면 RNA 유전자 선정에서 겪은 것과 같은 leakage).

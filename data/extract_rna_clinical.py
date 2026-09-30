@@ -63,6 +63,15 @@ OUT_RNA_PATHS = {
     "tcga":  Path("data/rna_tcga.csv"),
     "cptac": Path("data/rna_cptac.csv"),
 }
+# 2026-09-28: fold-safe(리키지 없는) 재정규화용 원본(log2(FPKM-UQ+1), z-score 이전) 출력 —
+# OUT_RNA_PATHS는 코호트 전체로 z-score된 값이라 fold별 training-only 통계로 다시 정규화할
+# 방법이 없다(리뷰 피드백 — normalization이 전체 코호트로 한 번만 계산돼 fold의 val/test
+# 정보가 새어 들어갈 수 있음). 이 파일은 z-score 이전 값을 그대로 보존해 나중에 seed/fold별
+# training subset 통계로 재정규화할 수 있게 한다.
+OUT_RNA_RAW_PATHS = {
+    "tcga":  Path("data/rna_tcga_raw_log2.csv"),
+    "cptac": Path("data/rna_cptac_raw_log2.csv"),
+}
 OUT_CLINICAL_PATHS = {
     "tcga":  Path("data/clinical_tcga.csv"),
     "cptac": Path("data/clinical_cptac.csv"),
@@ -297,6 +306,11 @@ def main():
 
     for ds in datasets:
         rna_out = rna_by_ds[ds][common_genes]
+
+        raw = rna_out.copy()
+        raw.index.name = "case_id"
+        raw.reset_index().to_csv(OUT_RNA_RAW_PATHS[ds], index=False)
+
         z = (rna_out - rna_out.mean()) / rna_out.std(ddof=0).replace(0, 1.0)
         z.index.name = "case_id"
         z.reset_index().to_csv(OUT_RNA_PATHS[ds], index=False)

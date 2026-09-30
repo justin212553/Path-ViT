@@ -1718,6 +1718,25 @@ def _parse_args() -> argparse.Namespace:
              "유지). 켜면 wandb/checkpoint에 _CLUSTERPOOL 접미사가 자동으로 붙는다.",
     )
     parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): RNA/CNV z-score, clinical 정규화 통계(age/stage/"
+             "margin/mutation), --cluster-pool centroid를 전부 이 seed x fold의 train split 환자만으로 "
+             "계산한다(data/fold_safe.py). external도 external 자신이 아니라 학습 fold 통계로 정규화. "
+             "기본(끔)은 기존 동작(코호트 전체 통계, 고정 centroid 파일). 켜면 태그에 _FS가 붙는다.",
+    )
+    parser.add_argument(
+        "--cluster-k", type=int, default=11,
+        help="--fold-safe --cluster-pool일 때 fold별로 적합할 centroid 개수(기본 11). 11이 아니면 "
+             "태그에 _K{k}가 붙는다.",
+    )
+    parser.add_argument(
+        "--restrict-cohort-file", type=str, default=None,
+        help="2026-09-29(리뷰 지적 — 모델마다 환자 수가 달라 modality 비교가 오염됨): case_id를 한 줄에 "
+             "하나씩 담은 파일. 주면 모든 split(external 포함)을 이 case들로 제한한다 — 예: "
+             "data/cohort_n110.txt(PAAD CNV-eligible 110 + CPTAC 136)로 M1/M2/M5를 M3/M4/M6/M7과 "
+             "같은 코호트에서 학습. 태그에 _COH{파일 stem}이 붙는다.",
+    )
+    parser.add_argument(
         "--cluster-centroids-path", type=str, default=None,
         help="2026-09-05: --cluster-pool 전용 — 기본(None)이면 data/cluster_centroids_{backbone}.pt. "
              "K/적합 데이터셋을 바꿔가며 비교할 때(예: TCGA-only 재적합 vs 원래 tcga+cptac 적합) "
@@ -2084,6 +2103,8 @@ def main():
         raise ValueError("--no-coattn은 --PMA에서만 사용 가능합니다.")
     if args.self_attn_fusion and not args.PMA:
         raise ValueError("--self-attn-fusion은 --PMA에서만 사용 가능합니다.")
+    if args.fold_safe and args.cluster_centroids_path is not None:
+        raise ValueError("--fold-safe는 fold별 centroid를 직접 적합하므로 --cluster-centroids-path와 같이 쓸 수 없습니다.")
     if args.self_attn_fusion and args.no_coattn:
         raise ValueError("--self-attn-fusion과 --no-coattn은 서로 다른 fusion ablation이라 동시 사용을 지원하지 않습니다.")
     if args.porpoise_meanpool and not args.PORPOISE:
@@ -2450,6 +2471,12 @@ def main():
         model_prefix += "_SELFATTNFUSION"
     if args.cluster_pool:
         model_prefix += "_CLUSTERPOOL"
+    if args.fold_safe:
+        model_prefix += "_FS"
+        if args.cluster_pool and args.cluster_k != 11:
+            model_prefix += f"_K{args.cluster_k}"
+    if args.restrict_cohort_file is not None:
+        model_prefix += "_COH" + Path(args.restrict_cohort_file).stem.upper().replace("COHORT_", "")
     if args.cluster_centroids_path is not None:
         # 2026-09-24(버그 예방): 이 인자는 여태 model_prefix/tag 어디에도 반영되지 않았다 — K=11
         # 기본 centroids와 다른 --cluster-centroids-path(예: K 민감도 ablation의 K=5/K=20 재적합
@@ -2678,7 +2705,13 @@ def main():
         restrict_case_ids = reference_eligible_case_ids(target_datasets, cfg=cfg.data)
         print(f"--reference-cohort: {len(restrict_case_ids)}개 case로 제한")
 
+    if args.restrict_cohort_file is not None:
+        cohort_ids = {ln.strip() for ln in open(args.restrict_cohort_file, encoding="utf-8") if ln.strip()}
+        restrict_case_ids = cohort_ids if restrict_case_ids is None else (restrict_case_ids & cohort_ids)
+        print(f"--restrict-cohort-file: {len(cohort_ids)}개 case로 제한 ({args.restrict_cohort_file})")
+
     ds_kwargs = dict(
+        molecular_raw=bool(args.fold_safe and with_rna),
         with_clinical=with_clinical, with_staging=with_staging, with_margin=args.clinical_margin,
         with_mutation=args.clinical_mutation,
         with_rna=with_rna, with_cnv=args.use_cnv, feature_backbone=args.backbone,
@@ -2752,6 +2785,23 @@ def main():
         WSISurvivalDataset(cfg.data, dataset=external_dataset, split="all", transform=eval_transform, **ds_kwargs)
         if external_dataset else None
     )
+    if args.fold_safe:
+        # 2026-09-29: 모든 정규화 통계와 centroid를 train split 환자만으로 — data/fold_safe.py.
+        from data.fold_safe import apply_fold_safe_molecular, fold_safe_clinical_stats, fit_fold_safe_centroids
+        if with_rna:
+            apply_fold_safe_molecular(train_ds, val_ds, test_ds, external_ds)
+        if with_clinical:
+            clin_names = ["tcga", "cptac"] if args.dataset == "both" else [args.dataset]
+            fs = fold_safe_clinical_stats(train_ds.cases, [CLINICAL_PATHS[n] for n in clin_names])
+            age_mean, age_std = fs["age"]
+            if stage_stats is not None:
+                stage_stats = fs["stage"]
+            if margin_stats is not None:
+                margin_stats = fs["margin"]
+            if mutation_stats is not None:
+                mutation_stats = fs["mutation"]
+        if args.cluster_pool:
+            args.cluster_centroids_path = fit_fold_safe_centroids(train_ds, k=args.cluster_k)
     # [2026-08-04] val과 동일한 이유(--cache-val-tiles) — external은 보통 run당 1회만 평가되지만
     # (val처럼 매 epoch 반복은 아님), 그 1회가 반대 코호트 전체라 디스크에서 새로 읽으면 여전히
     # 느릴 수 있다. 옵트인(--cache-external-tiles).

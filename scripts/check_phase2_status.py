@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_pred_completeness import scan, tags_matching, check_tag  # noqa: E402
+from check_pred_completeness import scan, tags_matching, check_tag, EMPTY_FILES  # noqa: E402
 
 _ROOT = Path(__file__).resolve().parent.parent
 _SUBDIRS = ["kfold_preds", "external_preds"]
@@ -44,8 +44,8 @@ CHECKS = [
     ("BRCA mean-pool", ["CONS882_NOCOATTN_STG_SS_AUX_CLUSTERPOOL_CLR100"], [84], 5),
     # --- C) M4/M7 5-seed 확장(84,126은 이미 있던 것 — 여기선 새로 추가한 3개만 확인) ---
     ("PAAD M4 (+3 seed)", ["STG_R_MUT_CLUSTERPOOL_COX_ADD"],        _SEEDSX, 5),
-    ("PAAD M7 (+3 seed)", ["M7_PDACCONS1500_CNV_STG_R_MUT_COX_ADD"], _SEEDSX, 5),
-    ("BRCA M4 (+3 seed)", ["CONS882_STG_SS_AUX_CLUSTERPOOL_CLR100"], _SEEDSX, 5),
+    ("PAAD M7 (+3 seed)", ["M7_PDACCONS1500_CNV_STG_R_MUT_COX_ADD", "NLLSURV4_NLLCOX1"], _SEEDSX, 5),
+    ("BRCA M4 (+3 seed)", ["CONS882_STG_SS_AUX_CLUSTERPOOL_CLR100", "NLLSURV4_NLLCOX1"], _SEEDSX, 5),
     ("BRCA M7 (+3 seed)", ["BRCA_M7_CONS882_STG_NLLSURV4_NLLCOX1_CLR100"], _SEEDSX, 5),
 ]
 
@@ -71,6 +71,7 @@ def main():
 
     n_ok, n_bad = 0, 0
     bad_rows = []
+    multi_match = []  # 패턴에 태그가 2개 이상 걸린 경우 — 옛 레시피 잔재가 섞여 거짓 누락을 만들 수 있음
     for label, patterns, seeds, n_folds in checks:
         # 2026-09-27(버그 수정): PAAD는 내부 예측이 tcga_ 접두, 외부 예측이 cptac_ 접두로 서로
         # 다른 태그 문자열이라(BRCA는 둘 다 brca_로 같음), 매칭된 태그를 kfold_preds/
@@ -88,6 +89,8 @@ def main():
                 cell[sd] = f"0/{expected_total}|0/{expected_total}"
                 continue
             any_matched = True
+            if len(matched_sd) > 1:
+                multi_match.append((label, sd, matched_sd))
             best = final = 0
             for tag in matched_sd:
                 rep = check_tag(scanned[sd][tag], seeds, n_folds)
@@ -140,6 +143,22 @@ def main():
                         continue
                     for s in sorted(m):
                         print(f"  {sd}/{ckpt}: seed={s} missing fold={sorted(m[s])}")
+
+    if multi_match:
+        print()
+        print("!! 패턴에 태그가 2개 이상 걸린 항목 — 결과가 섞였을 수 있으니 CHECKS 패턴을 좁힐 것:")
+        for label, sd, tags in multi_match:
+            print(f"   [{label}] {sd}:")
+            for t in tags:
+                print(f"      {t}")
+
+    n_empty = sum(len(v) for v in EMPTY_FILES.values())
+    if n_empty:
+        print()
+        print(f"!! 0바이트 CSV {n_empty}개 — 잡이 쓰다가 죽은 흔적, 누락으로 처리함:")
+        for sd, names in EMPTY_FILES.items():
+            for n in names:
+                print(f"   {sd}/{n}")
 
     if unmatched.get("kfold_preds") or unmatched.get("external_preds"):
         print()

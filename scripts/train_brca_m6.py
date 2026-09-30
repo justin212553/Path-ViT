@@ -52,8 +52,16 @@ def main():
     parser.add_argument("--nll-n-bins", type=int, default=4)
     parser.add_argument("--nll-cox-weight", type=float, default=1.0)
     parser.add_argument("--external-tss", type=str, default="multi")
+    parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): RNA z-score와 clinical 정규화 통계(와 ClusterPool "
+             "모델이면 centroid)를 이 seed x fold의 train split 환자만으로 계산(scripts/brca_common.py::"
+             "brca_fold_safe). 파일명 태그(ext_tag)에 _FS가 붙는다.",
+    )
     args = parser.parse_args()
     external_tss, ext_tag = resolve_external_tss(args.external_tss)
+    if args.fold_safe:
+        ext_tag += "_FS"
 
     cfg = Config()
     cfg.data.seed = cfg.light.seed = args.seed
@@ -96,6 +104,9 @@ def main():
         cases = load_case_table(args.seed, external_tss=external_tss)
     rna_df = load_rna_matrix_categorized(literature_categories) if args.gene_selection == "literature_categorized" \
         else load_rna_matrix(gene_ids)
+    if args.fold_safe:
+        from scripts.brca_common import brca_fold_safe
+        rna_df, _, _, _ = brca_fold_safe(cases, rna_df, False)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")

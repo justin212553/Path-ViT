@@ -66,8 +66,20 @@ def main():
     parser.add_argument("--rna-dummy-genes", type=int, default=10,
                          help="BRCASlideDataset이 요구하는 rna_df 채우기용 — 모델(ViT_M1/ViT_M2)은 "
                               "RNA 브랜치가 없어 실제로 안 쓴다(PAAD M1/M2와 동일 관례).")
+    parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): RNA z-score와 clinical 정규화 통계(와 ClusterPool "
+             "모델이면 centroid)를 이 seed x fold의 train split 환자만으로 계산(scripts/brca_common.py::"
+             "brca_fold_safe). 파일명 태그(ext_tag)에 _FS가 붙는다.",
+    )
+    parser.add_argument("--cluster-k", type=int, default=11,
+                         help="--fold-safe일 때 fold별로 적합할 centroid 개수(기본 11, 아니면 태그에 _K{k}).")
     args = parser.parse_args()
     external_tss, ext_tag = resolve_external_tss(args.external_tss)
+    if args.fold_safe:
+        ext_tag += "_FS"
+    if args.fold_safe and args.cluster_k != 11:
+        ext_tag += f"_K{args.cluster_k}"
 
     cfg = Config()
     cfg.data.seed = cfg.train.seed = args.seed
@@ -88,6 +100,15 @@ def main():
     rna_df = load_rna_matrix(dummy_gene_ids)
     manifest = pd.read_csv(MANIFEST_PATH)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
+    if args.fold_safe:
+        from scripts.brca_common import brca_fold_safe
+        rna_df, age_mean, age_std, _fs_stage = brca_fold_safe(cases, rna_df, stage_stats is not None)
+        if stage_stats is not None:
+            stage_stats = _fs_stage
+    centroids_path = args.cluster_centroids_path
+    if args.fold_safe:
+        from scripts.brca_common import fit_brca_fold_safe_centroids
+        centroids_path = fit_brca_fold_safe_centroids(cases, manifest, k=args.cluster_k)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
@@ -96,7 +117,7 @@ def main():
         model = ViT_M2(
             cfg.model, age_mean=age_mean, age_std=age_std, precomputed=True, backbone="uni",
             use_staging=args.clinical_staging, stage_stats=stage_stats,
-            cluster_pool=True, cluster_centroids_path=args.cluster_centroids_path,
+            cluster_pool=True, cluster_centroids_path=centroids_path,
             surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
         ).to(device)
         model_prefix = "BRCA_M2"
@@ -107,7 +128,7 @@ def main():
     else:
         model = ViT_M1(
             cfg.model, precomputed=True, backbone="uni",
-            cluster_pool=True, cluster_centroids_path=args.cluster_centroids_path,
+            cluster_pool=True, cluster_centroids_path=centroids_path,
             surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
         ).to(device)
         model_prefix = "BRCA_M1"

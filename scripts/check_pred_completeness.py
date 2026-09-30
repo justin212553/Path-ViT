@@ -44,6 +44,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 _FILENAME_RE = re.compile(r"^(?P<tag>.+?)_(?P<ckpt>FINALEPOCH_)?seed(?P<seed>\d+)_fold(?P<fold>\d+)of(?P<nfolds>\d+)\.csv$")
 _PAAD_FOLD_ARTIFACT_RE = re.compile(r"_FOLD\d+OF\d+$")
+EMPTY_FILES = defaultdict(list)  # scan()이 채움: {subdir: [0바이트 파일명]}
 
 
 def parse_filename(name: str):
@@ -56,9 +57,12 @@ def parse_filename(name: str):
 
 
 def scan(root: Path, subdirs: list[str]):
-    """반환: {subdir: {tag: {ckpt: {(seed, fold, nfolds)}}}}, 그리고 파싱 실패 파일 목록."""
+    """반환: {subdir: {tag: {ckpt: {(seed, fold, nfolds)}}}}, 그리고 파싱 실패 파일 목록.
+    0바이트 파일은 누락으로 취급하고 scan.empty(모듈 전역)에 따로 모은다."""
     out = {sd: defaultdict(lambda: defaultdict(set)) for sd in subdirs}
     unmatched = defaultdict(list)
+    empty = EMPTY_FILES
+    empty.clear()
     for sd in subdirs:
         d = root / sd
         if not d.is_dir():
@@ -67,6 +71,10 @@ def scan(root: Path, subdirs: list[str]):
             parsed = parse_filename(f.name)
             if parsed is None:
                 unmatched[sd].append(f.name)
+                continue
+            if f.stat().st_size == 0:
+                # 잡이 중간에 죽으면 0바이트 CSV가 남는다 — 존재만 보고 완료로 세면 안 된다.
+                empty[sd].append(f.name)
                 continue
             tag, ckpt, seed, fold, nfolds = parsed
             out[sd][tag][ckpt].add((seed, fold, nfolds))

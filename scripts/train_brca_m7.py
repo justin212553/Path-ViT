@@ -112,8 +112,16 @@ def main():
              "event rate 13.9%) 3개 기관. 단일 기관 코드도 가능. 'none'이면 external 없음. "
              "M1~M7 전부 반드시 동일 값을 써야 비교가 성립한다(scripts/brca_common.py 참조).",
     )
+    parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): RNA z-score와 clinical 정규화 통계(와 ClusterPool "
+             "모델이면 centroid)를 이 seed x fold의 train split 환자만으로 계산(scripts/brca_common.py::"
+             "brca_fold_safe). 파일명 태그(ext_tag)에 _FS가 붙는다.",
+    )
     args = parser.parse_args()
     external_tss, ext_tag = resolve_external_tss(args.external_tss)
+    if args.fold_safe:
+        ext_tag += "_FS"
 
     cfg = Config()
     cfg.data.seed = cfg.light.seed = args.seed
@@ -178,6 +186,11 @@ def main():
     else:
         rna_df = load_rna_matrix(gene_ids)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
+    if args.fold_safe:
+        from scripts.brca_common import brca_fold_safe
+        rna_df, age_mean, age_std, _fs_stage = brca_fold_safe(cases, rna_df, stage_stats is not None)
+        if stage_stats is not None:
+            stage_stats = _fs_stage
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")

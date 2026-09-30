@@ -225,10 +225,22 @@ def main():
     )
     parser.add_argument("--nll-n-bins", type=int, default=4)
     parser.add_argument("--nll-cox-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--fold-safe", action="store_true",
+        help="2026-09-29(리뷰 지적 — 전처리 leakage): RNA z-score와 clinical 정규화 통계(와 ClusterPool "
+             "모델이면 centroid)를 이 seed x fold의 train split 환자만으로 계산(scripts/brca_common.py::"
+             "brca_fold_safe). 파일명 태그(ext_tag)에 _FS가 붙는다.",
+    )
+    parser.add_argument("--cluster-k", type=int, default=11,
+                         help="--fold-safe일 때 fold별로 적합할 centroid 개수(기본 11, 아니면 태그에 _K{k}).")
     args = parser.parse_args()
     if args.self_attn_fusion and args.no_coattn:
         raise ValueError("--self-attn-fusion과 --no-coattn은 서로 다른 fusion ablation이라 동시 사용을 지원하지 않습니다.")
     external_tss, ext_tag = resolve_external_tss(args.external_tss)
+    if args.fold_safe:
+        ext_tag += "_FS"
+    if args.fold_safe and args.cluster_k != 11:
+        ext_tag += f"_K{args.cluster_k}"
 
     cfg = Config()
     cfg.data.seed = cfg.train.seed = args.seed
@@ -312,6 +324,15 @@ def main():
         rna_df = load_rna_matrix(gene_ids)
     manifest = pd.read_csv(MANIFEST_PATH)
     age_mean, age_std = age_stats_from_csv(CLINICAL_PATH)
+    if args.fold_safe:
+        from scripts.brca_common import brca_fold_safe
+        rna_df, age_mean, age_std, _fs_stage = brca_fold_safe(cases, rna_df, stage_stats is not None)
+        if stage_stats is not None:
+            stage_stats = _fs_stage
+    centroids_path = args.cluster_centroids_path
+    if args.fold_safe:
+        from scripts.brca_common import fit_brca_fold_safe_centroids
+        centroids_path = fit_brca_fold_safe_centroids(cases, manifest, k=args.cluster_k)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
@@ -348,7 +369,7 @@ def main():
         use_staging=args.clinical_staging, stage_stats=stage_stats,
         cluster_pool=args.cluster_pool, cluster_pool_after_vit=args.cluster_pool_after_vit,
         cluster_pool_temperature=args.cluster_pool_temperature,
-        cluster_centroids_path=args.cluster_centroids_path if args.cluster_pool else None,
+        cluster_centroids_path=centroids_path if args.cluster_pool else None,
         self_attn_fusion=args.self_attn_fusion,
         use_coattn=not args.no_coattn,
         surv_n_classes=(args.nll_n_bins if args.surv_loss in ("nll_surv", "both") else 1),
