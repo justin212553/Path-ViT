@@ -62,6 +62,9 @@ case "$MODEL" in
   M7NOCNV)   CMD="train_light.py --M7 $RNA --combine-mode cox_add $CLIN --clinical-mutation" ;;
   # --- mutation 분리 [정찬권 #1,#6, 결정 A] ---
   M4NOMUT)   CMD="train.py --PMA $WSI --combine-mode cox_add $RNA --use-cnv $CLIN" ;;
+  # --- 진단(2026-10-04): fold-safe 유지, centroid만 기존 고정 파일 — co-attention 이득 감소 원인 분리 ---
+  M4FIXC)    CMD="train.py --PMA $WSI --fs-fixed-centroids --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
+  M4SAFIXC)  CMD="train.py --PMA $WSI --fs-fixed-centroids --self-attn-fusion --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
   *) echo "unknown MODEL=$MODEL"; exit 1 ;;
 esac
 

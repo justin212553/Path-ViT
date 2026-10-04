@@ -1725,6 +1725,12 @@ def _parse_args() -> argparse.Namespace:
              "기본(끔)은 기존 동작(코호트 전체 통계, 고정 centroid 파일). 켜면 태그에 _FS가 붙는다.",
     )
     parser.add_argument(
+        "--fs-fixed-centroids", action="store_true",
+        help="2026-10-04(진단): --fold-safe와 함께 — RNA/CNV/clinical 통계는 fold train만으로 하되, "
+             "centroid만 기존 고정 파일(data/cluster_centroids_{backbone}.pt)을 "
+             "쓴다(uni2native 기본 파일은 TCGA 전체 203슬라이드 비지도 적합, CPTAC 미포함). fold-safe 후 co-attention 이득 감소가 centroid 때문인지 분리하기 위함. 태그에 _FIXC.",
+    )
+    parser.add_argument(
         "--cluster-k", type=int, default=11,
         help="--fold-safe --cluster-pool일 때 fold별로 적합할 centroid 개수(기본 11). 11이 아니면 "
              "태그에 _K{k}가 붙는다.",
@@ -2105,6 +2111,8 @@ def main():
         raise ValueError("--self-attn-fusion은 --PMA에서만 사용 가능합니다.")
     if args.fold_safe and args.cluster_centroids_path is not None:
         raise ValueError("--fold-safe는 fold별 centroid를 직접 적합하므로 --cluster-centroids-path와 같이 쓸 수 없습니다.")
+    if args.fs_fixed_centroids and not (args.fold_safe and args.cluster_pool):
+        raise ValueError("--fs-fixed-centroids는 --fold-safe --cluster-pool과 함께만 의미가 있습니다.")
     if args.self_attn_fusion and args.no_coattn:
         raise ValueError("--self-attn-fusion과 --no-coattn은 서로 다른 fusion ablation이라 동시 사용을 지원하지 않습니다.")
     if args.porpoise_meanpool and not args.PORPOISE:
@@ -2475,6 +2483,8 @@ def main():
         model_prefix += "_FS"
         if args.cluster_pool and args.cluster_k != 11:
             model_prefix += f"_K{args.cluster_k}"
+        if args.fs_fixed_centroids:
+            model_prefix += "_FIXC"
     if args.restrict_cohort_file is not None:
         model_prefix += "_COH" + Path(args.restrict_cohort_file).stem.upper().replace("COHORT_", "")
     if args.cluster_centroids_path is not None:
@@ -2800,7 +2810,7 @@ def main():
                 margin_stats = fs["margin"]
             if mutation_stats is not None:
                 mutation_stats = fs["mutation"]
-        if args.cluster_pool:
+        if args.cluster_pool and not args.fs_fixed_centroids:
             args.cluster_centroids_path = fit_fold_safe_centroids(train_ds, k=args.cluster_k)
     # [2026-08-04] val과 동일한 이유(--cache-val-tiles) — external은 보통 run당 1회만 평가되지만
     # (val처럼 매 epoch 반복은 아님), 그 1회가 반대 코호트 전체라 디스크에서 새로 읽으면 여전히

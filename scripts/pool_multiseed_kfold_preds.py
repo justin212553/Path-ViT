@@ -138,6 +138,10 @@ def main():
              "계산한다. 0(기본)이면 생략.",
     )
     parser.add_argument(
+        "--union-seeds", action="store_true",
+        help="seed 교집합 대신 합집합으로 앙상블(환자별 예측 있는 seed만 평균) — BRCA 기관 단위 CV용.",
+    )
+    parser.add_argument(
         "--include-final-epoch", action="store_true",
         help="2026-09-07: fold마다 best-checkpoint 예측과 _FINALEPOCH_ 예측(early stopping 없이 "
              "끝까지 학습한 가중치)을 환자 단위로 평균 낸 뒤 그 fold의 예측으로 쓴다 — k-fold라 "
@@ -176,7 +180,10 @@ def main():
     # seed 간 case_id 집합이 동일한지(같은 코호트를 매번 전부 커버했는지) 확인
     case_sets = [set(p.keys()) for p in per_seed_preds.values()]
     common_cases = set.intersection(*case_sets)
-    if any(cs != common_cases for cs in case_sets):
+    if args.union_seeds:
+        # 기관 단위 CV: seed마다 internal test 환자가 달라 교집합이 크게 줄어든다 — 합집합 사용.
+        common_cases = set.union(*case_sets)
+    elif any(cs != common_cases for cs in case_sets):
         missing = set.union(*case_sets) - common_cases
         print(f"  [경고] 일부 case가 모든 seed에 있지 않음({len(missing)}명) — "
               f"교집합({len(common_cases)}명)만 앙상블에 사용")
@@ -189,6 +196,8 @@ def main():
         seed_risks = []
         ref_time, ref_event = None, None
         for seed in seeds:
+            if cid not in per_seed_preds[seed]:
+                continue
             r, t, e = per_seed_preds[seed][cid]
             seed_risks.append(r)
             if ref_time is None:

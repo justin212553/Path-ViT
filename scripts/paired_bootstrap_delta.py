@@ -35,6 +35,7 @@ p-value = 2 * min(P(delta<=0), P(delta>=0)) — 양측검정, delta 분포가 �
         --seeds 84,126 --n-folds 5 --bootstrap 2000
 """
 import argparse
+import functools
 import csv
 import sys
 from collections import defaultdict
@@ -157,18 +158,22 @@ def _load_run_predictions(pred_dir: Path, dataset: str, model: str, seed: int, f
 
 
 def _ensemble_internal(pred_dir: Path, dataset: str, model: str, seeds: list[int], n_folds: int,
-                        include_final_epoch: bool = False):
+                        include_final_epoch: bool = False, union_seeds: bool = False):
     per_seed_preds = {
         seed: _load_seed_predictions(pred_dir, dataset, model, seed, n_folds, include_final_epoch)
         for seed in seeds
     }
     case_sets = [set(p.keys()) for p in per_seed_preds.values()]
-    common = sorted(set.intersection(*case_sets))
+    # union_seeds: 기관 단위 CV(--external-tss instcv)는 seed마다 internal test 환자가 달라 교집합이
+    # 크게 줄어든다 — 환자별로 예측이 있는 seed만 평균(k-fold에선 합집합 == 교집합이라 결과 동일).
+    common = sorted(set.union(*case_sets) if union_seeds else set.intersection(*case_sets))
     risks, times, events = [], [], []
     for cid in common:
         seed_risks = []
         ref_time = ref_event = None
         for seed in seeds:
+            if cid not in per_seed_preds[seed]:
+                continue
             r, t, e = per_seed_preds[seed][cid]
             seed_risks.append(r)
             if ref_time is None:
@@ -269,6 +274,11 @@ def main():
                          help="예측 CSV가 있는 루트 디렉터리(기본: .logs, "
                               "paper/final_preds_snapshot 스냅샷을 쓰려면 이 값으로 지정)")
     parser.add_argument(
+        "--union-seeds", action="store_true",
+        help="internal 앙상블에서 seed 교집합 대신 합집합(환자별 예측 있는 seed만 평균). 기관 단위 CV "
+             "(BRCA --external-tss instcv)처럼 seed마다 internal test 환자가 다를 때 필요.",
+    )
+    parser.add_argument(
         "--include-final-epoch", action="store_true",
         help="2026-09-07: pool_multiseed_kfold_preds.py/_external_preds.py와 동일 — (seed,fold)마다 "
              "best-checkpoint 예측과 _FINALEPOCH_ 예측을 환자 단위로 평균 낸 뒤 사용.",
@@ -279,7 +289,7 @@ def main():
     pred_root = Path(args.pred_root) if args.pred_root else _ROOT / ".logs"
     if args.split == "internal":
         pred_dir = pred_root / "kfold_preds"
-        ensemble_fn = _ensemble_internal
+        ensemble_fn = functools.partial(_ensemble_internal, union_seeds=args.union_seeds)
     else:
         pred_dir = pred_root / "external_preds"
         ensemble_fn = _ensemble_external
