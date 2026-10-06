@@ -48,6 +48,9 @@ case "$MODEL" in
   M7)    CMD="scripts.train_brca_m7 --gene-selection consistency --clinical-staging --clinical-lr-mult 100" ;;
   M3SA)  CMD="$PMA --self-attn-fusion --no-clinical" ;;
   M4SA)  CMD="$PMA --self-attn-fusion --clinical-staging --clinical-lr-mult 100" ;;
+  # K 민감도(2026-10-04): fold-safe + 기관 단위 CV 조건에서 K=5/20 재검증
+  M4K5)  CMD="$PMA --cluster-k 5 --clinical-staging --clinical-lr-mult 100" ;;
+  M4K20) CMD="$PMA --cluster-k 20 --clinical-staging --clinical-lr-mult 100" ;;
   *) echo "unknown MODEL=$MODEL"; exit 1 ;;
 esac
 

@@ -64,6 +64,9 @@ case "$MODEL" in
   M4NOMUT)   CMD="train.py --PMA $WSI --combine-mode cox_add $RNA --use-cnv $CLIN" ;;
   # --- 진단(2026-10-04): fold-safe 유지, centroid만 기존 고정 파일 — co-attention 이득 감소 원인 분리 ---
   M4FIXC)    CMD="train.py --PMA $WSI --fs-fixed-centroids --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
+  # --- K 민감도(2026-10-04): fold-safe 조건에서 K=5/20 재검증 (기존은 leaky 1시드) ---
+  M4K5)      CMD="train.py --PMA $WSI --cluster-k 5 --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
+  M4K20)     CMD="train.py --PMA $WSI --cluster-k 20 --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
   M4SAFIXC)  CMD="train.py --PMA $WSI --fs-fixed-centroids --self-attn-fusion --combine-mode cox_add $RNA --use-cnv $CLIN --clinical-mutation" ;;
   *) echo "unknown MODEL=$MODEL"; exit 1 ;;
 esac

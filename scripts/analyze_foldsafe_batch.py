@@ -42,6 +42,9 @@ PAAD = {
     "M6-noCNV": "M6_PDACCONS1500_NLLSURV4_NLLCOX1_FS_COHN110",
     "M7-noCNV": "M7_PDACCONS1500_STG_R_MUT_COX_ADD_CLR100_NLLSURV4_NLLCOX1_FS_COHN110",
     "M4-noMUT": "PMA_uni2native_PDACCONS1500_CNV_SS_STG_R_CLUSTERPOOL_FS_COHN110_COX_ADD_CLR100_NLLSURV4_NLLCOX1",
+    # 2026-10-04 진단: fold-safe 유지, centroid만 기존 고정 파일(TCGA 203슬라이드 비지도 적합)
+    "M4-FIXC": "PMA_uni2native_PDACCONS1500_CNV_SS_STG_R_MUT_CLUSTERPOOL_FS_FIXC_COHN110_COX_ADD_CLR100_NLLSURV4_NLLCOX1",
+    "M4-SA-FIXC": "PMA_uni2native_PDACCONS1500_CNV_SS_STG_R_MUT_SELFATTNFUSION_CLUSTERPOOL_FS_FIXC_COHN110_COX_ADD_CLR100_NLLSURV4_NLLCOX1",
 }
 BRCA = {
     "M1": "BRCA_M1_CLUSTERPOOL_NLLSURV4_NLLCOX1_INSTCV_FS",
@@ -64,6 +67,8 @@ PAAD_EXTRA_PAIRS = [
     ("CNV", "M3-noCNV", "M3"), ("CNV", "M4-noCNV", "M4"), ("CNV", "M6-noCNV", "M6"), ("CNV", "M7-noCNV", "M7"),
     ("RNA-seq only", "M1", "M3-noCNV"), ("RNA-seq only", "M5", "M7-noCNV"),
     ("mutation", "M4-noMUT", "M4"),
+    ("co-attention (FIXC)", "M4-SA-FIXC", "M4-FIXC"),
+    ("centroid fold별->고정", "M4", "M4-FIXC"), ("centroid fold별->고정", "M4-SA", "M4-SA-FIXC"),
 ]
 COHORTS = {
     "PAAD": dict(models=PAAD, internal="tcga", external="cptac", union=False,

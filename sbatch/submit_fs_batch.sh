@@ -6,6 +6,8 @@
 #   bash sbatch/submit_fs_batch.sh paad       # PAAD만
 #   bash sbatch/submit_fs_batch.sh brca M4 M4SA   # BRCA의 특정 모델만
 #   bash sbatch/submit_fs_batch.sh paad M4FIXC M4SAFIXC   # 2026-10-04 고정 centroid 진단(목록 밖이라 명시 필요)
+#   bash sbatch/submit_fs_batch.sh paad M4K5 M4K20        # 2026-10-04 K 민감도(fold-safe) — PAAD
+#   bash sbatch/submit_fs_batch.sh brca M4K5 M4K20        # 2026-10-04 K 민감도(fold-safe, 기관 단위 CV) — BRCA
 #
 # 일부 task만 다시 돌릴 때(예: seed 84 fold 2 = index 2):
 #   sbatch --array=2 --job-name=FS-PAAD-M4 --export=ALL,MODEL=M4 sbatch/fs_paad_array.sh
@@ -18,8 +20,9 @@ shift || true
 ONLY=("$@")
 
 PAAD_MODELS=(M1 M2 M3 M4 M5 M6 M7 M3SA M4SA M3NOCNV M4NOCNV M6NOCNV M7NOCNV M4NOMUT)
-PAAD_EXTRA=(M4FIXC M4SAFIXC)
+PAAD_EXTRA=(M4FIXC M4SAFIXC M4K5 M4K20)
 BRCA_MODELS=(M1 M2 M3 M4 M5 M6 M7 M3SA M4SA)
+BRCA_EXTRA=(M4K5 M4K20)
 # WSI 없는 모델은 가벼운 자원으로
 LIGHT=" M5 M6 M7 M6NOCNV M7NOCNV "
 
@@ -52,4 +55,7 @@ if [ "$WHICH" = all ] || [ "$WHICH" = paad ]; then
 fi
 if [ "$WHICH" = all ] || [ "$WHICH" = brca ]; then
   for m in "${BRCA_MODELS[@]}"; do want "$m" && submit brca "$m"; done
+  if [ ${#ONLY[@]} -gt 0 ]; then
+    for m in "${BRCA_EXTRA[@]}"; do want "$m" && submit brca "$m"; done
+  fi
 fi
