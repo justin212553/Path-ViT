@@ -1,12 +1,13 @@
 """
-2026-10-10: 새 프로토콜(fold-safe, 5 seeds) 기준 published baseline 비교 — PAAD는 PORPOISE(공식 코드·
-공식 유전자 세트·공식 코호트 166명과 공식 5-fold split), BRCA는 MMP(공식 코드·공식 RNA, 우리 기관 단위
-CV split). 예측은 scripts/export_baseline_preds.py가 .logs에 써둔 CSV.
+2026-10-10: 새 프로토콜(fold-safe, 5 seeds) 기준 published baseline 비교(사용자 결정 C안).
+- PAAD PORPOISE: 공식 코드·레시피·WSI 스펙, 우리와 같은 코호트(110/136)·같은 seed별 fold·같은 RNA
+  (pdac_consistency_1500 raw log2, PORPOISE 자체 fold-train scaler) — scripts/prepare_porpoise_paad_n110.py
+- BRCA MMP: 공식 코드·공식 Hallmark RNA(아키텍처를 정의하는 pathway 패널이라 유지), 우리 기관 단위 CV split
+예측은 scripts/export_baseline_preds.py가 .logs에 써둔 CSV.
 
 - 우리 모델(M4, M3, M7, M4-SA): analyze_foldsafe_batch.load (best+final 평균)
 - baseline: 마지막 epoch 하나뿐이라 include_final_epoch=False. MMP internal은 seed 합집합(기관 단위 CV)
-- 비교는 두 모델 모두 예측이 있는 환자 교집합에서 paired bootstrap(Harrell, Uno). PAAD internal은
-  PORPOISE 공식 코호트(166명)와 우리 N=110 코호트의 교집합 — 학습 코호트가 서로 다르다는 점을 함께 보고
+- 비교는 두 모델 모두 예측이 있는 환자 교집합에서 paired bootstrap(Harrell, Uno)
 - 공정성 메모: PORPOISE·MMP는 임상 입력이 없다 → 같은 입력 조합인 M3(WSI+RNA)와의 비교가 구조 비교,
   M4와의 비교는 "우리 전체 모델 vs 공개 모델" 비교
 
@@ -28,11 +29,12 @@ from analyze_uno_tdauc import TAU, harrell_c, uno_c, align  # noqa: E402
 from paired_bootstrap_delta import _ensemble_internal, _ensemble_external  # noqa: E402
 
 BASELINES = {
-    "PAAD": dict(name="PORPOISE", tag="PORPOISE_OFFICIALGENE_MMF", internal="tcga", external="cptac", union=False),
+    "PAAD": dict(name="PORPOISE", tag="PORPOISE_N110_MMF", internal="tcga", external="cptac", union=False),
     "BRCA": dict(name="MMP", tag="MMP_INSTCV", internal="brca", external="brca", union=True),
 }
 OURS = {"PAAD": PAAD, "BRCA": BRCA}
-COMPARE = ["M3", "M4", "M4-SA", "M7"]
+# PORPOISE·MMP는 임상 입력이 없다 — 같은 입력 조합 비교: PAAD M3-noCNV(WSI+RNA, PORPOISE와 RNA 입력까지 동일), BRCA M3
+COMPARE = {"PAAD": ["M3-noCNV", "M3", "M4", "M4-SA", "M7"], "BRCA": ["M3", "M4", "M4-SA", "M7"]}
 
 
 def load_baseline(cohort, split, seeds):
@@ -62,7 +64,7 @@ def main():
     L = ["# Published baseline 비교 (새 프로토콜, 2026-10-10)", "",
          f"baseline seeds={seeds}, 우리 모델 5 seeds x 5 folds(best+final 평균). 환자 교집합 paired bootstrap "
          f"{args.n_boot}회. Uno tau PAAD 3년, BRCA 5년. PORPOISE·MMP는 임상 입력이 없어 M3(WSI+RNA)가 같은 입력 조합.",
-         "PAAD internal은 PORPOISE 공식 코호트(166명)와 우리 N=110의 교집합 — 학습 코호트가 서로 다름.", ""]
+         "PAAD는 코호트·fold·RNA 입력이 우리 모델과 같아 아키텍처 차이만 비교됨(C안).", ""]
     for cohort, b in BASELINES.items():
         L += [f"## {cohort} — {b['name']} -> 우리 모델 (Δ = 우리 − {b['name']})", "",
               "| 비교 | split | n | baseline Harrell | 우리 Harrell | Harrell Δ [95% CI] p | Uno Δ [95% CI] p |",
@@ -74,7 +76,7 @@ def main():
             except (FileNotFoundError, ValueError) as ex:
                 L.append(f"| — | {split} | — | 예측 없음: {ex} | | | |")
                 continue
-            for name in COMPARE:
+            for name in COMPARE[cohort]:
                 O = load(cohort, split, OURS[cohort][name])
                 ra, rb, t, e = align(B, (O[0], O[1], O[2], O[3]))
                 t = t.astype(float)

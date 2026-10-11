@@ -8,10 +8,10 @@ case_id,risk,OS_time,OS_event)으로 내보낸다. 그러면 analyze_*.py와 pai
     python scripts/export_baseline_preds.py porpoise --seeds 84,126,42,168,210
     python scripts/export_baseline_preds.py mmp --seeds 84,126,42,168,210
 
-- porpoise: porpoise/results_official_geneset_mmf/**/*_s{seed}/split_latest_val_{fold}_results.pkl
-  (공식 5-fold split의 held-out = internal) -> kfold_preds/tcga_PORPOISE_OFFICIALGENE_MMF_*.csv.
-  external(CPTAC)은 eval_porpoise_official_geneset_*_external_cptac*_hpc.sh가 이미 같은 형식으로
-  external_preds/cptac_PORPOISE_OFFICIALGENE_MMF_*.csv에 쓰므로 여기서는 건드리지 않는다.
+- porpoise: porpoise/results_n110_mmf/**/*_s{seed}/split_latest_val_{fold}_results.pkl
+  (우리와 같은 fold 배정의 held-out = internal) -> kfold_preds/tcga_PORPOISE_N110_MMF_*.csv.
+  external(CPTAC)은 sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh가 이미 같은 형식으로
+  external_preds/cptac_PORPOISE_N110_MMF_*.csv에 쓰므로 여기서는 건드리지 않는다.
 - mmp: mmp/src/results/BRCA_INSTCV_officialRNA_seed{s}_k{f}::PANTHER_default::{feat}/**/{test,external}_results.pkl
   -> kfold_preds/brca_MMP_INSTCV_*.csv (test) / external_preds/brca_MMP_INSTCV_*.csv (external)
 
@@ -30,7 +30,7 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 
 from pool_mmp_brca_kfold import _load_dump  # noqa: E402
 
-PORPOISE_RESULTS = _ROOT / "porpoise" / "results_official_geneset_mmf"
+PORPOISE_RESULTS = _ROOT / "porpoise" / "results_n110_mmf"  # C안: 같은 코호트·fold·RNA (prepare_porpoise_paad_n110.py)
 MMP_RESULTS = _ROOT / "mmp" / "src" / "results"
 MMP_FEAT = "extracted-vit_large_patch16_224.dinov2.uni_mass100k"
 N_FOLDS = 5
@@ -55,7 +55,7 @@ def export_porpoise(seeds, out_root: Path):
             with open(hits[0], "rb") as f:
                 res = pickle.load(f)
             preds = {cid: (float(d["risk"]), float(d["survival"]), 1.0 - float(d["censorship"])) for cid, d in res.items()}
-            out = out_root / "kfold_preds" / f"tcga_PORPOISE_OFFICIALGENE_MMF_seed{seed}_fold{fold}of{N_FOLDS}.csv"
+            out = out_root / "kfold_preds" / f"tcga_PORPOISE_N110_MMF_seed{seed}_fold{fold}of{N_FOLDS}.csv"
             _write(out, preds)
             print(f"  {out.name}: {len(preds)}명")
 
