@@ -27,6 +27,14 @@ porpoise/datasets_csv/tcga_paad_all_clean.csv.zip을 덮어써야 한다. 기존
     porpoise/splits/5foldcv_n110/tcga_paad_seed{seed}/splits_{fold}.csv
 
 사용법(HPC, repo 루트): python -m scripts.prepare_porpoise_paad_n110
+
+2026-10-11 --official-geneset (시스템 수준 비교): PORPOISE 공식 입력(datasets_csv_mutsig/tcga_paad_all_clean.csv.zip,
+RNA 1553 + CNV 82 + mutation 14, 166명)을 그대로 쓰고 split만 우리 프로토콜(같은 seed별 fold 배정, 5x5)로 만든다.
+데이터 CSV는 건드리지 않는다. 공식 CSV는 우리 TCGA 110명 중 103명만 있어 배정은 110명으로 계산한 뒤 공식 CSV에
+없는 환자만 뺀다(나머지 환자의 fold는 우리와 동일). 공식 CSV의 나머지 63명은 split에 없으니 학습에 안 쓰인다.
+CPTAC external은 2026-09-14 prepare_porpoise_cptac_official_geneset.py 산출물(CNV 82개 neutral, mutation 10개 0
+근사 — 공식 입력이 CPTAC에 없어 생기는 불가피한 근사, Methods에 명시) 그대로.
+    python -m scripts.prepare_porpoise_paad_n110 --official-geneset
 """
 import shutil
 import zipfile
@@ -42,6 +50,7 @@ COHORT = Path("data/cohort_n110.txt")
 SEEDS = [84, 126, 42, 168, 210]
 N_FOLDS = 5
 WHICH_SPLITS = "5foldcv_n110"
+WHICH_SPLITS_OFFICIAL = "5foldcv_n110official"
 SRC = {
     "tcga": dict(rna="data/rna_tcga_raw_log2.csv", clin="data/clinical_tcga.csv",
                  pt="data/porpoise_style_features/tcga/pt_files"),
@@ -121,13 +130,17 @@ def main():
     print(f"   TCGA {len(tcga_df)}행(슬라이드) / CPTAC {len(cptac_df)}행 저장")
 
     print("2) split 생성 — 우리 _kfold_case_split과 동일 배정")
+    write_splits(WHICH_SPLITS, tcga_cases, set(tcga_have))
+    print("\n완료. 학습: sbatch sbatch/run_porpoise_n110_mmf_5seed_array_hpc.sh")
+
+
+def write_splits(which_splits, tcga_cases, have):
     clin = pd.read_csv(SRC["tcga"]["clin"]).set_index("case_id")
-    # 배정은 반드시 코호트 110명 전체로 계산(우리 학습과 같은 case_df) — feature가 없어 빠진 환자는
-    # 배정 후 CSV에서만 제외해야 나머지 환자의 fold가 우리와 같게 유지된다
+    # 배정은 반드시 코호트 110명 전체로 계산(우리 학습과 같은 case_df) — 입력이 없어 빠진 환자는
+    # 배정 후에만 제외해야 나머지 환자의 fold가 우리와 같게 유지된다
     case_df = pd.DataFrame({"dataset": "tcga", "OS_event": clin.loc[tcga_cases, "OS_event"].values}, index=tcga_cases)
-    have = set(tcga_have)
     for seed in SEEDS:
-        d = PORPOISE_ROOT / "splits" / WHICH_SPLITS / f"tcga_paad_seed{seed}"
+        d = PORPOISE_ROOT / "splits" / which_splits / f"tcga_paad_seed{seed}"
         d.mkdir(parents=True, exist_ok=True)
         for fold in range(N_FOLDS):
             sp = _kfold_case_split(case_df, seed, N_FOLDS, fold)
@@ -136,8 +149,23 @@ def main():
             n = max(len(tr), len(te))
             pd.DataFrame({"train": tr + [""] * (n - len(tr)), "val": te + [""] * (n - len(te))}).to_csv(d / f"splits_{fold}.csv")
         print(f"   seed={seed}: 마지막 fold train/held-out {len(tr)}/{len(te)}")
-    print("\n완료. 학습: sbatch sbatch/run_porpoise_n110_mmf_5seed_array_hpc.sh")
+
+
+def main_official():
+    """--official-geneset: 공식 입력 CSV는 그대로, split만 우리 프로토콜로(모듈 docstring 참조)."""
+    cohort = set(COHORT.read_text().split())
+    tcga_cases = sorted(c for c in cohort if c.startswith("TCGA"))
+    official = pd.read_csv(PORPOISE_ROOT / "datasets_csv_mutsig" / "tcga_paad_all_clean.csv.zip",
+                           usecols=["case_id", "slide_id"])
+    slides = slides_for("tcga", tcga_cases)
+    have = set(tcga_cases) & set(official["case_id"]) & set(slides["case_id"])
+    print(f"1) 공식 입력 CSV {official.case_id.nunique()}명 중 우리 TCGA 코호트와 겹치고 ResNet50 feature가 있는 "
+          f"환자 {len(have)}명 — 빠지는 환자 {sorted(set(tcga_cases) - have)}")
+    print("2) split 생성 — 우리 _kfold_case_split과 동일 배정")
+    write_splits(WHICH_SPLITS_OFFICIAL, tcga_cases, have)
+    print("\n완료. 학습: sbatch sbatch/run_porpoise_official_n110_mmf_5seed_array_hpc.sh")
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    main_official() if "--official-geneset" in sys.argv[1:] else main()

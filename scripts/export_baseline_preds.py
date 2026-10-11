@@ -31,6 +31,15 @@ sys.path.insert(0, str(_ROOT / "scripts"))
 from pool_mmp_brca_kfold import _load_dump  # noqa: E402
 
 PORPOISE_RESULTS = _ROOT / "porpoise" / "results_n110_mmf"  # C안: 같은 코호트·fold·RNA (prepare_porpoise_paad_n110.py)
+PORPOISE_TAG = "PORPOISE_N110_MMF"
+PORPOISE_SBATCH = ("run_porpoise_n110_mmf_5seed_array_hpc.sh", "eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh")
+# 2026-10-11: 시스템 수준 비교용 — 공식 입력(datasets_csv_mutsig), 프로토콜만 우리와 동일. which="porpoise_official"
+PORPOISE_VARIANTS = {
+    "porpoise": ("results_n110_mmf", "PORPOISE_N110_MMF", PORPOISE_SBATCH),
+    "porpoise_official": ("results_official_n110_mmf", "PORPOISE_OFFICIAL_N110_MMF",
+                          ("run_porpoise_official_n110_mmf_5seed_array_hpc.sh",
+                           "eval_porpoise_official_n110_mmf_external_cptac_5seed_hpc.sh")),
+}
 MMP_RESULTS = _ROOT / "mmp" / "src" / "results"
 MMP_FEAT = "extracted-vit_large_patch16_224.dinov2.uni_mass100k"
 N_FOLDS = 5
@@ -46,28 +55,51 @@ def _write(path: Path, preds: dict):
 
 
 def export_porpoise(seeds, out_root: Path):
+    """2026-10-11: 첫 누락에서 멈추지 않고 가능한 것은 전부 내보낸 뒤, 문제 조합을 원인과 함께 모아 출력."""
     import pickle
+    problems = []
     for seed in seeds:
         for fold in range(N_FOLDS):
             hits = sorted(PORPOISE_RESULTS.glob(f"**/*_s{seed}/split_latest_val_{fold}_results.pkl"))
             if len(hits) != 1:
-                raise FileNotFoundError(f"PORPOISE seed={seed} fold={fold}: pkl {len(hits)}개(1개여야 함) — {hits}")
+                problems.append((seed, fold, f"pkl {len(hits)}개(1개여야 함)", [str(h) for h in hits]))
+                continue
             with open(hits[0], "rb") as f:
                 res = pickle.load(f)
             preds = {cid: (float(d["risk"]), float(d["survival"]), 1.0 - float(d["censorship"])) for cid, d in res.items()}
-            out = out_root / "kfold_preds" / f"tcga_PORPOISE_N110_MMF_seed{seed}_fold{fold}of{N_FOLDS}.csv"
+            out = out_root / "kfold_preds" / f"tcga_{PORPOISE_TAG}_seed{seed}_fold{fold}of{N_FOLDS}.csv"
             _write(out, preds)
             print(f"  {out.name}: {len(preds)}명")
+    _report(problems)
 
 
 def export_mmp(seeds, out_root: Path):
+    problems = []
     for seed in seeds:
         for fold in range(N_FOLDS):
             for split, sub in (("test", "kfold_preds"), ("external", "external_preds")):
-                preds = _load_dump(MMP_RESULTS, "BRCA_INSTCV_officialRNA", MMP_FEAT, seed, fold, split)
+                try:
+                    preds = _load_dump(MMP_RESULTS, "BRCA_INSTCV_officialRNA", MMP_FEAT, seed, fold, split)
+                except FileNotFoundError as ex:
+                    problems.append((seed, fold, f"{split} pkl 없음", [str(ex)]))
+                    continue
                 out = out_root / sub / f"brca_MMP_INSTCV_seed{seed}_fold{fold}of{N_FOLDS}.csv"
                 _write(out, preds)
                 print(f"  {sub}/{out.name}: {len(preds)}명")
+    _report(problems)
+
+
+def _report(problems):
+    if not problems:
+        print("\n전부 내보냄.")
+        return
+    print(f"\n!! 내보내지 못한 조합 {len(problems)}개 (array index = seed_idx*5 + fold):")
+    for seed, fold, why, detail in problems:
+        print(f"   seed={seed} fold={fold}: {why}")
+        for d in detail:
+            print(f"      {d}")
+    print("pkl이 2개 이상이면 중단됐던 옛 실행의 폴더가 남은 것 — 둘 중 최신(수정 시각) 폴더가 맞는지 확인 후 옛 것을 지우고 다시 export.")
+    sys.exit(1)
 
 
 def check(which, seeds, out_root: Path):
@@ -90,7 +122,7 @@ def check(which, seeds, out_root: Path):
             if which == "porpoise":
                 st = [any(root.glob(f"**/*_s{seed}/s_{fold}_checkpoint.pt")),
                       any(root.glob(f"**/*_s{seed}/split_latest_val_{fold}_results.pkl")),
-                      (out_root / "external_preds" / f"cptac_PORPOISE_N110_MMF_seed{seed}_fold{fold}of{N_FOLDS}.csv").exists()]
+                      (out_root / "external_preds" / f"cptac_{PORPOISE_TAG}_seed{seed}_fold{fold}of{N_FOLDS}.csv").exists()]
             else:
                 split_dir = _ROOT / "mmp" / "src" / "splits" / "survival" / f"TCGA_BRCA_k{fold}_seed{seed}_instcv"
                 top = root / f"BRCA_INSTCV_officialRNA_seed{seed}_k{fold}::PANTHER_default::{MMP_FEAT}"
@@ -111,15 +143,15 @@ def check(which, seeds, out_root: Path):
         tr = sorted({i for i, _, _ in bad["checkpoint"] + bad["internal pkl"]})
         ev = sorted({i for i, _, _ in bad["external csv"]})
         if tr:
-            print(f"재학습: T=$(sbatch --parsable --array={','.join(map(str, tr))} sbatch/run_porpoise_n110_mmf_5seed_array_hpc.sh)")
+            print(f"재학습: T=$(sbatch --parsable --array={','.join(map(str, tr))} sbatch/{PORPOISE_SBATCH[0]})")
             print(f"  그 뒤 external 평가: sbatch --dependency=aftercorr:$T --array={','.join(map(str, tr))} "
-                  "sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh")
+                  f"sbatch/{PORPOISE_SBATCH[1]}")
             rest = [i for i in ev if i not in tr]
             if rest:
                 print(f"  (학습은 됐고 external만 빈 것: sbatch --array={','.join(map(str, rest))} "
-                      "sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh)")
+                      f"sbatch/{PORPOISE_SBATCH[1]})")
         elif ev:
-            print(f"external 평가만 다시: sbatch --array={','.join(map(str, ev))} sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh")
+            print(f"external 평가만 다시: sbatch --array={','.join(map(str, ev))} sbatch/{PORPOISE_SBATCH[1]}")
     else:
         pr = sorted({i for i, _, _ in bad["prototype"]})
         sv = sorted({i for i, _, _ in bad["test pkl"] + bad["external pkl"]})
@@ -134,12 +166,19 @@ def check(which, seeds, out_root: Path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("which", choices=["porpoise", "mmp"])
+    ap.add_argument("which", choices=["porpoise", "porpoise_official", "mmp"])
     ap.add_argument("--seeds", type=str, default="84,126,42,168,210")
     ap.add_argument("--out-root", type=str, default=str(_ROOT / ".logs"))
     ap.add_argument("--check", action="store_true", help="export하지 않고 25개 (seed, fold) 단계별 상태와 재제출 명령만 출력")
     args = ap.parse_args()
     seeds = [int(s) for s in args.seeds.split(",")]
+    which = args.which
+    if which.startswith("porpoise"):
+        global PORPOISE_RESULTS, PORPOISE_TAG, PORPOISE_SBATCH
+        rdir, PORPOISE_TAG, PORPOISE_SBATCH = PORPOISE_VARIANTS[which]
+        PORPOISE_RESULTS = _ROOT / "porpoise" / rdir
+        which = "porpoise"
+    args.which = which
     if args.check:
         check(args.which, seeds, Path(args.out_root))
         return

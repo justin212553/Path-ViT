@@ -28,17 +28,22 @@ from analyze_foldsafe_batch import PAAD, BRCA, PRED, load  # noqa: E402
 from analyze_uno_tdauc import TAU, harrell_c, uno_c, align  # noqa: E402
 from paired_bootstrap_delta import _ensemble_internal, _ensemble_external  # noqa: E402
 
-BASELINES = {
-    "PAAD": dict(name="PORPOISE", tag="PORPOISE_N110_MMF", internal="tcga", external="cptac", union=False),
-    "BRCA": dict(name="MMP", tag="MMP_INSTCV", internal="brca", external="brca", union=True),
-}
+# 2026-10-11: 두 수준으로 보고. 시스템 수준 = 각 baseline이 원작 입력 그대로(프로토콜만 우리와 동일),
+# 아키텍처 수준 = 입력까지 통일(PAAD C안). MMP의 공식 Hallmark RNA는 구조를 정의하는 입력이라 시스템 수준 하나뿐.
+BASELINES = [
+    dict(cohort="PAAD", level="시스템 수준 — 원작 입력(공식 RNA 1553+CNV 82+mutation 14), 우리 코호트 중 103명",
+         name="PORPOISE", tag="PORPOISE_OFFICIAL_N110_MMF", internal="tcga", external="cptac", union=False),
+    dict(cohort="PAAD", level="아키텍처 수준 — 입력 통일(우리 RNA 패널·코호트 110명, C안)",
+         name="PORPOISE", tag="PORPOISE_N110_MMF", internal="tcga", external="cptac", union=False),
+    dict(cohort="BRCA", level="시스템 수준 — 원작 입력(공식 Hallmark RNA)",
+         name="MMP", tag="MMP_INSTCV", internal="brca", external="brca", union=True),
+]
 OURS = {"PAAD": PAAD, "BRCA": BRCA}
 # PORPOISE·MMP는 임상 입력이 없다 — 같은 입력 조합 비교: PAAD M3-noCNV(WSI+RNA, PORPOISE와 RNA 입력까지 동일), BRCA M3
 COMPARE = {"PAAD": ["M3-noCNV", "M3", "M4", "M4-SA", "M7"], "BRCA": ["M3", "M4", "M4-SA", "M7"]}
 
 
-def load_baseline(cohort, split, seeds):
-    b = BASELINES[cohort]
+def load_baseline(b, split, seeds):
     if split == "internal":
         ids, r, t, e = _ensemble_internal(PRED / "kfold_preds", b["internal"], b["tag"], seeds, 5,
                                           include_final_epoch=False, union_seeds=b["union"])
@@ -64,15 +69,17 @@ def main():
     L = ["# Published baseline 비교 (새 프로토콜, 2026-10-10)", "",
          f"baseline seeds={seeds}, 우리 모델 5 seeds x 5 folds(best+final 평균). 환자 교집합 paired bootstrap "
          f"{args.n_boot}회. Uno tau PAAD 3년, BRCA 5년. PORPOISE·MMP는 임상 입력이 없어 M3(WSI+RNA)가 같은 입력 조합.",
-         "PAAD는 코호트·fold·RNA 입력이 우리 모델과 같아 아키텍처 차이만 비교됨(C안).", ""]
-    for cohort, b in BASELINES.items():
-        L += [f"## {cohort} — {b['name']} -> 우리 모델 (Δ = 우리 − {b['name']})", "",
+         "모든 baseline은 원저자 공식 코드, 우리와 같은 seed별 fold 배정(5x5), fold-safe 정규화. "
+         "PAAD 시스템 수준의 CPTAC 입력은 공식 입력이 없어 근사(CNV 82개 neutral, mutation 10/14개 0).", ""]
+    for b in BASELINES:
+        cohort = b["cohort"]
+        L += [f"## {cohort} — {b['name']} -> 우리 모델 (Δ = 우리 − {b['name']})", "", f"**{b['level']}**", "",
               "| 비교 | split | n | baseline Harrell | 우리 Harrell | Harrell Δ [95% CI] p | Uno Δ [95% CI] p |",
               "|---|---|---|---|---|---|---|"]
         rng = np.random.RandomState(0)
         for split in ("internal", "external"):
             try:
-                B = load_baseline(cohort, split, seeds)
+                B = load_baseline(b, split, seeds)
             except (FileNotFoundError, ValueError) as ex:
                 L.append(f"| — | {split} | — | 예측 없음: {ex} | | | |")
                 continue
@@ -97,7 +104,7 @@ def main():
                     star = "**" if lo > 0 or hi < 0 else ""
                     cells.append(f"{star}{b0 - a0:+.4f} [{lo:+.4f}, {hi:+.4f}]{star} {p:.3f}")
                 L.append(f"| {b['name']} -> {name} | {split} | {len(t)} | {base_h:.4f} | {our_h:.4f} | {cells[0]} | {cells[1]} |")
-                print(f"{cohort} {split} {b['name']}->{name} n={len(t)} {cells[0]}", flush=True)
+                print(f"{b['tag']} {split} ->{name} n={len(t)} {cells[0]}", flush=True)
         L.append("")
     (_ROOT / "paper" / "results_baselines.md").write_text("\n".join(L), encoding="utf-8")
     print("written paper/results_baselines.md")
