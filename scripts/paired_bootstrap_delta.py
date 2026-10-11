@@ -85,6 +85,11 @@ def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: i
     ]
     if len(matches) == 1:
         return matches[0]
+    # 2026-10-10: 태그가 다른 태그의 접두사인 경우(BRCA M4 "_INSTCV_FS" vs K 민감도 "_INSTCV_FS_K5")
+    # 와일드카드에 둘 다 걸린다 — 사이에 아무것도 없는 정확 일치 파일이 있으면 그것을 쓴다.
+    exact = [p for p in matches if p.name == f"{prefix}{suffix}"]
+    if len(exact) == 1:
+        return exact[0]
     if len(matches) > 1:
         raise ValueError(
             f"seed={seed} fold={fold}: '{dataset}_{model}*{suffix}' 패턴에 여러 파일이 걸림 — "
@@ -113,6 +118,9 @@ def _load_final_epoch_merged(pred_dir: Path, dataset: str, model: str, seed: int
         p for p in sorted(pred_dir.glob(f"{prefix}*{fe_suffix}"))
         if not p.name[len(prefix):len(prefix) + 1].isdigit()
     ]
+    exact = [p for p in fe_matches if p.name == f"{prefix}{fe_suffix}"]  # 접두사 태그 충돌 — _find_pred_path 참고
+    if len(fe_matches) > 1 and len(exact) == 1:
+        fe_matches = exact
     if len(fe_matches) != 1:
         raise FileNotFoundError(
             f"--include-final-epoch: seed={seed} fold={fold} FINALEPOCH 파일 매칭 "

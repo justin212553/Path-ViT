@@ -44,6 +44,7 @@ import pandas as pd
 
 from scripts.brca_common import (
     EXTERNAL_TSS_MULTI,
+    INSTCV,
     MANIFEST_PATH,
     TILES_ROOT,
     load_case_table_kfold,
@@ -114,8 +115,14 @@ def _mmp_frame(case_table: pd.DataFrame, manifest: pd.DataFrame, split_value: st
     return merged[["case_id", "slide_id", "os_survival_days", "os_censorship"]]
 
 
-def write_split_csvs(mmp_root: Path) -> None:
-    print("2) 이 연구 자체 BRCA 프로토콜(seed 84/126 x 5-fold + A2/AR/E9 external)로 split csv 생성...")
+def write_split_csvs(mmp_root: Path, protocol: str = "holdout", seeds: list[int] = SEEDS) -> None:
+    """protocol="holdout": 기존 A2/AR/E9 고정 holdout(split 폴더 TCGA_BRCA_k{f}_seed{s}).
+    protocol="instcv": 2026-10-10 새 프로토콜 — 기관 단위 교차검증(brca_common.load_case_table_instcv,
+    우리 M1~M7 fold-safe 배치와 같은 seed/fold 배정). 폴더 TCGA_BRCA_k{f}_seed{s}_instcv —
+    main_survival.py가 split_dir.split('_')[1]로 cancer_type을 유도하므로 접미사를 붙여도 'BRCA' 유지."""
+    external_tss = INSTCV if protocol == "instcv" else EXTERNAL_TSS_MULTI
+    suffix = "_instcv" if protocol == "instcv" else ""
+    print(f"2) 이 연구 자체 BRCA 프로토콜({protocol}, seeds={seeds} x 5-fold)로 split csv 생성...")
     rna_patients = load_mmp_official_rna_patients(mmp_root)
     manifest = pd.read_csv(MANIFEST_PATH)
     manifest = manifest[manifest["case_id"].isin(rna_patients)]
@@ -123,10 +130,10 @@ def write_split_csvs(mmp_root: Path) -> None:
     print(f"   MMP 공식 RNA 커버 환자: {len(rna_patients)}명 (우리 코호트 중 RNA 없어서 빠지는 환자 {n_missing}명)")
 
     splits_root = mmp_root / "splits" / "survival"
-    for seed in SEEDS:
+    for seed in seeds:
         for fold in range(N_FOLDS):
-            table = load_case_table_kfold(seed, fold, N_FOLDS, external_tss=EXTERNAL_TSS_MULTI)
-            split_dir = splits_root / f"TCGA_BRCA_k{fold}_seed{seed}"
+            table = load_case_table_kfold(seed, fold, N_FOLDS, external_tss=external_tss)
+            split_dir = splits_root / f"TCGA_BRCA_k{fold}_seed{seed}{suffix}"
             split_dir.mkdir(parents=True, exist_ok=True)
             for split_value, fname in [("train", "train.csv"), ("val", "val.csv"),
                                         ("test", "test.csv"), ("external", "external.csv")]:
@@ -144,10 +151,13 @@ def main():
                      help="MMP repo의 src/ 디렉터리(예: mmp/src)")
     ap.add_argument("--mmp-dataroot", type=Path, required=True,
                      help="MMP가 --data_source로 참조할 dataroot(예: data/mmp_brca_dataroot)")
+    ap.add_argument("--protocol", choices=["holdout", "instcv"], default="holdout",
+                    help="holdout=기존 A2/AR/E9(논문 초판), instcv=2026-10-10 기관 단위 CV 재실행용")
+    ap.add_argument("--seeds", type=str, default=",".join(map(str, SEEDS)))
     args = ap.parse_args()
 
     convert_wsi_features(args.mmp_dataroot)
-    write_split_csvs(args.mmp_root)
+    write_split_csvs(args.mmp_root, args.protocol, [int(x) for x in args.seeds.split(",")])
     print("\n완료. 다음 단계: sbatch/run_mmp_brca_prototype_array_hpc.sh 로 fold별 prototype 학습 후 "
           "sbatch/run_mmp_brca_survival_array_hpc.sh 로 학습.")
 
