@@ -72,6 +72,11 @@ EXP_CODE="BRCA_INSTCV_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}
 RESULTS_DIR="results/${EXP_CODE}"
 PROTO_PATH="splits/${SPLIT_DIR}/prototypes/prototypes_c16_${FEAT}_faiss_num_1.0e+05.pkl"
 
+# 2026-10-10: prototype 잡이 안 돈 상태로 학습이 먼저 돌아 assert로 죽고도 "Complete"가 찍혔다 —
+# prototype이 없으면 시작 전에 실패 코드로 끝낸다(의존 잡이 성공으로 오인하지 않게)
+if [ ! -f "${PROTO_PATH}" ]; then
+  echo "prototype 없음: ${PROTO_PATH} — run_mmp_brca_instcv_prototype_array_hpc.sh(같은 array index)부터"; exit 1
+fi
 echo "=== MMP BRCA survival train seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}) ==="
 python -u -m training.main_survival \
     --data_source "${FEAT_DIR}" \
@@ -111,5 +116,5 @@ python -u -m training.main_survival \
     --histo_agg mean \
     --net_indiv \
     --load_proto \
-    --proto_path "${PROTO_PATH}"
+    --proto_path "${PROTO_PATH}" || exit 1
 echo "=== MMP BRCA survival train seed=${SEED} fold=${FOLD} Complete: $(date) ==="

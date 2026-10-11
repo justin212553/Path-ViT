@@ -107,14 +107,17 @@ def check(which, seeds, out_root: Path):
         print("전부 OK — export 해도 됨.")
         return
     if which == "porpoise":
-        # main.py는 한 실행이 5 fold를 순차 처리하므로 재학습은 seed 단위(array index = seed_idx)
-        tr = sorted({seeds.index(s) for _, s, _ in bad["checkpoint"] + bad["internal pkl"]})
+        # 학습도 fold 단위 array(seed_idx*5+fold) — 2026-10-10 preemption 대응으로 쪼갬
+        tr = sorted({i for i, _, _ in bad["checkpoint"] + bad["internal pkl"]})
         ev = sorted({i for i, _, _ in bad["external csv"]})
         if tr:
-            print(f"재학습 필요 seed: {[seeds[i] for i in tr]} — "
-                  f"T=$(sbatch --parsable --array={','.join(map(str, tr))} sbatch/run_porpoise_n110_mmf_5seed_array_hpc.sh)")
-            print(f"  그 뒤 external 평가: sbatch --dependency=afterok:$T --array={','.join(map(str, ev))} "
+            print(f"재학습: T=$(sbatch --parsable --array={','.join(map(str, tr))} sbatch/run_porpoise_n110_mmf_5seed_array_hpc.sh)")
+            print(f"  그 뒤 external 평가: sbatch --dependency=aftercorr:$T --array={','.join(map(str, tr))} "
                   "sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh")
+            rest = [i for i in ev if i not in tr]
+            if rest:
+                print(f"  (학습은 됐고 external만 빈 것: sbatch --array={','.join(map(str, rest))} "
+                      "sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh)")
         elif ev:
             print(f"external 평가만 다시: sbatch --array={','.join(map(str, ev))} sbatch/eval_porpoise_n110_mmf_external_cptac_5seed_hpc.sh")
     else:
@@ -122,7 +125,7 @@ def check(which, seeds, out_root: Path):
         sv = sorted({i for i, _, _ in bad["test pkl"] + bad["external pkl"]})
         if pr:
             print(f"prototype 다시: P=$(sbatch --parsable --array={','.join(map(str, pr))} sbatch/run_mmp_brca_instcv_prototype_array_hpc.sh)")
-            print(f"  그 뒤 학습: sbatch --dependency=afterok:$P --array={','.join(map(str, sv))} sbatch/run_mmp_brca_instcv_survival_array_hpc.sh")
+            print(f"  그 뒤 학습: sbatch --dependency=aftercorr:$P --array={','.join(map(str, sv))} sbatch/run_mmp_brca_instcv_survival_array_hpc.sh")
         elif sv:
             print(f"학습만 다시: sbatch --array={','.join(map(str, sv))} sbatch/run_mmp_brca_instcv_survival_array_hpc.sh")
     print("다시 내기 전에 해당 로그(.logs/run_porpoise_n110_* / eval_porpoise_n110_* / run_mmp_brca_instcv_*_<idx>.log)의 "
