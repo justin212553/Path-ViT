@@ -76,7 +76,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-genes", type=int, default=1500)
     parser.add_argument("--gene-selection", type=str, default="variance",
-                         choices=["variance", "cox", "literature", "literature_categorized", "consistency"],
+                         choices=["variance", "cox", "literature", "literature_categorized", "consistency", "hallmark"],
                          help="2026-09-02: 'variance'(기본, data/brca_rna_gene_selection/) 또는 "
                               "'cox'(생존 라벨 기반 univariate Cox score test, "
                               "data/brca_rna_gene_selection_cox/, "
@@ -290,6 +290,13 @@ def main():
             raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
         gene_path = Path("data/brca_rna_gene_selection_consistency/selected_genes.csv")
         select_hint = "python -m scripts.select_brca_rna_genes_consistency"
+    elif args.gene_selection == "hallmark":
+        # 2026-10-11: MMP 공식 BRCA RNA 패널(MSigDB Hallmark 50 pathway 유전자)을 우리 모델에 그대로 —
+        # MMP와 입력을 통일한 아키텍처 비교 + 같은 아키텍처에서 패널만 바꾼 비교(consistency vs hallmark)
+        if args.fdr_threshold is not None:
+            raise ValueError("--fdr-threshold는 --gene-selection cox와 함께만 쓸 수 있습니다.")
+        gene_path = Path("data/brca_rna_gene_selection_hallmark/selected_genes.csv")
+        select_hint = "python -m scripts.select_brca_rna_genes_hallmark (HPC, MMP 저장소 필요)"
     else:
         gene_dir = OUT_DIR if args.gene_selection == "variance" else Path("data/brca_rna_gene_selection_cox")
         if args.fdr_threshold is not None:
@@ -343,6 +350,8 @@ def main():
         gene_tag = f"LIT{rna_input_dim}"
     elif args.gene_selection == "consistency":
         gene_tag = f"CONS{rna_input_dim}"
+    elif args.gene_selection == "hallmark":
+        gene_tag = f"HALL{rna_input_dim}"
     elif args.fdr_threshold is not None:
         gene_tag = f"FDR{args.fdr_threshold:g}"
     else:

@@ -51,6 +51,10 @@ case "$MODEL" in
   # K 민감도(2026-10-04): fold-safe + 기관 단위 CV 조건에서 K=5/20 재검증
   M4K5)  CMD="$PMA --cluster-k 5 --clinical-staging --clinical-lr-mult 100" ;;
   M4K20) CMD="$PMA --cluster-k 20 --clinical-staging --clinical-lr-mult 100" ;;
+  # 패널 교체(2026-10-11): MMP 공식 Hallmark 유전자 세트를 우리 모델에 — MMP와 입력 통일(아키텍처 비교) +
+  # 같은 아키텍처에서 패널만 교체(CONS882 vs HALL). 선행: python -m scripts.select_brca_rna_genes_hallmark
+  M3HALL) CMD="${PMA/--gene-selection consistency/--gene-selection hallmark} --no-clinical" ;;
+  M4HALL) CMD="${PMA/--gene-selection consistency/--gene-selection hallmark} --clinical-staging --clinical-lr-mult 100" ;;
   *) echo "unknown MODEL=$MODEL"; exit 1 ;;
 esac
 
