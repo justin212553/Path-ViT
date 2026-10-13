@@ -34,8 +34,10 @@ IDX=$SLURM_ARRAY_TASK_ID
 SEED=${SEEDS[$((IDX / N_FOLDS))]}
 FOLD=$((IDX % N_FOLDS))
 
-COMMON="--seed ${SEED} --fold ${FOLD} --n-folds ${N_FOLDS} --external-tss instcv --fold-safe \
-  --surv-loss both --nll-n-bins 4 --nll-cox-weight 1.0 --group-ts 0929fs_brca_${MODEL}"
+# 2026-10-12(D3 데이터 QC): QC=1이면 OS_time <= 0 21명 제외(instcvqc, 배정은 그대로, 태그 _INSTCVQC)
+EXT=instcv; [ -n "$QC" ] && EXT=instcvqc
+COMMON="--seed ${SEED} --fold ${FOLD} --n-folds ${N_FOLDS} --external-tss ${EXT} --fold-safe \
+  --surv-loss both --nll-n-bins 4 --nll-cox-weight 1.0 --group-ts 0929fs_brca_${MODEL}${QC:+_qc}"
 PMA="scripts.train_brca_m4 --gene-selection consistency --cluster-pool --rna-aux-weight 0"
 
 case "$MODEL" in

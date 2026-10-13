@@ -26,14 +26,14 @@ N_FOLDS=5
 IDX=$SLURM_ARRAY_TASK_ID
 SEED=${SEEDS[$((IDX / N_FOLDS))]}
 FOLD=$((IDX % N_FOLDS))
-OUT_CSV="/pub/wonseukl/Path-ViT/.logs/external_preds/cptac_PORPOISE_OFFICIAL_N110_CBIO_MMF_seed${SEED}_fold${FOLD}of${N_FOLDS}.csv"
+OUT_CSV="/pub/wonseukl/Path-ViT/.logs/external_preds/cptac_PORPOISE_OFFICIAL_N110${QC:+_QC}_CBIO_MMF_seed${SEED}_fold${FOLD}of${N_FOLDS}.csv"
 
 echo "=== PORPOISE OFFICIAL N110 MMF CPTAC(cBioPortal CNV/mut) external eval seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}) ==="
 python -u eval_external.py \
     --seed "${SEED}" --fold "${FOLD}" \
-    --results-dir results_official_n110_mmf --which-splits 5foldcv_n110official \
+    --results-dir results_official_n110_mmf${QC:+_qc} --which-splits 5foldcv_n110official${QC:+qc} \
     --tcga-csv datasets_csv_mutsig/tcga_paad_all_clean.csv.zip \
-    --tcga-split-dir "splits/5foldcv_n110official/tcga_paad_seed${SEED}" \
+    --tcga-split-dir "splits/5foldcv_n110official${QC:+qc}/tcga_paad_seed${SEED}" \
     --cptac-csv datasets_csv_mutsig/cptac_paad_external_cbio.csv.zip \
     --tcga-data-root /pub/wonseukl/Path-ViT/porpoise/data_root_true_resnet50 \
     --cptac-data-root /pub/wonseukl/Path-ViT/data/porpoise_style_features/cptac \

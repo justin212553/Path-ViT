@@ -51,6 +51,7 @@ SEEDS = [84, 126, 42, 168, 210]
 N_FOLDS = 5
 WHICH_SPLITS = "5foldcv_n110"
 WHICH_SPLITS_OFFICIAL = "5foldcv_n110official"
+QC = False  # --qc(2026-10-12): OS_time <= 0 환자 제외판 split, 폴더 이름 끝에 qc
 SRC = {
     "tcga": dict(rna="data/rna_tcga_raw_log2.csv", clin="data/clinical_tcga.csv",
                  pt="data/porpoise_style_features/tcga/pt_files"),
@@ -136,6 +137,10 @@ def main():
 
 def write_splits(which_splits, tcga_cases, have):
     clin = pd.read_csv(SRC["tcga"]["clin"]).set_index("case_id")
+    if QC:
+        # 2026-10-12(D3 데이터 QC): OS_time <= 0 환자(TCGA-HZ-A8P0)를 배정 후 제외 — 폴더 이름에 qc 접미사
+        which_splits += "qc"
+        have = {c for c in have if clin.loc[c, "OS_time"] > 0}
     # 배정은 반드시 코호트 110명 전체로 계산(우리 학습과 같은 case_df) — 입력이 없어 빠진 환자는
     # 배정 후에만 제외해야 나머지 환자의 fold가 우리와 같게 유지된다
     case_df = pd.DataFrame({"dataset": "tcga", "OS_event": clin.loc[tcga_cases, "OS_event"].values}, index=tcga_cases)
@@ -168,4 +173,5 @@ def main_official():
 
 if __name__ == "__main__":
     import sys
+    QC = "--qc" in sys.argv[1:]
     main_official() if "--official-geneset" in sys.argv[1:] else main()

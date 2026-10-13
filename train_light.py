@@ -553,6 +553,11 @@ def _parse_args() -> argparse.Namespace:
              "external도 학습 fold 통계로 정규화. 켜면 태그에 _FS가 붙는다.",
     )
     parser.add_argument(
+        "--exclude-nonpositive-os", action="store_true",
+        help="2026-10-12(D3, 데이터 QC): OS_time <= 0 환자(TCGA-PAAD 1명, CPTAC-PDAC 1명)를 모든 split에서 "
+             "제외. fold 배정은 제외 전 코호트로 마친 뒤 빼므로 나머지 환자 배정은 그대로. 태그에 _QC가 붙는다.",
+    )
+    parser.add_argument(
         "--restrict-cohort-file", type=str, default=None,
         help="train.py --restrict-cohort-file과 동일 — case_id 목록 파일로 모든 split(external 포함) "
              "제한(예: data/cohort_n110.txt). 태그에 _COH{파일 stem}이 붙는다.",
@@ -963,6 +968,8 @@ def main():
         model_prefix += "_FS"
     if args.restrict_cohort_file is not None:
         model_prefix += "_COH" + Path(args.restrict_cohort_file).stem.upper().replace("COHORT_", "")
+    if args.exclude_nonpositive_os:
+        model_prefix += "_QC"
     if args.fold is not None:
         model_prefix += f"_FOLD{args.fold}OF{args.n_folds}"
 
@@ -995,7 +1002,8 @@ def main():
                       with_rna=with_rna, rna_gene_ids=rna_gene_ids, rna_purist=rna_purist,
                       rna_pathway_categories=rna_pathway_categories, with_cnv=args.use_cnv,
                       rna_use_porpoise_official=(args.rna_genes == "porpoise_official"),
-                      restrict_case_ids=restrict_case_ids)
+                      restrict_case_ids=restrict_case_ids,
+                      exclude_nonpositive_os=args.exclude_nonpositive_os)
     split_kwargs = dict(fold=args.fold, n_folds=args.n_folds)
 
     if args.fold_safe and with_clinical:

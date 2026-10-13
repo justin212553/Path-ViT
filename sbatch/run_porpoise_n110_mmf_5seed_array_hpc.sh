@@ -41,9 +41,9 @@ ln -sfn "${PT_FILES_DIR}" "${DATA_ROOT}/tcga_paad_20x_features/pt_files"
 echo "=== PORPOISE N110 MMF seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}, node $(hostname)) ==="
 python -u main.py \
     --data_root_dir "${DATA_ROOT}" \
-    --which_splits 5foldcv_n110 --split_dir "tcga_paad_seed${SEED}" \
+    --which_splits 5foldcv_n110${QC:+qc} --split_dir "tcga_paad_seed${SEED}" \
     --mode pathomic --model_type porpoise_mmf --bag_loss nll_surv --reg_type pathomic \
     --fusion bilinear --gate_path --gate_omic --skip --dropinput 0.10 \
     --k_start "${FOLD}" --k_end "$((FOLD + 1))" \
-    --results_dir ./results_n110_mmf --seed "${SEED}" --overwrite
+    --results_dir ./results_n110_mmf${QC:+_qc} --seed "${SEED}" --overwrite
 echo "=== PORPOISE N110 MMF seed=${SEED} fold=${FOLD} Complete: $(date) ==="

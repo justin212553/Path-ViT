@@ -65,10 +65,10 @@ SEED_IDX=$((IDX / N_FOLDS))
 FOLD=$((IDX % N_FOLDS))
 SEED=${SEEDS[$SEED_IDX]}
 
-SPLIT_DIR="survival/TCGA_BRCA_k${FOLD}_seed${SEED}_instcv"
+SPLIT_DIR="survival/TCGA_BRCA_k${FOLD}_seed${SEED}_instcv${QC:+qc}"
 FEAT='extracted-vit_large_patch16_224.dinov2.uni_mass100k'
 FEAT_DIR="${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt"
-EXP_CODE="BRCA_INSTCV_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}"
+EXP_CODE="BRCA_INSTCV${QC:+QC}_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}"
 RESULTS_DIR="results/${EXP_CODE}"
 PROTO_PATH="splits/${SPLIT_DIR}/prototypes/prototypes_c16_${FEAT}_faiss_num_1.0e+05.pkl"
 
@@ -83,7 +83,7 @@ python -u -m training.main_survival \
     --results_dir "${RESULTS_DIR}" \
     --split_dir "${SPLIT_DIR}" \
     --split_names train,val,test,external \
-    --task BRCA_INSTCV_officialRNA_survival \
+    --task BRCA_INSTCV${QC:+QC}_officialRNA_survival \
     --target_col os_survival_days \
     --model_histo_type PANTHER \
     --model_histo_config PANTHER_default \

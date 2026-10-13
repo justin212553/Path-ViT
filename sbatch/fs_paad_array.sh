@@ -37,8 +37,8 @@ SEED=${SEEDS[$((IDX / N_FOLDS))]}
 FOLD=$((IDX % N_FOLDS))
 
 COMMON="--dataset tcga --external --seed ${SEED} --fold ${FOLD} --n-folds ${N_FOLDS} \
-  --fold-safe --restrict-cohort-file data/cohort_n110.txt \
-  --surv-loss both --nll-n-bins 4 --nll-cox-weight 1.0 --group-ts 0929fs_paad_${MODEL}"
+  --fold-safe --restrict-cohort-file data/cohort_n110.txt ${QC:+--exclude-nonpositive-os} \
+  --surv-loss both --nll-n-bins 4 --nll-cox-weight 1.0 --group-ts 0929fs_paad_${MODEL}${QC:+_qc}"
 WSI="--cluster-pool --backbone uni2native --patch-keep-frac 0.8"
 RNA="--rna-genes pdac_consistency_1500"
 CLIN="--clinical-staging --clinical-margin --clinical-lr-mult 100"

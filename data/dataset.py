@@ -957,6 +957,7 @@ class WSISurvivalDataset(Dataset):
         n_folds: int = 5,
         use_stage_stratify: bool = False,
         use_leverage_stratify: bool = False,
+        exclude_nonpositive_os: bool = False,
     ):
         if dataset not in DATASET_CHOICES:
             raise ValueError(f"dataset must be one of {DATASET_CHOICES}, got {dataset!r}")
@@ -1232,6 +1233,11 @@ class WSISurvivalDataset(Dataset):
                                                          use_leverage_stratify=self.use_leverage_stratify)
             all_items["_split"] = all_items["case_id"].map(split_of_case)
             self.items = all_items[all_items["_split"] == split].reset_index(drop=True)
+
+        if exclude_nonpositive_os:
+            # 2026-10-12(D3, 데이터 QC): OS_time <= 0 환자 제외. fold/train/val 배정을 위에서 다 마친 뒤에
+            # 빼므로 나머지 환자의 배정은 제외 전과 정확히 같다(BRCA brca_common.INSTCVQC와 같은 원칙).
+            self.items = self.items[self.items["OS_time"] > 0].reset_index(drop=True)
 
         if self.items.empty:
             raise RuntimeError(

@@ -8,6 +8,7 @@
 #   bash sbatch/submit_fs_batch.sh paad M4FIXC M4SAFIXC   # 2026-10-04 고정 centroid 진단(목록 밖이라 명시 필요)
 #   bash sbatch/submit_fs_batch.sh paad M4K5 M4K20        # 2026-10-04 K 민감도(fold-safe) — PAAD
 #   bash sbatch/submit_fs_batch.sh brca M4K5 M4K20        # 2026-10-04 K 민감도(fold-safe, 기관 단위 CV) — BRCA
+#   QC=1 bash sbatch/submit_fs_batch.sh paad M1 M2         # 2026-10-12 데이터 QC 재실행(OS_time <= 0 제외, 태그 _QC / _INSTCVQC)
 #
 # 일부 task만 다시 돌릴 때(예: seed 84 fold 2 = index 2):
 #   sbatch --array=2 --job-name=FS-PAAD-M4 --export=ALL,MODEL=M4 sbatch/fs_paad_array.sh
@@ -39,7 +40,7 @@ submit() {  # $1=cohort(paad|brca) $2=model
     else res="--cpus-per-task=4 --mem=32G --time=12:00:00"; fi
   fi
   local up=$(echo "$cohort" | tr a-z A-Z)
-  sbatch $res --job-name="FS-${up}-${model}" --export=ALL,MODEL="$model" "sbatch/fs_${cohort}_array.sh"
+  sbatch $res --job-name="FS-${up}-${model}${QC:+-QC}" --export=ALL,MODEL="$model" "sbatch/fs_${cohort}_array.sh"
 }
 
 for f in data/cohort_n110.txt data/rna_tcga_raw_log2.csv data/rna_cptac_raw_log2.csv data/rna_brca_raw_log2.csv; do

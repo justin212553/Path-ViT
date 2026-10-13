@@ -1736,6 +1736,11 @@ def _parse_args() -> argparse.Namespace:
              "태그에 _K{k}가 붙는다.",
     )
     parser.add_argument(
+        "--exclude-nonpositive-os", action="store_true",
+        help="2026-10-12(D3, 데이터 QC): OS_time <= 0 환자(TCGA-PAAD 1명, CPTAC-PDAC 1명)를 모든 split에서 "
+             "제외. fold 배정은 제외 전 코호트로 마친 뒤 빼므로 나머지 환자 배정은 그대로. 태그에 _QC가 붙는다.",
+    )
+    parser.add_argument(
         "--restrict-cohort-file", type=str, default=None,
         help="2026-09-29(리뷰 지적 — 모델마다 환자 수가 달라 modality 비교가 오염됨): case_id를 한 줄에 "
              "하나씩 담은 파일. 주면 모든 split(external 포함)을 이 case들로 제한한다 — 예: "
@@ -2487,6 +2492,8 @@ def main():
             model_prefix += "_FIXC"
     if args.restrict_cohort_file is not None:
         model_prefix += "_COH" + Path(args.restrict_cohort_file).stem.upper().replace("COHORT_", "")
+    if args.exclude_nonpositive_os:
+        model_prefix += "_QC"
     if args.cluster_centroids_path is not None:
         # 2026-09-24(버그 예방): 이 인자는 여태 model_prefix/tag 어디에도 반영되지 않았다 — K=11
         # 기본 centroids와 다른 --cluster-centroids-path(예: K 민감도 ablation의 K=5/K=20 재적합
@@ -2730,6 +2737,7 @@ def main():
         exclude_normal_slides=args.exclude_normal_slides,
         dx_only_slides=args.dx_only_slides,
         restrict_case_ids=restrict_case_ids,
+        exclude_nonpositive_os=args.exclude_nonpositive_os,
         fold=args.fold, n_folds=args.n_folds,
         use_stage_stratify=args.stage_stratify,
         use_leverage_stratify=args.leverage_stratify,

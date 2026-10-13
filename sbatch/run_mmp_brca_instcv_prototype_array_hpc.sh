@@ -44,7 +44,7 @@ SEED_IDX=$((IDX / N_FOLDS))
 FOLD=$((IDX % N_FOLDS))
 SEED=${SEEDS[$SEED_IDX]}
 
-SPLIT_DIR="survival/TCGA_BRCA_k${FOLD}_seed${SEED}_instcv"
+SPLIT_DIR="survival/TCGA_BRCA_k${FOLD}_seed${SEED}_instcv${QC:+qc}"
 FEAT='extracted-vit_large_patch16_224.dinov2.uni_mass100k'
 
 echo "=== MMP BRCA prototype fit seed=${SEED} fold=${FOLD} Start: $(date) (job ${SLURM_JOB_ID}) ==="

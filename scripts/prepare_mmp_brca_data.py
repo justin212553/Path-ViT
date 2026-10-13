@@ -45,6 +45,7 @@ import pandas as pd
 from scripts.brca_common import (
     EXTERNAL_TSS_MULTI,
     INSTCV,
+    INSTCVQC,
     MANIFEST_PATH,
     TILES_ROOT,
     load_case_table_kfold,
@@ -120,8 +121,9 @@ def write_split_csvs(mmp_root: Path, protocol: str = "holdout", seeds: list[int]
     protocol="instcv": 2026-10-10 새 프로토콜 — 기관 단위 교차검증(brca_common.load_case_table_instcv,
     우리 M1~M7 fold-safe 배치와 같은 seed/fold 배정). 폴더 TCGA_BRCA_k{f}_seed{s}_instcv —
     main_survival.py가 split_dir.split('_')[1]로 cancer_type을 유도하므로 접미사를 붙여도 'BRCA' 유지."""
-    external_tss = INSTCV if protocol == "instcv" else EXTERNAL_TSS_MULTI
-    suffix = "_instcv" if protocol == "instcv" else ""
+    # 2026-10-12(D3 데이터 QC): instcvqc = instcv와 같은 배정에서 OS_time <= 0 21명만 제외(폴더 접미사 _instcvqc)
+    external_tss = {"instcv": INSTCV, "instcvqc": INSTCVQC}.get(protocol, EXTERNAL_TSS_MULTI)
+    suffix = f"_{protocol}" if protocol in ("instcv", "instcvqc") else ""
     print(f"2) 이 연구 자체 BRCA 프로토콜({protocol}, seeds={seeds} x 5-fold)로 split csv 생성...")
     rna_patients = load_mmp_official_rna_patients(mmp_root)
     manifest = pd.read_csv(MANIFEST_PATH)
@@ -151,8 +153,8 @@ def main():
                      help="MMP repo의 src/ 디렉터리(예: mmp/src)")
     ap.add_argument("--mmp-dataroot", type=Path, required=True,
                      help="MMP가 --data_source로 참조할 dataroot(예: data/mmp_brca_dataroot)")
-    ap.add_argument("--protocol", choices=["holdout", "instcv"], default="holdout",
-                    help="holdout=기존 A2/AR/E9(논문 초판), instcv=2026-10-10 기관 단위 CV 재실행용")
+    ap.add_argument("--protocol", choices=["holdout", "instcv", "instcvqc"], default="holdout",
+                    help="holdout=기존 A2/AR/E9(논문 초판), instcv=2026-10-10 기관 단위 CV 재실행용, instcvqc=2026-10-12 OS_time<=0 제외판")
     ap.add_argument("--seeds", type=str, default=",".join(map(str, SEEDS)))
     args = ap.parse_args()
 

@@ -44,6 +44,10 @@ EXTERNAL_TSS_MULTI = ("A2", "AR", "E9")
 # 2026-09-29(리뷰 지적 — 위 A2+AR+E9는 사망률을 보고 고른 holdout이라 outcome 참조로 읽힘):
 # 기관 단위 교차검증(load_case_table_instcv)용 sentinel. --external-tss instcv.
 INSTCV = "__INSTCV__"
+# 2026-10-12(D3, 리뷰 #13 데이터 QC): OS_time <= 0인 환자(음수 1명, 0일 20명)를 뺀 기관 단위 CV.
+# --external-tss instcvqc. 기관 그룹·internal fold·train/val 배정은 제외 전 전체 코호트로 계산한 뒤
+# 해당 환자만 빼므로, 나머지 환자의 배정은 INSTCV와 정확히 같다(제외 효과와 fold 재배정 효과가 섞이지 않음).
+INSTCVQC = "__INSTCVQC__"
 
 
 def resolve_external_tss(raw: str) -> tuple[str | tuple[str, ...] | None, str]:
@@ -54,6 +58,8 @@ def resolve_external_tss(raw: str) -> tuple[str | tuple[str, ...] | None, str]:
     if raw.lower() == "instcv":
         # 2026-09-29: 기관 단위 교차검증 — fold마다 기관 그룹 하나가 external(load_case_table_instcv).
         return INSTCV, "_INSTCV"
+    if raw.lower() == "instcvqc":
+        return INSTCVQC, "_INSTCVQC"
     if raw.lower() == "multi":
         return EXTERNAL_TSS_MULTI, f"_EXTTSS{'-'.join(EXTERNAL_TSS_MULTI)}"
     return raw, f"_EXTTSS{raw}"
@@ -177,6 +183,8 @@ def load_case_table_kfold(seed: int, fold: int, n_folds: int, external_tss: str 
     """
     if external_tss == INSTCV:
         return load_case_table_instcv(seed, fold, n_folds)
+    if external_tss == INSTCVQC:
+        return load_case_table_instcv(seed, fold, n_folds, exclude_nonpositive_os=True)
     case_ids = common_case_ids()
     internal_ids, external_ids = split_by_institution(case_ids, external_tss)
     clinical = pd.read_csv(CLINICAL_PATH).set_index("case_id")
@@ -206,7 +214,7 @@ def institution_groups(case_ids: list[str], seed: int, n_groups: int) -> dict:
     return group_of_tss
 
 
-def load_case_table_instcv(seed: int, fold: int, n_folds: int) -> pd.DataFrame:
+def load_case_table_instcv(seed: int, fold: int, n_folds: int, exclude_nonpositive_os: bool = False) -> pd.DataFrame:
     """기관 단위 교차검증(institution-grouped CV) 버전의 case 테이블.
 
     - external: 기관 그룹 == fold (institution_groups, outcome 미참조)
@@ -239,6 +247,9 @@ def load_case_table_instcv(seed: int, fold: int, n_folds: int) -> pd.DataFrame:
     train_val_frac = TRAIN_FRAC / (TRAIN_FRAC + VAL_FRAC)
     split_of_case.update(_stratified_binary_split(remaining, os_event_by_case, seed, frac=train_val_frac))
     table["split"] = table["case_id"].map(split_of_case)
+    if exclude_nonpositive_os:
+        # 배정을 다 마친 뒤에 뺀다(INSTCVQC 주석 참조)
+        table = table[table["OS_time"] > 0].reset_index(drop=True)
     return table
 
 
