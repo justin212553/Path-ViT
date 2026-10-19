@@ -50,7 +50,14 @@ def _load_all_features(max_patches_per_slide: int, seed: int) -> np.ndarray:
             feat = feat[idx]
         chunks.append(feat)
         n_slides += 1
-    features = np.concatenate(chunks, axis=0)
+    # 2026-10-18: np.concatenate는 chunks와 결과가 동시에 메모리에 있어 최대 사용량이 두 배(~28GB)가 된다.
+    # 결과 배열을 미리 잡고 chunk를 하나씩 옮기며 비워 최대 사용량을 결과 크기(~14GB) 근처로 낮춘다.
+    features = np.empty((sum(len(c) for c in chunks), chunks[0].shape[1]), dtype=np.float32)
+    pos = 0
+    for i in range(len(chunks)):
+        features[pos:pos + len(chunks[i])] = chunks[i]
+        pos += len(chunks[i])
+        chunks[i] = None
     print(f"  로드 완료: {n_slides}개 슬라이드 / 총 {len(features):,}개 patch (슬라이드당 최대 {max_patches_per_slide or '전체'})")
     return features
 

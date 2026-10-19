@@ -87,5 +87,5 @@ run_cohort() {  # $1=cohort, 나머지=모델들
 [ "$WHICH" = all ] || [ "$WHICH" = paad ] && run_cohort paad "${PAAD_MODELS[@]}"
 [ "$WHICH" = all ] || [ "$WHICH" = brca ] && run_cohort brca "${BRCA_MODELS[@]}"
 n_done=$(ls "$OUT"/*.done 2>/dev/null | wc -l)
-n_fail=$(grep -c " FAIL " "$OUT/progress.txt" 2>/dev/null || echo 0)
+n_fail=$(grep -c " FAIL  " "$OUT/progress.txt" 2>/dev/null)  # 실패 줄은 "FAIL  이름"(공백 2개), 이 요약 줄과 구분
 echo "$(date '+%F %T') 종료: 완료 표시 ${n_done}개, 이번까지 누적 FAIL 줄 ${n_fail}개" | tee -a "$OUT/progress.txt"
