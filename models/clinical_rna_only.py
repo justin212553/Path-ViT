@@ -48,7 +48,8 @@ cox_add는 raw feature 직결 방식으로 원복(clinical 신호가 약해 MLP�
 import torch
 import torch.nn as nn
 
-from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, MUTATION_FIELDS, _MUTATION_BUFFER_NAMES
+from .clinical_encoder import (ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, MUTATION_FIELDS, _MUTATION_BUFFER_NAMES,
+                               register_receptor_buffers, receptor_feats)
 from .rna_encoder import RNAEncoder
 from config import ModelConfig
 
@@ -180,6 +181,7 @@ class ClinicalRNAOnly(nn.Module):
                 raw_dim = ((2 if use_age_sex else 0) + (2 if use_margin else 0)
                            + (2 * len(STAGE_FIELDS) if use_staging else 0)
                            + (2 * len(MUTATION_FIELDS) if use_mutation else 0))
+                raw_dim += register_receptor_buffers(self, stage_stats if use_staging else None)  # 2026-10-18 BRCA 수용체
                 self.clinical_linear = nn.Linear(raw_dim, 1, bias=False)
                 nn.init.zeros_(self.clinical_linear.weight)
             else:  # film — cox_add ablation과 무관, ClinicalEncoder 경유 유지
@@ -221,6 +223,7 @@ class ClinicalRNAOnly(nn.Module):
                     std = getattr(self, f"{short}_std")
                     z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
                     feats += [z, known]
+                feats += receptor_feats(self, stage_ord)
             if self.use_mutation:
                 for field in MUTATION_FIELDS:
                     short = _MUTATION_BUFFER_NAMES[field]

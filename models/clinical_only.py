@@ -16,7 +16,7 @@ RNA/WSI 브랜치(RNAEncoder/ViT)에만 쓴다는 아키텍처 원칙이 완성�
 import torch
 import torch.nn as nn
 
-from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES
+from .clinical_encoder import ClinicalEncoder, STAGE_FIELDS, _STAGE_BUFFER_NAMES, register_receptor_buffers, receptor_feats
 from config import ModelConfig
 
 
@@ -55,6 +55,7 @@ class ClinicalOnly(nn.Module):
                     self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                     self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
             raw_dim = (2 if use_age_sex else 0) + (2 if use_margin else 0) + (2 * len(STAGE_FIELDS) if use_staging else 0)
+            raw_dim += register_receptor_buffers(self, stage_stats if use_staging else None)  # 2026-10-18 BRCA 수용체
             if raw_dim == 0:
                 raise ValueError("use_age_sex=False이고 use_margin=False이고 use_staging=False면 clinical 입력이 없습니다.")
             self.risk_head = nn.Linear(raw_dim, surv_n_classes)
@@ -90,6 +91,7 @@ class ClinicalOnly(nn.Module):
                 std = getattr(self, f"{short}_std")
                 z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
                 feats += [z, known]
+            feats += receptor_feats(self, stage_ord)
         return torch.stack(feats, dim=-1)  # (raw_dim,)
 
     def forward(

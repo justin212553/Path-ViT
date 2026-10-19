@@ -47,7 +47,7 @@ from data.dataset import (
 from models import ClinicalOnly, RNAOnly, RNAOnlyExtend, ClinicalRNAOnly, HDP
 from models.clinical_encoder import (
     age_stats_from_csv, margin_stats_from_csv, margin_stats_from_df, stage_stats_from_df, STAGE_FIELDS,
-    mutation_stats_from_csv, mutation_stats_from_df, MUTATION_FIELDS,
+    mutation_stats_from_csv, mutation_stats_from_df, MUTATION_FIELDS, stage_ord_keys,
 )
 from utils import load_env, send_slack
 from utils.losses import cox_ph_loss, nll_surv_loss, hazard_to_risk, digitize_survival_time, fit_survival_bins
@@ -219,7 +219,7 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
         if getattr(model, "use_margin", False):
             hdp_clinical_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         if getattr(model, "use_staging", False):
-            hdp_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+            hdp_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in stage_ord_keys(p)}
         if getattr(model, "use_mutation", False):
             hdp_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         case_id = p["case_id"]
@@ -240,7 +240,7 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
             m7_clinical_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         # 2026-08-06: use_staging도 동일 관례(combine_mode 무관하게 model 자체에 있음).
         if getattr(model, "use_staging", False):
-            m7_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+            m7_clinical_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in stage_ord_keys(p)}
         if getattr(model, "use_mutation", False):
             m7_clinical_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         risk = model(
@@ -258,7 +258,7 @@ def _patient_risk(model, patient_slides, device, cluster_hist_lookup: dict | Non
         if getattr(model, "use_margin", False):
             margin_kwargs["margin_ord"] = p["margin_ord"].to(device, non_blocking=True)
         if getattr(model, "use_staging", False):
-            margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+            margin_kwargs["stage_ord"] = {f: p[f].to(device, non_blocking=True) for f in stage_ord_keys(p)}
         if getattr(model, "use_mutation", False):
             margin_kwargs["mutation_ord"] = {f: p[f].to(device, non_blocking=True) for f in MUTATION_FIELDS}
         risk = model(

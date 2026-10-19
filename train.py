@@ -63,7 +63,7 @@ from models.rna_predictor import RNAPredictionHead
 from models.stage_predictor import StagePredictionHead
 from models.clinical_encoder import (
     age_stats_from_csv, STAGE_FIELDS, stage_stats_from_df, margin_stats_from_df,
-    MUTATION_FIELDS, mutation_stats_from_df,
+    MUTATION_FIELDS, mutation_stats_from_df, stage_ord_keys,
 )
 from data.fit_clusters import CENTROIDS_DIR
 from utils import load_env, send_slack
@@ -144,7 +144,8 @@ def _stage_ord_from_patient(patient_slides, device) -> dict[str, torch.Tensor] |
     p = patient_slides[0]
     if STAGE_FIELDS[0] not in p:
         return None
-    return {f: p[f].to(device, non_blocking=True) for f in STAGE_FIELDS}
+    # 2026-10-18: 데이터에 수용체(ER/PR/HER2)가 실려 있으면 같은 dict로 넘긴다(models/clinical_encoder.py::stage_ord_keys)
+    return {f: p[f].to(device, non_blocking=True) for f in stage_ord_keys(p)}
 
 
 def _margin_ord_from_patient(patient_slides, device) -> torch.Tensor | None:

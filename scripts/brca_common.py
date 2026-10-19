@@ -28,6 +28,8 @@ from models.clinical_encoder import SEX_TO_IDX, STAGE_FIELDS, encode_stage_value
 
 CLINICAL_PATH = Path("data/brca_clinical.csv")
 MANIFEST_PATH = Path("data/brca_slide_manifest.csv")
+# 2026-10-18(D3): ER/PR/HER2 수용체(scripts/fetch_brca_receptors_cbio.py 산출, 0/1, 미상은 빈칸)
+RECEPTORS_PATH = Path("data/brca_receptors.csv")
 RNA_RAW_LOG2_PATH = Path("data/rna_brca_raw_log2.csv")
 RNA_ZSCORED_PATH = Path("data/rna_brca.csv")
 TILES_ROOT = Path("data/patches_tcga_brca/tiles")
@@ -331,10 +333,12 @@ class BRCACaseDataset(Dataset):
     age_years/sex_idx/rna/OS_time/OS_event)을 그대로 맞춘다.
     """
 
-    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, with_staging: bool = False):
+    def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, with_staging: bool = False,
+                 with_receptors: bool = False):
         self.rows = case_table.reset_index(drop=True)
         self.rna_df = rna_df
         self.with_staging = with_staging
+        self.receptors = load_receptor_lookup() if with_receptors else None
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -354,6 +358,8 @@ class BRCACaseDataset(Dataset):
             for field in STAGE_FIELDS:
                 ord_val = encode_stage_value(field, row[field])
                 item[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
+        if self.receptors is not None:
+            item.update(receptor_item(self.receptors, row["case_id"]))
         return [item]
 
 
@@ -374,11 +380,12 @@ class BRCASlideDataset(Dataset):
     """
 
     def __init__(self, case_table: pd.DataFrame, rna_df: pd.DataFrame, manifest: pd.DataFrame,
-                 with_staging: bool = False):
+                 with_staging: bool = False, with_receptors: bool = False):
         self.rows = case_table.reset_index(drop=True)
         self.rna_df = rna_df
         self.slides_by_case = manifest.groupby("case_id")
         self.with_staging = with_staging
+        self.receptors = load_receptor_lookup() if with_receptors else None
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -406,6 +413,8 @@ class BRCASlideDataset(Dataset):
             for field in STAGE_FIELDS:
                 ord_val = encode_stage_value(field, row[field])
                 common[field] = torch.tensor(-1 if ord_val is None else ord_val, dtype=torch.long)
+        if self.receptors is not None:
+            common.update(receptor_item(self.receptors, case_id))
 
         slides = []
         for _, srow in slide_rows.iterrows():
@@ -414,6 +423,33 @@ class BRCASlideDataset(Dataset):
             features = torch.load(slide_dir / "features_uni.pt", weights_only=True)
             slides.append({"coords": coords, "features": features, **common})
         return slides
+
+
+def load_receptor_lookup() -> pd.DataFrame:
+    """case_id 인덱스, 열 er/pr/her2(0/1, 미상 NaN)."""
+    return pd.read_csv(RECEPTORS_PATH).set_index("case_id")
+
+
+def receptor_item(lookup: pd.DataFrame, case_id: str) -> dict:
+    """데이터셋 item에 넣을 수용체 필드 — stage 필드와 같은 long 관례(미상 -1)."""
+    from models.clinical_encoder import RECEPTOR_FIELDS
+    out = {}
+    for f in RECEPTOR_FIELDS:
+        v = lookup[f].get(case_id) if case_id in lookup.index else None
+        out[f] = torch.tensor(-1 if v is None or pd.isna(v) else int(v), dtype=torch.long)
+    return out
+
+
+def add_receptor_stats(stage_stats: dict, cases: pd.DataFrame) -> dict:
+    """stage_stats에 이 fold train 환자의 수용체 평균/표준편차를 합친다(models/clinical_encoder.py는 이 키가
+    있으면 수용체를 입력으로 쓴다). fold-safe 원칙대로 train split만 쓴다."""
+    from models.clinical_encoder import receptor_stats_from_df
+    train_ids = cases.loc[cases["split"] == "train", "case_id"]
+    rec = load_receptor_lookup().reindex(train_ids)
+    stats = dict(stage_stats)
+    stats.update(receptor_stats_from_df(rec))
+    print("[receptors] train 통계: " + ", ".join(f"{k} mean={v[0]:.3f}" for k, v in receptor_stats_from_df(rec).items()))
+    return stats
 
 
 def brca_fold_safe(cases: pd.DataFrame, rna_df: pd.DataFrame, clinical_staging: bool):

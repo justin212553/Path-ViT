@@ -50,6 +50,11 @@ case "$MODEL" in
   M7)    CMD="scripts.train_brca_m7 --gene-selection consistency --clinical-staging --clinical-lr-mult 100" ;;
   M3SA)  CMD="$PMA --self-attn-fusion --no-clinical" ;;
   M4SA)  CMD="$PMA --self-attn-fusion --clinical-staging --clinical-lr-mult 100" ;;
+  # D3(2026-10-18): ER/PR/HER2 수용체 추가 변형 — QC=1과 함께 제출(1,036명). 태그 _REC
+  M2REC) CMD="scripts.train_brca_m1_m2 --clinical --clinical-staging --clinical-receptors --clinical-lr-mult 100" ;;
+  M4REC) CMD="$PMA --clinical-staging --clinical-receptors --clinical-lr-mult 100" ;;
+  M5REC) CMD="scripts.train_brca_m5 --clinical-staging --clinical-receptors" ;;
+  M7REC) CMD="scripts.train_brca_m7 --gene-selection consistency --clinical-staging --clinical-receptors --clinical-lr-mult 100" ;;
   # K 민감도(2026-10-04): fold-safe + 기관 단위 CV 조건에서 K=5/20 재검증
   M4K5)  CMD="$PMA --cluster-k 5 --clinical-staging --clinical-lr-mult 100" ;;
   M4K20) CMD="$PMA --cluster-k 20 --clinical-staging --clinical-lr-mult 100" ;;

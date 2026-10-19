@@ -27,6 +27,8 @@ mkdir -p "$OUT"
 
 PAAD_MODELS=(M5 M6 M7 M6NOCNV M7NOCNV)
 BRCA_MODELS=(M5 M6 M7)
+# 2026-10-18(D3): ER/PR/HER2 수용체 변형. bash scripts/run_local_qc_light.sh brca M5REC M7REC
+BRCA_EXTRA=(M5REC M7REC)
 
 want() {
   [ ${#ONLY[@]} -eq 0 ] && return 0
@@ -56,6 +58,8 @@ brca_cmd() {
     M5) echo "-m scripts.train_brca_m5 --clinical-staging $COMMON" ;;
     M6) echo "-m scripts.train_brca_m6 --gene-selection consistency $COMMON" ;;
     M7) echo "-m scripts.train_brca_m7 --gene-selection consistency --clinical-staging --clinical-lr-mult 100 $COMMON" ;;
+    M5REC) echo "-m scripts.train_brca_m5 --clinical-staging --clinical-receptors $COMMON" ;;
+    M7REC) echo "-m scripts.train_brca_m7 --gene-selection consistency --clinical-staging --clinical-receptors --clinical-lr-mult 100 $COMMON" ;;
   esac
 }
 
@@ -86,6 +90,8 @@ run_cohort() {  # $1=cohort, 나머지=모델들
 
 [ "$WHICH" = all ] || [ "$WHICH" = paad ] && run_cohort paad "${PAAD_MODELS[@]}"
 [ "$WHICH" = all ] || [ "$WHICH" = brca ] && run_cohort brca "${BRCA_MODELS[@]}"
+# 수용체 변형은 이름을 명시했을 때만(예: brca M5REC M7REC)
+[ "$WHICH" = brca ] && [ ${#ONLY[@]} -gt 0 ] && run_cohort brca "${BRCA_EXTRA[@]}"
 n_done=$(ls "$OUT"/*.done 2>/dev/null | wc -l)
 n_fail=$(grep -c " FAIL  " "$OUT/progress.txt" 2>/dev/null)  # 실패 줄은 "FAIL  이름"(공백 2개), 이 요약 줄과 구분
 echo "$(date '+%F %T') 종료: 완료 표시 ${n_done}개, 이번까지 누적 FAIL 줄 ${n_fail}개" | tee -a "$OUT/progress.txt"

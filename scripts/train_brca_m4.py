@@ -91,6 +91,8 @@ def main():
     parser.add_argument("--fdr-threshold", type=float, default=None,
                          help="train_brca_m7.py --fdr-threshold와 동일 — --gene-selection cox와 "
                               "함께 주어지면 top-N 대신 BH-FDR q<threshold 패널을 쓴다.")
+    parser.add_argument("--clinical-receptors", action="store_true",
+                        help="2026-10-18(D3): ER/PR/HER2 수용체를 clinicopathologic 입력에 추가. --clinical-staging·--fold-safe 필요, 미상은 train 평균(known flag 없음). 태그 _REC")
     parser.add_argument("--clinical-staging", action="store_true",
                          help="2026-09-02: ClinicalEncoder(ViT_PMA 내장) 입력에 AJCC 병기를 "
                               "추가한다(train.py --clinical-staging과 동일 관례). "
@@ -336,6 +338,11 @@ def main():
         rna_df, age_mean, age_std, _fs_stage = brca_fold_safe(cases, rna_df, stage_stats is not None)
         if stage_stats is not None:
             stage_stats = _fs_stage
+    if args.clinical_receptors:
+        if stage_stats is None or not args.fold_safe:
+            raise SystemExit("--clinical-receptors는 --clinical-staging과 --fold-safe가 필요합니다")
+        from scripts.brca_common import add_receptor_stats
+        stage_stats = add_receptor_stats(stage_stats, cases)
     centroids_path = args.cluster_centroids_path
     if args.fold_safe:
         from scripts.brca_common import fit_brca_fold_safe_centroids
@@ -361,10 +368,10 @@ def main():
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
     stg = args.clinical_staging
-    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest, with_staging=stg)
-    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest, with_staging=stg)
-    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest, with_staging=stg)
-    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest, with_staging=stg) if external_tss else None
+    train_ds     = BRCASlideDataset(cases[cases["split"] == "train"],    rna_df, manifest, with_staging=stg, with_receptors=args.clinical_receptors)
+    val_ds       = BRCASlideDataset(cases[cases["split"] == "val"],      rna_df, manifest, with_staging=stg, with_receptors=args.clinical_receptors)
+    test_ds      = BRCASlideDataset(cases[cases["split"] == "test"],     rna_df, manifest, with_staging=stg, with_receptors=args.clinical_receptors)
+    external_ds  = BRCASlideDataset(cases[cases["split"] == "external"], rna_df, manifest, with_staging=stg, with_receptors=args.clinical_receptors) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
@@ -397,6 +404,8 @@ def main():
         model_prefix += "_NOCOATTN"
     if args.clinical_staging:
         model_prefix += "_STG"
+    if args.clinical_receptors:
+        model_prefix += "_REC"
     if args.patch_keep_frac < 1.0:
         model_prefix += "_SS"
     if args.rna_aux_weight > 0:

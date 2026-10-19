@@ -153,6 +153,57 @@ def mutation_stats_from_csv(csv_path: str | Path) -> dict[str, tuple[float, floa
     return mutation_stats_from_df(pd.read_csv(csv_path))
 
 
+# 2026-10-18(D3, SciRep Q5a): TCGA-BRCA 수용체 상태(ER/PR/HER2, data/brca_receptors.csv, 0/1, 미상 -1).
+# 새 kwarg를 모든 모델·학습 루프에 배선하는 대신 staging 경로에 얹는다 — stage_stats dict에 이 키가
+# 들어 있으면 수용체를 쓰고(receptor_stats_from_df 결과를 stage_stats에 합쳐 넘김), 값은 stage_ord
+# dict로 함께 전달된다(stage_ord_keys). 사용자 결정(2026-10-18, 선택지 2): 수용체는 known flag 없이
+# z-score 하나만 넣고 미상은 0(=train 평균)으로 둔다 — HER2 미상군 사망률이 34%(전체 14%)라 flag를
+# 넣으면 "검사 안 함" 자체가 위험 신호로 학습될 수 있어서.
+RECEPTOR_FIELDS = ("er", "pr", "her2")
+
+
+def receptor_stats_from_df(df: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    """수용체 0/1 값(미상 제외)의 평균/표준편차. 표준편차가 0이면 1로 둔다."""
+    stats = {}
+    for field in RECEPTOR_FIELDS:
+        vals = df[field].dropna().astype(float)
+        sd = float(vals.std(ddof=0))
+        stats[field] = (float(vals.mean()), sd if sd > 0 else 1.0)
+    return stats
+
+
+def receptor_fields_in(stage_stats) -> tuple[str, ...]:
+    """stage_stats에 들어 있는 수용체 필드(없으면 빈 튜플 — 기존 모델 동작 그대로)."""
+    return tuple(f for f in RECEPTOR_FIELDS if stage_stats and f in stage_stats)
+
+
+def register_receptor_buffers(module: nn.Module, stage_stats) -> int:
+    """stage_stats에 수용체 키가 있으면 rec_{field}_mean/std 버퍼를 등록하고 추가 입력 차원 수를 반환."""
+    fields = receptor_fields_in(stage_stats)
+    module.receptor_fields = fields
+    for field in fields:
+        mean, std = stage_stats[field]
+        module.register_buffer(f"rec_{field}_mean", torch.tensor(mean, dtype=torch.float32))
+        module.register_buffer(f"rec_{field}_std", torch.tensor(std, dtype=torch.float32))
+    return len(fields)
+
+
+def receptor_feats(module: nn.Module, stage_ord: dict[str, torch.Tensor]) -> list[torch.Tensor]:
+    """수용체별 z-score 하나씩(known flag 없음, 미상 -1은 0=train 평균으로)."""
+    feats = []
+    for field in getattr(module, "receptor_fields", ()):
+        v = stage_ord[field].float()
+        mean = getattr(module, f"rec_{field}_mean")
+        std = getattr(module, f"rec_{field}_std")
+        feats.append(torch.where(v >= 0, (v - mean) / std, torch.zeros_like(v)))
+    return feats
+
+
+def stage_ord_keys(item: dict) -> tuple[str, ...]:
+    """학습 루프가 stage_ord dict를 만들 때 쓸 키 — STAGE_FIELDS에 데이터에 실린 수용체 필드를 더한다."""
+    return STAGE_FIELDS + tuple(f for f in RECEPTOR_FIELDS if f in item)
+
+
 class ClinicalEncoder(nn.Module):
     """
     age/sex (2,) [+ 선택: T/N/M/grade (8,)] → 임베딩 (D,) 두 층 MLP.
@@ -202,6 +253,7 @@ class ClinicalEncoder(nn.Module):
                 self.register_buffer(f"{short}_mean", torch.tensor(mean, dtype=torch.float32))
                 self.register_buffer(f"{short}_std", torch.tensor(std, dtype=torch.float32))
             input_dim += 2 * len(STAGE_FIELDS)  # 필드당 (z_score, known_flag)
+        input_dim += register_receptor_buffers(self, stage_stats if use_staging else None)  # 수용체당 z_score 하나
 
         self.use_margin = use_margin
         if use_margin:
@@ -273,6 +325,7 @@ class ClinicalEncoder(nn.Module):
                 z = torch.where(ordv >= 0, (ordv - mean) / std, torch.zeros_like(ordv))
                 feats.append(z)
                 feats.append(known)
+            feats += receptor_feats(self, stage_ord)
         if self.use_margin:
             ordv  = margin_ord.float()
             known = (ordv >= 0).float()

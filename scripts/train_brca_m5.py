@@ -34,6 +34,8 @@ if WANDB_AVAILABLE:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--clinical-receptors", action="store_true",
+                        help="2026-10-18(D3): ER/PR/HER2 수용체를 clinicopathologic 입력에 추가. --clinical-staging·--fold-safe 필요, 미상은 train 평균(known flag 없음). 태그 _REC")
     parser.add_argument("--clinical-staging", action="store_true")
     parser.add_argument("--raw-linear", action="store_true", default=True,
                          help="PAAD 최종 관례(2026-08-21 확정) — clinical 브랜치는 예외 없이 "
@@ -90,6 +92,11 @@ def main():
         rna_df, age_mean, age_std, _fs_stage = brca_fold_safe(cases, rna_df, stage_stats is not None)
         if stage_stats is not None:
             stage_stats = _fs_stage
+    if args.clinical_receptors:
+        if stage_stats is None or not args.fold_safe:
+            raise SystemExit("--clinical-receptors는 --clinical-staging과 --fold-safe가 필요합니다")
+        from scripts.brca_common import add_receptor_stats
+        stage_stats = add_receptor_stats(stage_stats, cases)
     print(f"case 수: {len(cases)}  (train={int((cases['split']=='train').sum())}, "
           f"val={int((cases['split']=='val').sum())}, test={int((cases['split']=='test').sum())}, "
           f"external={int((cases['split']=='external').sum())} [tss={external_tss}])")
@@ -102,6 +109,8 @@ def main():
     model_prefix = "BRCA_M5"
     if args.clinical_staging:
         model_prefix += "_STG"
+    if args.clinical_receptors:
+        model_prefix += "_REC"
     if args.surv_loss in ("nll_surv", "both"):
         model_prefix += f"_NLLSURV{args.nll_n_bins}"
     if args.surv_loss == "both":
@@ -110,10 +119,10 @@ def main():
 
     dl_kwargs = dict(batch_size=1, collate_fn=_identity_collate, num_workers=0)
     stg = args.clinical_staging
-    train_ds     = BRCACaseDataset(cases[cases["split"] == "train"],    rna_df, with_staging=stg)
-    val_ds       = BRCACaseDataset(cases[cases["split"] == "val"],      rna_df, with_staging=stg)
-    test_ds      = BRCACaseDataset(cases[cases["split"] == "test"],     rna_df, with_staging=stg)
-    external_ds  = BRCACaseDataset(cases[cases["split"] == "external"], rna_df, with_staging=stg) if external_tss else None
+    train_ds     = BRCACaseDataset(cases[cases["split"] == "train"],    rna_df, with_staging=stg, with_receptors=args.clinical_receptors)
+    val_ds       = BRCACaseDataset(cases[cases["split"] == "val"],      rna_df, with_staging=stg, with_receptors=args.clinical_receptors)
+    test_ds      = BRCACaseDataset(cases[cases["split"] == "test"],     rna_df, with_staging=stg, with_receptors=args.clinical_receptors)
+    external_ds  = BRCACaseDataset(cases[cases["split"] == "external"], rna_df, with_staging=stg, with_receptors=args.clinical_receptors) if external_tss else None
     train_loader      = DataLoader(train_ds, shuffle=True,  **dl_kwargs)
     train_eval_loader = DataLoader(train_ds, shuffle=False, **dl_kwargs)
     val_loader        = DataLoader(val_ds,   shuffle=False, **dl_kwargs)
