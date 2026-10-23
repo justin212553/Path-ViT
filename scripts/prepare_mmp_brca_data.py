@@ -94,7 +94,17 @@ def load_mmp_official_rna_patients(mmp_root: Path) -> set[str]:
     12자 case_id, -01 primary tumor만, 중복 제거)으로 이미 한 번 정리해뒀다 — 그래서 여기서는
     'sample' 컬럼을 다시 파싱할 필요 없이 인덱스를 그대로 읽으면 된다.
     """
-    rna = pd.read_csv(mmp_root / "data_csvs" / "rna" / "hallmarks" / "BRCA" / "rna_clean.csv", index_col=0)
+    path = mmp_root / "data_csvs" / "rna" / "hallmarks" / "BRCA" / "rna_clean.csv"
+    rna = pd.read_csv(path, index_col=0)
+    if "sample" in rna.columns:
+        # 2026-10-22: 새로 clone한 MMP는 원본 모양(정수 인덱스 + 'sample' 컬럼 TCGA-XX-XXXX-01/-06/-11)이라
+        # HPC에서 손으로 했던 정리를 여기서 재현한다(-01만, 12자 case_id 인덱스, 'sample' 제거, 중복 제거).
+        rna = rna[rna["sample"].str[13:15] == "01"]
+        rna.index = rna["sample"].str[:12].values
+        rna = rna.drop(columns="sample")
+        rna = rna[~rna.index.duplicated()]
+        rna.to_csv(path)
+        print(f"   rna_clean.csv 정리: primary tumor {len(rna)}명 x {rna.shape[1]}유전자")
     return set(rna.index)
 
 
