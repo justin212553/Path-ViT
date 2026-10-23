@@ -41,3 +41,6 @@ sota*
 .kaggle_out
 .vast_out
 data/kaggle_upload_uni2native_paad*
+
+# 2026-10-22 off-HPC compute bundles (HPC -> Vast)
+pathvit_*.tar
