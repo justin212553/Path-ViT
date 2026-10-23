@@ -19,6 +19,8 @@ fi
 
 pip install -q nystrom-attention lifelines h5py huggingface_hub timm wandb pandas scikit-learn tqdm
 pip install -q faiss-cpu   # MMP prototype(k-means)
+# MMP·PORPOISE 공식 코드가 import하는 것(2026-10-23 Vast에서 빠져 있던 것)
+pip install -q transformers opencv-python-headless POT seaborn scikit-survival tensorboardX
 
 # 1) BRCA UNI v1 특징 (Hugging Face 공개 데이터셋, ~48GB) -> 슬라이드별 .pt로 변환(~47GB)
 if [ ! -d data/patches_tcga_brca/tiles ]; then

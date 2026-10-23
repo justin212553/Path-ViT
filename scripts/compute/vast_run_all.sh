@@ -24,10 +24,13 @@ for SEED in "${SEEDS[@]}"; do for FOLD in 0 1 2 3 4; do
   EXP="BRCA_INSTCVQC_officialRNA_seed${SEED}_k${FOLD}::PANTHER_default::${FEAT}"
   if [ -n "$(find "results/${EXP}" -name test_results.pkl 2>/dev/null | head -1)" ]; then
     echo "MMP seed=${SEED} fold=${FOLD} 이미 끝남"; continue; fi
-  [ -f "$PROTO" ] || python -u -m training.main_prototype --mode faiss \
+  # set -e 아래에서 prototype 실패가 스크립트 전체를 멈추지 않도록(2026-10-23: transformers 누락으로 멈춤)
+  if [ ! -f "$PROTO" ] && ! python -u -m training.main_prototype --mode faiss \
       --data_source "${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt" \
       --split_dir "${SPLIT_DIR}" --split_names train --in_dim 1024 --n_proto_patches 100000 \
-      --n_proto 16 --n_init 3 --seed "${SEED}" > "../../.logs/compute_jobs/mmp_proto_s${SEED}_f${FOLD}.log" 2>&1
+      --n_proto 16 --n_init 3 --seed "${SEED}" > "../../.logs/compute_jobs/mmp_proto_s${SEED}_f${FOLD}.log" 2>&1; then
+    echo "!! MMP proto seed=${SEED} fold=${FOLD} 실패 — .logs/compute_jobs/mmp_proto_s${SEED}_f${FOLD}.log"; continue
+  fi
   python -u -m training.main_survival \
       --data_source "${MMP_DATAROOT}/extracted_mag20x_patch256_fp/${FEAT}/feats_pt" \
       --results_dir "results/${EXP}" --split_dir "${SPLIT_DIR}" --split_names train,val,test,external \
