@@ -11,6 +11,11 @@
 set -e
 cd "$(dirname "$0")/../.."
 echo "== repo: $(pwd)"
+# BRCA 특징은 받는 데 48GB, 변환 중 잠깐 ~95GB. 디스크는 인스턴스 생성 뒤 못 늘리므로 먼저 확인.
+FREE_GB=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+if [ ! -d data/patches_tcga_brca/tiles ] && [ "${FREE_GB:-0}" -lt 100 ]; then
+  echo "!! 빈 디스크 ${FREE_GB}GB — 100GB 이상 필요. 디스크 160GB 이상으로 인스턴스를 새로 만들 것"; exit 1
+fi
 
 pip install -q nystrom-attention lifelines h5py huggingface_hub timm wandb pandas scikit-learn tqdm
 pip install -q faiss-cpu   # MMP prototype(k-means)
