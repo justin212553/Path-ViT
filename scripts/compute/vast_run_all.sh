@@ -45,6 +45,10 @@ popd > /dev/null
 python scripts/export_baseline_preds.py mmp --qc || true
 
 # ---- 3) PORPOISE QC 2종 (HPC 묶음이 풀려 있을 때만) ----
+# 묶음이 setup 뒤에 도착했으면 여기서 푼다.
+if [ -f pathvit_bundle_porpoise.tar ] && [ ! -d data/porpoise_style_features ]; then
+  tar -xf pathvit_bundle_porpoise.tar && echo "PORPOISE 묶음 풀림"
+fi
 if [ -d porpoise ] && [ -d data/porpoise_style_features ]; then
   ROOT_ABS="$(pwd)"
   pushd porpoise > /dev/null
