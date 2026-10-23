@@ -25,12 +25,24 @@ if [ ! -d data/patches_tcga_brca/tiles ]; then
   python scripts/_download_brca_hf.py
   cp data/brca_slide_manifest.csv data/brca_slide_manifest.git.csv
   python -m scripts.prepare_brca_data
-  # git의 manifest와 같아야 한다(다르면 같은 코호트가 아님 — 멈추고 확인)
+fi
+if [ -f data/brca_slide_manifest.git.csv ]; then
+  # git의 manifest와 같아야 한다(다르면 같은 코호트가 아님 — 멈추고 확인). git 판은 임상 라벨 수정(2026-09-02)
+  # 전에 만들어져 TCGA-A7-A0DC(슬라이드 2장)를 더 갖고 있다. 학습 코호트는 임상∩RNA∩manifest라
+  # HPC 학습에서도 이 환자는 빠져 있었으므로, 임상 라벨이 있는 환자끼리 비교한다.
   python - <<'PY'
+import os
 import pandas as pd
+c = set(pd.read_csv("data/brca_clinical.csv").case_id)
 a = pd.read_csv("data/brca_slide_manifest.git.csv"); b = pd.read_csv("data/brca_slide_manifest.csv")
-assert set(a.slide_id) == set(b.slide_id), f"manifest 불일치: git {len(a)} vs 새로 만든 것 {len(b)}"
-print("manifest 일치:", len(b), "slides")
+a = a[a.case_id.isin(c)]
+assert set(a.slide_id) == set(b.slide_id), f"manifest 불일치: git(임상 있는 환자) {len(a)} vs 새로 만든 것 {len(b)}"
+j = a.merge(b, on="slide_id", suffixes=("_git", "_new"))
+bad = j[(j.case_id_git != j.case_id_new) | ((j.OS_time_git - j.OS_time_new).abs() > 1e-6) | (j.OS_event_git != j.OS_event_new)]
+assert bad.empty, f"manifest 라벨 불일치 {len(bad)}장: {bad.slide_id.tolist()[:3]}"
+miss = [s for s in b.slide_id if not os.path.exists(f"data/patches_tcga_brca/tiles/{s}/features_uni.pt")]
+assert not miss, f"특징 파일 없는 슬라이드 {len(miss)}장: {miss[:3]}"
+print("manifest 일치:", len(b), "slides,", b.case_id.nunique(), "cases (git 판에서 임상 라벨 없는 환자만 제외)")
 PY
   rm -rf data/raw_brca_hf   # 변환 뒤 원본은 지워 디스크 확보
 fi
