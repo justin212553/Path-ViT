@@ -33,8 +33,14 @@ for s in "${MISSING[@]}"; do
     if [ -f "$p" ]; then FILES+=("$p"); else echo "!! HPC에도 없음: $p"; fi
   done
 done
-tar -cf ~/pathvit_missing9.tar "${FILES[@]}"
-echo "pathvit_missing9.tar: ${#FILES[@]} files, $(du -h ~/pathvit_missing9.tar | cut -f1)"
+# 2026-10-22 확인: 9장은 HPC에도 특징이 없다 -> 원래 학습에서도 빠져 있었음(데이터셋이 특징 없는 슬라이드를 건너뜀).
+# 그래서 Kaggle 데이터셋(268장)이 HPC와 같은 구성이다. 있으면 묶고, 없으면 건너뛴다.
+if [ ${#FILES[@]} -gt 0 ]; then
+  tar -cf ~/pathvit_missing9.tar "${FILES[@]}"
+  echo "pathvit_missing9.tar: ${#FILES[@]} files, $(du -h ~/pathvit_missing9.tar | cut -f1)"
+else
+  echo "9장 모두 HPC에도 없음 — 건너뜀(보조 데이터셋 불필요)"
+fi
 
 # 2) PORPOISE QC split 만들기(이미 있으면 덮어써도 같은 내용) + 묶기
 python -m scripts.prepare_porpoise_paad_n110 --qc
