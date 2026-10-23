@@ -70,6 +70,21 @@ BRCA = {
 }
 
 
+def _cpu_quota():
+    """cgroup CPU quota(코어 수). 제한이 없거나 읽을 수 없으면 None."""
+    try:
+        q, period = open("/sys/fs/cgroup/cpu.max").read().split()
+        return None if q == "max" else int(q) / int(period)
+    except (OSError, ValueError):
+        pass
+    try:
+        q = int(open("/sys/fs/cgroup/cpu/cpu.cfs_quota_us").read())
+        period = int(open("/sys/fs/cgroup/cpu/cpu.cfs_period_us").read())
+        return None if q <= 0 else q / period
+    except (OSError, ValueError):
+        return None
+
+
 def command(cohort, model, seed, fold):
     if cohort == "paad":
         common = (f"--dataset tcga --external --seed {seed} --fold {fold} --n-folds {N_FOLDS} "
@@ -138,6 +153,14 @@ def main():
         except Exception:
             n_gpu = 1
     env_base = dict(os.environ, PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True", WANDB_MODE="offline")
+    # 2026-10-22: Vast 같은 컨테이너는 서버 전체 코어(예: 128)를 보여 주지만 CPU quota는 훨씬 작다(예: ~15).
+    # PyTorch/OpenMP가 보이는 코어 수만큼 스레드를 띄우면 서로 자리다툼만 해 3-4배 느려졌다.
+    # quota가 보이는 코어보다 작을 때만 작업당 스레드를 quota/workers로 묶는다(Kaggle·HPC는 그대로).
+    quota = _cpu_quota()
+    if quota is not None and quota < (os.cpu_count() or 1) and "OMP_NUM_THREADS" not in os.environ:
+        n_thr = str(max(1, int(quota) // args.workers))
+        env_base.update(OMP_NUM_THREADS=n_thr, MKL_NUM_THREADS=n_thr)
+        print(f"CPU quota {quota:.1f} (보이는 코어 {os.cpu_count()}) -> 작업당 스레드 {n_thr}", flush=True)
     t0 = time.time()
     running = {}  # Popen -> (job, log handle, start)
     queue = list(jobs)
