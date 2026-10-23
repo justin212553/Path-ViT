@@ -4,8 +4,8 @@
 #              이미지 pytorch/pytorch 계열(CUDA 12). 접속 후:
 #   cd /workspace && git clone -b qc-rerun https://github.com/justin212553/Path-ViT && cd Path-ViT
 #   bash scripts/compute/vast_setup.sh
-# 그 전에(또는 직후) 로컬에서 git에 없는 파일 하나를 올린다(368MB):
-#   scp -P <port> data/rna_brca_raw_log2.csv root@<host>:/workspace/Path-ViT/data/
+# 그 전에(또는 직후) 로컬 data/brca_rna_upload.zip(RNA 두 개, 359MB)을 Jupyter 업로드나 scp로 올린다:
+#   scp -P <port> data/brca_rna_upload.zip root@<host>:/workspace/Path-ViT/data/
 # PORPOISE까지 돌릴 거면 HPC에서 만든 묶음(scripts/compute/hpc_make_bundle.sh)도 올린다:
 #   scp -P <port> pathvit_bundle_porpoise.tar root@<host>:/workspace/Path-ViT/
 set -e
@@ -30,8 +30,14 @@ PY
   rm -rf data/raw_brca_hf   # 변환 뒤 원본은 지워 디스크 확보
 fi
 
-# 2) git에 없는 BRCA RNA
-[ -f data/rna_brca_raw_log2.csv ] || { echo "!! data/rna_brca_raw_log2.csv 없음 — 로컬에서 scp로 올릴 것"; exit 1; }
+# 2) git에 없는 BRCA RNA 두 개(z-score 본 + fold-safe 재정규화용 원값). 로컬 data/brca_rna_upload.zip을
+#    Jupyter로 /workspace/Path-ViT/data/ 에 올려 두면 여기서 푼다.
+if [ -f data/brca_rna_upload.zip ] && { [ ! -f data/rna_brca.csv ] || [ ! -f data/rna_brca_raw_log2.csv ]; }; then
+  python -m zipfile -e data/brca_rna_upload.zip .
+fi
+for f in data/rna_brca.csv data/rna_brca_raw_log2.csv; do
+  [ -f "$f" ] || { echo "!! $f 없음 — 로컬 data/brca_rna_upload.zip을 data/ 에 올릴 것"; exit 1; }
+done
 
 # 3) MMP 공식 코드 + 우리 split(instcvqc)
 if [ ! -d mmp/src ]; then
