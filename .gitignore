@@ -36,3 +36,8 @@ release
 sota*
 .xlsx
 *.md
+# 2026-10-22 HPC 밖 실행(Kaggle 커널 폴더, 업로드 준비 폴더, 받아 온 출력)
+.kaggle_kernels
+.kaggle_out
+.vast_out
+data/kaggle_upload_uni2native_paad*

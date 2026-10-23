@@ -68,7 +68,9 @@ def _fast_c_index(risk: np.ndarray, time: np.ndarray, event: np.ndarray) -> floa
 
 # scripts/pool_multiseed_kfold_preds.py::_SPECIAL_INFIXES와 동일 — 진단용 변형(FINALEPOCH/
 # SOUP/FULLTRAIN)은 --model-a/--model-b가 명시적으로 요청하지 않는 한 매칭에서 제외한다.
-_SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN")
+# 2026-10-20: "_QC"(OS_time <= 0 제외 재실행, PAAD 태그 _COHN110_QC)도 같은 취급 — 옛 태그가 QC 파일까지
+# 와일드카드로 물어 "여러 파일이 걸림" 오류가 났다. QC 태그를 요청할 때만 QC 파일을 쓴다.
+_SPECIAL_INFIXES = ("FINALEPOCH", "SOUP", "FULLTRAIN", "_QC")
 
 
 def _find_pred_path(pred_dir: Path, dataset: str, model: str, seed: int, fold: int, n_folds: int) -> Path:
@@ -117,6 +119,7 @@ def _load_final_epoch_merged(pred_dir: Path, dataset: str, model: str, seed: int
     fe_matches = [
         p for p in sorted(pred_dir.glob(f"{prefix}*{fe_suffix}"))
         if not p.name[len(prefix):len(prefix) + 1].isdigit()
+        and ("_QC" in model or "_QC" not in p.name)
     ]
     exact = [p for p in fe_matches if p.name == f"{prefix}{fe_suffix}"]  # 접두사 태그 충돌 — _find_pred_path 참고
     if len(fe_matches) > 1 and len(exact) == 1:

@@ -42,6 +42,10 @@ PORPOISE_VARIANTS = {
 }
 MMP_RESULTS = _ROOT / "mmp" / "src" / "results"
 MMP_FEAT = "extracted-vit_large_patch16_224.dinov2.uni_mass100k"
+# 2026-10-22: --qc(OS_time <= 0 제외 재실행)면 아래 세 값이 QC판으로 바뀐다(main 참조)
+MMP_PREFIX = "BRCA_INSTCV_officialRNA"
+MMP_OUTTAG = "MMP_INSTCV"
+MMP_SPLIT_SUFFIX = "instcv"
 N_FOLDS = 5
 
 
@@ -79,11 +83,11 @@ def export_mmp(seeds, out_root: Path):
         for fold in range(N_FOLDS):
             for split, sub in (("test", "kfold_preds"), ("external", "external_preds")):
                 try:
-                    preds = _load_dump(MMP_RESULTS, "BRCA_INSTCV_officialRNA", MMP_FEAT, seed, fold, split)
+                    preds = _load_dump(MMP_RESULTS, MMP_PREFIX, MMP_FEAT, seed, fold, split)
                 except FileNotFoundError as ex:
                     problems.append((seed, fold, f"{split} pkl 없음", [str(ex)]))
                     continue
-                out = out_root / sub / f"brca_MMP_INSTCV_seed{seed}_fold{fold}of{N_FOLDS}.csv"
+                out = out_root / sub / f"brca_{MMP_OUTTAG}_seed{seed}_fold{fold}of{N_FOLDS}.csv"
                 _write(out, preds)
                 print(f"  {sub}/{out.name}: {len(preds)}명")
     _report(problems)
@@ -124,8 +128,8 @@ def check(which, seeds, out_root: Path):
                       any(root.glob(f"**/*_s{seed}/split_latest_val_{fold}_results.pkl")),
                       (out_root / "external_preds" / f"cptac_{PORPOISE_TAG}_seed{seed}_fold{fold}of{N_FOLDS}.csv").exists()]
             else:
-                split_dir = _ROOT / "mmp" / "src" / "splits" / "survival" / f"TCGA_BRCA_k{fold}_seed{seed}_instcv"
-                top = root / f"BRCA_INSTCV_officialRNA_seed{seed}_k{fold}::PANTHER_default::{MMP_FEAT}"
+                split_dir = _ROOT / "mmp" / "src" / "splits" / "survival" / f"TCGA_BRCA_k{fold}_seed{seed}_{MMP_SPLIT_SUFFIX}"
+                top = root / f"{MMP_PREFIX}_seed{seed}_k{fold}::PANTHER_default::{MMP_FEAT}"
                 st = [any((split_dir / "prototypes").glob("prototypes_c16_*.pkl")),
                       any(top.glob("**/test_results.pkl")), any(top.glob("**/external_results.pkl"))]
             for c, ok in zip(cols, st):
@@ -169,6 +173,7 @@ def main():
     ap.add_argument("which", choices=["porpoise", "porpoise_official", "mmp"])
     ap.add_argument("--seeds", type=str, default="84,126,42,168,210")
     ap.add_argument("--out-root", type=str, default=str(_ROOT / ".logs"))
+    ap.add_argument("--qc", action="store_true", help="2026-10-22: OS_time <= 0 제외 재실행 결과(results_*_qc, BRCA_INSTCVQC_*) — 태그에 _QC / INSTCVQC")
     ap.add_argument("--check", action="store_true", help="export하지 않고 25개 (seed, fold) 단계별 상태와 재제출 명령만 출력")
     args = ap.parse_args()
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -176,9 +181,14 @@ def main():
     if which.startswith("porpoise"):
         global PORPOISE_RESULTS, PORPOISE_TAG, PORPOISE_SBATCH
         rdir, PORPOISE_TAG, PORPOISE_SBATCH = PORPOISE_VARIANTS[which]
+        if args.qc:
+            rdir, PORPOISE_TAG = rdir + "_qc", PORPOISE_TAG.replace("N110", "N110_QC")
         PORPOISE_RESULTS = _ROOT / "porpoise" / rdir
         which = "porpoise"
     args.which = which
+    if which == "mmp" and args.qc:
+        global MMP_PREFIX, MMP_OUTTAG, MMP_SPLIT_SUFFIX
+        MMP_PREFIX, MMP_OUTTAG, MMP_SPLIT_SUFFIX = "BRCA_INSTCVQC_officialRNA", "MMP_INSTCVQC", "instcvqc"
     if args.check:
         check(args.which, seeds, Path(args.out_root))
         return

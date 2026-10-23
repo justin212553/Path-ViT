@@ -23,7 +23,7 @@ external: 이 코호트는 어느 (seed, fold) checkpoint로 평가해도 학습
         --include-final-epoch --title "M4 Internal (TCGA-PAAD, pooled)" \\
         --out paper/figures/km_m4_internal_pooled.png
 
-    # external (CPTAC-PDAC, M4, pooled)
+    # external (CPTAC-PDA, M4, pooled)
     python scripts/plot_km_curve_pooled.py --dataset cptac \\
         --model M4_uni2native_INT1500_SS_STG_R_MUT_CLUSTERPOOL_COX_ADD_CLR100_NLLSURV4_NLLCOX1 \\
         --split external --pred-dir paper/m1_m7_final_ablation_preds/external_preds \\
