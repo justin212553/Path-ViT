@@ -196,7 +196,9 @@ def calculate_error(Y_hat, Y):
 
 def make_weights_for_balanced_classes_split(dataset):
     N = float(len(dataset))                                           
-    weight_per_class = [N/len(dataset.slide_cls_ids[c]) for c in range(len(dataset.slide_cls_ids))]                                                                                                     
+    # 2026-10-23: QC 코호트(109명)의 일부 fold는 train에 (생존 구간 x 중도절단) class 하나가 비어 0으로 나누기 오류.
+    # 빈 class는 뽑힐 표본이 없으므로 가중치 0 — class가 다 찬 fold에서는 원래와 같은 값이다.
+    weight_per_class = [N/len(dataset.slide_cls_ids[c]) if len(dataset.slide_cls_ids[c]) > 0 else 0 for c in range(len(dataset.slide_cls_ids))]                                                                                                     
     weight = [0] * int(N)                                           
     for idx in range(len(dataset)):   
         y = dataset.getlabel(idx)                        
