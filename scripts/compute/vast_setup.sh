@@ -62,6 +62,8 @@ done
 if [ ! -d mmp/src ]; then
   git clone https://github.com/mahmoodlab/MMP mmp
 fi
+# 공식 trainer.py 끝의 writer.close()는 정의 안 된 writer를 불러 결과 저장 직전 NameError(2026-10-23). 쓰이지 않으므로 막는다.
+sed -i "s/^    writer.close()$/    # writer.close()  # 공식 코드에 writer 정의가 없어 NameError — 쓰이지 않으므로 막음/" mmp/src/training/trainer.py
 python -m scripts.prepare_mmp_brca_data --mmp-root mmp/src --mmp-dataroot data/mmp_brca_dataroot \
   --protocol instcvqc --seeds 84,126,42,168,210
 
