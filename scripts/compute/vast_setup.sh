@@ -64,6 +64,9 @@ if [ ! -d mmp/src ]; then
 fi
 # 공식 trainer.py 끝의 writer.close()는 정의 안 된 writer를 불러 결과 저장 직전 NameError(2026-10-23). 쓰이지 않으므로 막는다.
 sed -i "s/^    writer.close()$/    # writer.close()  # 공식 코드에 writer 정의가 없어 NameError — 쓰이지 않으므로 막음/" mmp/src/training/trainer.py
+# 같은 파일 validate_survival: 마지막 배치가 1명이면 attention이 2차원이 돼 np.vstack이 실패(seed 168 fold 2 external).
+# 그 배치만 차원을 되살린다 — 모든 배치가 같은 차원인 경우에는 원래와 같다.
+sed -i -E "s/^( +)(all_(omic|cross|path)_attn) = np\.vstack\(\2\)$/\1\2 = np.vstack([x[None] if x.ndim == 2 else x for x in \2])/" mmp/src/training/trainer.py
 python -m scripts.prepare_mmp_brca_data --mmp-root mmp/src --mmp-dataroot data/mmp_brca_dataroot \
   --protocol instcvqc --seeds 84,126,42,168,210
 
