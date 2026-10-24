@@ -44,3 +44,7 @@ data/kaggle_upload_uni2native_paad*
 
 # 2026-10-22 off-HPC compute bundles (HPC -> Vast)
 pathvit_*.tar
+
+# 2026-10-23: no PyTorch tensors/checkpoints in git (features, centroids, checkpoints). Files tracked before this rule stay tracked.
+*.pt
+*.pth
